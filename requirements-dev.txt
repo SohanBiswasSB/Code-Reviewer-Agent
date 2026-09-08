@@ -1,0 +1,10 @@
+# Everything above plus the test and lint tooling.
+#
+#   pip install -r requirements-dev.txt
+#   pytest ; ruff check .
+
+-r requirements-local.txt
+
+pytest
+pytest-asyncio
+ruff

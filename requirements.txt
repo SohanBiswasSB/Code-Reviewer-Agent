@@ -1,16 +1,16 @@
-# Core service. NOTE: intentionally unpinned in this first commit — pin exact
-# versions (pip freeze) before anything is deployed.
+# Core runtime. NOTE: intentionally unpinned in these first commits — pin exact
+# versions (pip freeze > requirements-lock.txt) before anything is deployed.
+#
+#   requirements.txt        this file — the graph + the API
+#   requirements-local.txt  local models: LM Studio client + in-process reranker
+#   requirements-dev.txt    tests + lint
+#
+# The safety-gate suite (python -m eval.harness) deliberately needs NONE of these.
 
-# --- needed to run the graph + API ---
 langgraph
 langgraph-checkpoint-postgres   # AsyncPostgresSaver: durable paused runs (never SQLite/file)
 fastapi
 uvicorn[standard]
 pydantic>=2                     # schemas/ still uses dataclasses; migration is on the roadmap
-
-# --- providers (all adapters are stubs today; add as each is wired) ---
 httpx                           # tools/github_client.py
-openai                          # adapters/llm_openai.py
-boto3                           # adapters/source_s3logs.py
-
-# The eval suite (python -m eval.harness) deliberately needs NONE of the above.
+boto3                           # adapters/source_s3logs.py (log_review surface)

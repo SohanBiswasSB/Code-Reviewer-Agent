@@ -1,0 +1,30 @@
+# The local-model stack. Kept OUT of requirements.txt because sentence-transformers
+# pulls torch (~2.5 GB) and nothing in the graph or the API needs it.
+#
+#   conda activate CodeReviewerAgent
+#   pip install -r requirements-local.txt
+
+-r requirements.txt
+
+# LM Studio speaks the OpenAI wire format, so the same client drives both a
+# hosted provider and http://localhost:1234/v1 — only base_url changes.
+openai
+
+# In-process cross-encoder for ports.Reranker (BAAI/bge-reranker-v2-m3, ~2.3 GB
+# on first use). NOT an LM Studio call — LM Studio exposes no rerank endpoint.
+sentence-transformers
+
+# --- torch, and which build you actually want -------------------------------
+# Installed transitively by sentence-transformers. The default PyPI wheel is
+# what you want on BOTH machines, for different reasons:
+#
+#   Windows / GTX 1060 6 GB -> CPU build is the deliberate choice. LM Studio
+#     already owns all 6 GB of VRAM for the diagnosis model; loading a 568M
+#     cross-encoder beside it risks an OOM during generation. Reranking a
+#     top-100 candidate set on a Ryzen 1700 is a second or two, and it happens
+#     once per run, before any LLM call. See adapters/platforms/cuda.py.
+#     A CUDA build would need:  --index-url https://download.pytorch.org/whl/cu121
+#
+#   Mac / M4 Pro -> the default wheel already carries Metal (mps) support.
+#     Caution: torch and any other OpenMP-shipping wheel loaded in one process
+#     abort on macOS. That is what the doctor check exists for.

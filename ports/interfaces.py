@@ -129,3 +129,24 @@ class Evaluator(Protocol):
     """Score a run: RAG-triad (context-relevance, faithfulness, answer-relevance), G-Eval,
     citation precision, hallucination rate, retrieval metrics."""
     def score(self, run: dict) -> dict: ...
+
+
+# ── hardware / model selection ────────────────────────────────────────────────
+@runtime_checkable
+class Platform(Protocol):
+    """The ONLY thing that knows about hardware. Nothing in nodes/ may branch on it.
+
+    Two orthogonal axes, deliberately not conflated:
+      · runtime()  -> HOW to run (context budget, KV-cache dtype, residency,
+                      threads, torch device). Differs per machine by necessity.
+      · models()   -> WHICH models to run. Comes from a named profile that is
+                      shared across machines, so results stay comparable.
+
+    The default profile must run on EVERY platform. A platform advertises the
+    profiles it can actually hold via `profiles`; asking for one it can't fit is
+    an error, not a silent downgrade to something else.
+    """
+    name: str
+    profiles: tuple[str, ...]        # profiles this hardware can actually hold
+    def runtime(self) -> dict: ...
+    def models(self, profile: str) -> dict: ...   # role -> model id
