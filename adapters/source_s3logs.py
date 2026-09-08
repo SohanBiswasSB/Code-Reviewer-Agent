@@ -1,5 +1,6 @@
 from registry import adapter
 
+
 @adapter("source", "s3logs")
 class S3LogSource:
     """Read the day's CloudWatch->S3 exports for milesone-backend + celery-worker."""

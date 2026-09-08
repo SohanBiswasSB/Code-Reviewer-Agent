@@ -1,6 +1,7 @@
 """RAG-grounded diagnosis via structured output. LLM call is injectable for tests."""
 from __future__ import annotations
-from schemas.diagnosis import Diagnosis, Citation
+
+from schemas.diagnosis import Citation, Diagnosis
 from tools import retrieval
 
 

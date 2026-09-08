@@ -2,12 +2,26 @@
 never imports a concrete provider. Swap providers without touching core/nodes.
 """
 from __future__ import annotations
-from typing import Protocol, Any, runtime_checkable
+
+from typing import Any, Protocol, runtime_checkable
 
 
 @runtime_checkable
 class LLM(Protocol):
-    def complete(self, system: str, user: str, *, json: bool = False) -> str: ...
+    """One bound model. The model id is fixed at construction, NOT passed per call.
+
+    That is deliberate: config.get_llm(role) hands back a different instance for
+    the diagnosis role and the judge role, so a caller physically cannot reuse
+    one model for both and quietly lose the independence property that
+    independent_review depends on.
+
+    `json_schema` requests schema-constrained decoding. Passing a schema is not
+    the same as asking for JSON in the prompt: free-text instructions are
+    advisory and a model can still emit invalid JSON, whereas constrained
+    decoding restricts token choice so the output cannot leave the schema.
+    """
+    model: str
+    def complete(self, system: str, user: str, *, json_schema: dict | None = None) -> str: ...
 
 
 @runtime_checkable

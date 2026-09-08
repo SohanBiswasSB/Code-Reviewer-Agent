@@ -5,6 +5,7 @@ Pydantic v2 (BaseModel) for real validation — the graph state should reject
 malformed GitHub JSON loudly at normalize_evidence, not silently.
 """
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 
 SPARSE_BODY_CHARS = 140  # bodies shorter than this with no repro are "information sparse"

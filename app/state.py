@@ -1,7 +1,8 @@
 """Shared graph state. Surface-agnostic: `target` is a PR ref (code review) OR a
 date (log review); `evidence` is whatever that surface gathered."""
 from __future__ import annotations
-from typing import TypedDict, Literal, Any
+
+from typing import Any, Literal, TypedDict
 
 
 class TriageState(TypedDict, total=False):

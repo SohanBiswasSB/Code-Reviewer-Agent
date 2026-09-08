@@ -1,5 +1,6 @@
 """FastAPI surface — surface-agnostic, plugin-driven (skeleton)."""
 from __future__ import annotations
+
 from fastapi import FastAPI
 
 app = FastAPI(title="Code Reviewer Agent (plug-and-play)")
@@ -22,8 +23,9 @@ def run_surface(surface: str, body: dict):
     """Drive ANY registered surface to the approval gate.
     body: {"target": "<pr_ref | issue_url | YYYY-MM-DD>", "github_token": "..."}
     Returns {thread_id, proposed_action, review_reasoning}."""
-    import config
     from fastapi import HTTPException
+
+    import config
     tenant = body.get("tenant", "_default")
     pol = config.get_tenant_store().policy(tenant, surface)
     if surface not in pol.get("enabled_surfaces", []):

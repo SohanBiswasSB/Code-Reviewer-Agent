@@ -3,7 +3,9 @@
     python -m jobs.daily_log_review --date 2026-09-01
 """
 from __future__ import annotations
-import argparse, datetime as dt
+
+import argparse
+import datetime as dt
 
 
 def main() -> None:

@@ -1,5 +1,6 @@
 """The ONLY node allowed to write. Refuses without approval — checked IN THE NODE."""
 from __future__ import annotations
+
 from tools import github_client
 
 

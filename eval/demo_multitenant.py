@@ -2,9 +2,9 @@
 the SHARED safety net: BOTH escalate when a run isn't groundable; BOTH can approve
 when it is. The per-codebase difference is prompts/risky_areas, not the safety route.
 """
-from schemas.diagnosis import Diagnosis, Citation
-from nodes.independent_review import independent_review
 import config
+from nodes.independent_review import independent_review
+from schemas.diagnosis import Citation, Diagnosis
 
 store = config.get_tenant_store()
 

@@ -1,5 +1,5 @@
 from registry import adapter
-from tools import github_client
+
 
 @adapter("source", "github")
 class GitHubSource:

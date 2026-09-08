@@ -22,9 +22,11 @@ Decisions specific to this machine:
     another OpenMP-shipping wheel in one process abort on macOS.
 """
 from __future__ import annotations
+
 import os
-from registry import adapter
+
 from adapters.platforms import base
+from registry import adapter
 
 MEMORY_BUDGET_GB = 18.0     # of 24 GB unified; leaves macOS + LM Studio headroom
 KV_RESERVE_GB = 3.0         # ~32k context, f16

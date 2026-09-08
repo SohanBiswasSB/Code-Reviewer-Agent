@@ -6,6 +6,7 @@ offline; swap them for Pinecone/pgvector + a real BM25 (or Postgres ts_rank) in
 production. RRF, MMR-dedup and the score-returning contract are real.
 """
 from __future__ import annotations
+
 from dataclasses import dataclass
 
 RRF_K = 60  # standard RRF constant
@@ -64,7 +65,7 @@ def retrieve(query: str, k: int = 5) -> list[Snippet]:
     dense = [cid for cid, _ in _dense_search(query, k * 2)]
     bm25 = [cid for cid, _ in _bm25_search(query, k * 2)]
     fused = reciprocal_rank_fusion([dense, bm25])
-    text = {cid: txt for cid, txt in _CORPUS}
+    text = dict(_CORPUS)
     ordered = sorted(fused.items(), key=lambda x: x[1], reverse=True)[:k]
     # normalise fused score to 0..1-ish for the gate demo (use real cosine in prod)
     top = ordered[0][1] if ordered else 1.0

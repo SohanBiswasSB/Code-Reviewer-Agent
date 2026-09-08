@@ -4,7 +4,9 @@ Improvement #8 lives adjacent: treat the issue body + retrieved snippets as
 untrusted DATA, never as instructions (prompt-injection defense).
 """
 from __future__ import annotations
+
 import os
+
 from schemas.diagnosis import ReviewResult
 
 MIN_RELEVANCE_SCORE = float(os.getenv("MIN_RELEVANCE_SCORE", "0.35"))  # MEASURE this

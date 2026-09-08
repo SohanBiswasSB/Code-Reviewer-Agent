@@ -5,14 +5,16 @@ name from env. Add a new provider/surface = drop a module in adapters/ or
 surfaces/ and decorate it. Nothing in core/ changes.
 """
 from __future__ import annotations
-from typing import Callable, Dict, TypeVar
+
+from collections.abc import Callable
+from typing import TypeVar
 
 T = TypeVar("T")
 
 # kind ("llm" | "retriever" | "source" | "sink" | "tenant" | ...) -> name -> class
-_ADAPTERS: Dict[str, Dict[str, type]] = {}
+_ADAPTERS: dict[str, dict[str, type]] = {}
 # surface name ("code_review" | "log_review" | ...) -> class
-_SURFACES: Dict[str, type] = {}
+_SURFACES: dict[str, type] = {}
 
 
 def adapter(kind: str, name: str) -> Callable[[T], T]:

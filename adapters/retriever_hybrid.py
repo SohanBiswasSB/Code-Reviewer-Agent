@@ -1,5 +1,6 @@
 from registry import adapter
-from tools import retrieval   # the hybrid dense+BM25+RRF implementation
+from tools import retrieval  # the hybrid dense+BM25+RRF implementation
+
 
 @adapter("retriever", "hybrid")          # default
 class HybridRetriever:

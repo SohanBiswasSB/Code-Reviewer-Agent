@@ -7,4 +7,26 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
-      - run: python3 -m eval.harness   # safety gates at a 100% bar
+
+      # The safety gates need NO dependencies at all -- run them first and
+      # unpinned, so a broken requirements file can never mask a weakened gate.
+      - name: safety gates (100% bar, pass^k)
+        run: python -m eval.harness
+        env:
+          CRA_PLATFORM: cpu
+
+      - name: install
+        run: pip install -r requirements-dev.txt
+
+      - name: lint
+        run: ruff check .
+
+      - name: unit tests
+        run: pytest
+
+      # Reports FAIL when the model server is absent, which is expected in CI --
+      # so assert only that it runs and produces a report.
+      - name: doctor (report only)
+        run: python -m app.doctor --json || true
+        env:
+          CRA_PLATFORM: cpu

@@ -1,5 +1,6 @@
 from registry import adapter
 
+
 @adapter("sink", "pr_comment")
 class PRCommentSink:
     def emit(self, action: dict, *, identity: str | None = None) -> dict:

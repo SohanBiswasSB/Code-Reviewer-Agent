@@ -1,5 +1,6 @@
 from registry import surface
 
+
 @surface("log_review")
 class LogReviewSurface:
     name = "log_review"

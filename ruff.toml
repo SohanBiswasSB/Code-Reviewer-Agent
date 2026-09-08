@@ -1,0 +1,16 @@
+line-length = 100
+target-version = "py311"
+exclude = ["__pycache__", ".git"]
+
+[lint]
+select = ["E", "F", "I", "B", "UP", "W", "C4"]
+ignore = [
+  "E731",   # lambda assignment: used intentionally in graph edge predicates
+]
+
+[lint.per-file-ignores]
+# Adapters and surfaces are imported purely for their registration side effect.
+"adapters/__init__.py" = ["F401"]
+"adapters/platforms/__init__.py" = ["F401"]
+"surfaces/__init__.py" = ["F401"]
+"config.py" = ["F401"]

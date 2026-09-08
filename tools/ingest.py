@@ -7,7 +7,8 @@ text-embedding-3-small truncated to 512 dims. delete_all=True before each run.
 """
 
 def main() -> None:
-    raise NotImplementedError("implement ingest: fetch -> chunk -> (contextualize) -> embed -> upsert")
+    raise NotImplementedError(
+        "implement ingest: fetch -> chunk -> (contextualize) -> embed -> upsert")
 
 
 if __name__ == "__main__":

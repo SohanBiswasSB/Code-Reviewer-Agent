@@ -13,9 +13,11 @@ Three hardware facts drive every number below:
     retrieval is meant to keep context tight anyway (docs/BEST_PRACTICES.md §2.2).
 """
 from __future__ import annotations
+
 import os
-from registry import adapter
+
 from adapters.platforms import base
+from registry import adapter
 
 VRAM_BUDGET_GB = 5.0        # of 6 GB; the rest is display + driver overhead
 KV_RESERVE_GB = 1.0         # 8k context at q8_0 KV

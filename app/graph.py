@@ -13,15 +13,16 @@ from __future__ import annotations
 
 
 def build_graph(checkpointer=None):
-    from langgraph.graph import StateGraph, START, END
+    from langgraph.graph import END, START, StateGraph
+
     from app.state import TriageState
-    from nodes.fetch_evidence import fetch_evidence
-    from nodes.normalize_evidence import normalize_evidence
+    from nodes.await_approval import await_approval
     from nodes.classify import classify
+    from nodes.execute import execute
+    from nodes.fetch_evidence import fetch_evidence
     from nodes.generate_diagnosis import generate_diagnosis
     from nodes.independent_review import independent_review
-    from nodes.await_approval import await_approval
-    from nodes.execute import execute
+    from nodes.normalize_evidence import normalize_evidence
 
     g = StateGraph(TriageState)
     for name, fn in [("fetch_evidence", fetch_evidence), ("normalize_evidence", normalize_evidence),

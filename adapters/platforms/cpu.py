@@ -4,9 +4,11 @@ Slow by definition — this exists so the pipeline RUNS everywhere (so the graph
 the gate and the adapters are all exercisable in CI), not so it runs fast.
 """
 from __future__ import annotations
+
 import os
-from registry import adapter
+
 from adapters.platforms import base
+from registry import adapter
 
 RAM_BUDGET_GB = 8.0
 KV_RESERVE_GB = 0.5

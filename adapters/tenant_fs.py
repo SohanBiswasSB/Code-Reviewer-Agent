@@ -4,7 +4,10 @@ Resolution = tenant value overrides _default (prompts: file fallback; policy: de
 Swap for a DB/remote adapter later without touching nodes — same TenantStore port.
 """
 from __future__ import annotations
-import json, os
+
+import json
+import os
+
 from registry import adapter
 
 DEFAULT = "_default"
@@ -13,7 +16,8 @@ DEFAULT = "_default"
 def _deep_merge(base: dict, over: dict) -> dict:
     out = dict(base)
     for k, v in (over or {}).items():
-        out[k] = _deep_merge(base[k], v) if isinstance(v, dict) and isinstance(base.get(k), dict) else v
+        nested = isinstance(v, dict) and isinstance(base.get(k), dict)
+        out[k] = _deep_merge(base[k], v) if nested else v
     return out
 
 

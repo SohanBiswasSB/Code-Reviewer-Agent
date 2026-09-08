@@ -18,12 +18,14 @@ Two roles must never vary by machine, for correctness rather than taste:
     it is CPU-identical everywhere by default. Keep it that way.
 """
 from __future__ import annotations
-from dataclasses import dataclass, asdict, field
+
+from dataclasses import asdict, dataclass, field
 
 # Pinned across every profile and every platform. Changing either invalidates
 # the vector index and de-calibrates every tenant threshold. See docs/ROADMAP.md.
 # Verified against `lms ls` — LM Studio's own id, not the HF repo name.
-EMBEDDING_MODEL = "text-embedding-nomic-embed-text-v1.5"   # 768 dims (NOT 512 like text-embedding-3-small)
+# 768 dims -- NOT the 512 that text-embedding-3-small was truncated to.
+EMBEDDING_MODEL = "text-embedding-nomic-embed-text-v1.5"
 EMBEDDING_DIMS = 768
 EMBEDDING_GB = 0.1
 RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"    # in-process cross-encoder, never an LM Studio call

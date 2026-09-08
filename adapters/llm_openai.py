@@ -1,10 +1,19 @@
 from registry import adapter
 
+
 @adapter("llm", "openai")
 class OpenAILLM:
-    def __init__(self, model: str = "gpt-4o-mini"):
-        self.model = model
-    def complete(self, system: str, user: str, *, json: bool = False) -> str:
-        raise NotImplementedError("wire openai client; return the text (or JSON string)")
+    """Hosted OpenAI. Same bound-model contract as the LM Studio adapter.
 
-# @adapter("llm", "claude") / ("llm", "local") -> drop in more, no core change.
+    Still a stub — the local path is what gets exercised. Kept so the provider
+    swap stays a config change (LLM_PROVIDER=openai) rather than a code change.
+    """
+
+    def __init__(self, model: str = "gpt-4o-mini", runtime: dict | None = None):
+        self.model = model
+        self.runtime = runtime or {}
+
+    def complete(self, system: str, user: str, *, json_schema: dict | None = None) -> str:
+        raise NotImplementedError("wire the openai client; return the text (or JSON string)")
+
+# @adapter("llm", "claude") -> drop in more, no core change.
