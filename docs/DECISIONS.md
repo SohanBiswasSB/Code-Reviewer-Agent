@@ -276,3 +276,31 @@ Dated entries for things that do not fit a section above. Newest last.
 - Established the maintenance rule above: keep this file current every session,
   because the chat context does not travel to the Mac.
 - Still true at the end of the session: **no code path has touched a live model.**
+
+### 2026-09-09 (later) — first end-to-end probe
+
+Stubbed only `tools/github_client.py`'s network calls, gave the graph a real
+`MemorySaver`, and invoked it. Findings, all measured:
+
+- **The spine runs.** fetch -> normalize -> classify -> diagnose ->
+  independent_review -> await_approval all execute, and the run **suspends with
+  `next=('execute',)`**. The approval gate genuinely holds.
+- **`execute` refuses correctly.** Resuming without setting `approved` raises
+  `PermissionError`. The safety guard is real, and it is also why the pipeline is
+  unusable until T3 lands: nothing ever sets that flag.
+- **The gate that actually holds today is `interrupt_before=["execute"]`**, not
+  `await_approval` — which runs, builds a payload, and returns without
+  suspending. Confirms T4: the payload it builds is never surfaced to anyone.
+- **`_policy` and `_surface` are absent from the returned state.** New finding,
+  now T14: the graph never resolves the tenant, so every codebase is gated by
+  `_default`'s thresholds and `classify` ignores the active surface.
+  `demo_multitenant` passes `_policy` by hand, which is why this looked wired.
+- **The checkpointer warns on every state type** (`IssueEvidence`, `Diagnosis`,
+  `Citation`, `ReviewResult`, `Snippet`): "will be blocked in a future version".
+  Now T15 — on a stricter LangGraph, suspended runs become unresumable, which
+  would destroy the durability the approval gate depends on.
+- The diagnosis was the hardcoded stub and the citation came from the 4-document
+  demo corpus, so the `approve` verdict this produced is meaningless as evidence
+  of anything except that the plumbing connects.
+
+Conclusion: the safety machinery works; the useful work does not exist yet.

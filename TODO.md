@@ -145,6 +145,44 @@ a graph run, as a confusing error. And `adapters/platforms/mac.py` is currently
 residency with its arithmetic, LM Studio reachability, per-role model presence,
 and exits non-zero on a real problem.
 
+### T14. The graph never resolves the tenant `[ ]`
+
+Measured, not inferred: a real `invoke()` returns state containing `tenant` and
+`surface` but **no `_policy` and no `_surface`**. `build_graph()` takes neither,
+so nothing between START and the gate ever calls the `TenantStore`.
+
+**Why it matters:** this silently voids the multi-tenant design at runtime.
+`independent_review` falls back to its module-level constants
+(`MIN_RELEVANCE_SCORE = 0.35`, severity low|medium, comment|comment+label), so
+**every codebase is currently gated by `_default`'s thresholds** regardless of
+its `policy.json`. `eval/demo_multitenant.py` passes `_policy` in by hand, which
+is exactly why it looked wired. And with no `_surface`, `classify` takes the
+built-in issue-triage branch even when `surface="code_review"`.
+
+**Done when:** `build_graph(surface, tenant)` (or a resolver node) attaches the
+resolved policy and surface to state before `classify`, and a test asserts a
+strict tenant's threshold actually applies to a graph run rather than to a
+hand-built state dict.
+
+### T15. Dataclasses are not checkpoint-serialisable `[ ]`
+
+Running with a real checkpointer emits, for every state type:
+
+    Deserializing unregistered type schemas.evidence.IssueEvidence from
+    checkpoint. This will be blocked in a future version.
+
+Affects `IssueEvidence`, `Diagnosis`, `Citation`, `ReviewResult` and
+`tools.retrieval.Snippet`.
+
+**Why it matters:** the durable pause is the whole basis of the approval gate. On
+a LangGraph version that enforces this, **every suspended run becomes
+unresumable** — the worst possible failure for a design whose safety property is
+"a paused run is real, durable state". It also blocks T3 from being trustworthy.
+
+**Done when:** state types are Pydantic v2 models (T11 does this) or are
+explicitly registered as allowed msgpack modules, and a test round-trips a
+suspended run through a checkpointer without warnings.
+
 ### T10. Retrieval is a toy `[ ]`
 
 `tools/retrieval.py` runs on a 4-document in-memory corpus. RRF is real; the
