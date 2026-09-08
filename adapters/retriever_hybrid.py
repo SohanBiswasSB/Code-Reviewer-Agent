@@ -14,7 +14,11 @@ class HybridRetriever:
                 "G1: namespace-scoped retrieval needs a real index; the demo corpus "
                 "is unpartitioned. Use the pinecone/pgvector adapter."
             )
-        return [{"id": s.id, "text": s.text, "score": s.score}
+        # "score" is the CALIBRATED relevance, never the rank-fusion value --
+        # gating on a rank makes the grounding check inert (T21). "fusion" is
+        # carried for debugging and ordering transparency only.
+        return [{"id": s.id, "text": s.text, "score": s.relevance,
+                 "fusion": s.fusion, "rank": s.rank}
                 for s in retrieval.retrieve(query, k)]
 
 # @adapter("retriever", "pinecone") / ("retriever", "pgvector") -> swap the backend only.

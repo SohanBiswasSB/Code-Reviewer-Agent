@@ -382,3 +382,37 @@ decision that skips retrieval entirely for the deterministic and human_review
 paths. Not built: reranking (port only), MMR, contextual retrieval, multi-query
 and HyDE fusion, parent-document expansion, AST-aware chunking, and the
 corrective-RAG re-retrieve loop (its prompt exists; no node, and no loop cap).
+
+### 2026-09-09 — T21 closed
+
+Split the retriever's single score into two fields, permanently:
+
+- `Snippet.relevance` — calibrated similarity magnitude. The gate reads this,
+  and `.score` is an alias for it so no existing caller can accidentally end up
+  reading the rank instead.
+- `Snippet.fusion` — the RRF value. Ordering only. Never gate on it.
+
+`relevance_of()` scores the candidate **union**, not just the dense hits,
+because a BM25-only hit would otherwise arrive with no gateable score and pass
+by default.
+
+Measured after the fix: on-topic 0.54–0.88, off-topic and gibberish 0.0. There is
+now a real noise floor, which is the property a calibrated threshold needs.
+
+Two things worth keeping from how this was verified:
+
+1. **The regression test was checked for teeth.** Monkeypatching the old
+   rank-normalised scoring back in makes the off-topic and gibberish tasks
+   *approve* and the suite exit 1. A regression test that cannot fail is not a
+   regression test, and asserting that explicitly is cheap.
+2. **The blind spot was structural, not careless.** Every gate task
+   hand-supplied its scores, which is right for pinning the gate's logic but
+   means the suite could never see whether the gate's input was meaningful. The
+   fix is a small class of tasks that drive the *real* retriever. Worth applying
+   the same suspicion elsewhere: ask of any green suite what it is substituting
+   for the real input.
+
+Not fixed, and still tracked in T10: the demo similarity is a Jaccard proxy on a
+different scale from any embedding model, so the shipped `min_relevance_score`
+values are still uncalibrated. What T21 fixed is the *kind* of number the gate
+receives, not its calibration.

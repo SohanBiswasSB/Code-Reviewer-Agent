@@ -281,7 +281,35 @@ schema, refusal criteria. Missing:
 - **No eval coverage.** No prompt is exercised by any test, so all of the above
   is unverified against a real model.
 
-### T21. CRITICAL — the grounding gate is a no-op on real retrieval output `[ ]`
+### T21. CRITICAL — the grounding gate is a no-op on real retrieval output `[x]`
+
+**CLOSED.** `Snippet` now carries two distinct numbers: `relevance` (calibrated
+similarity, what the gate reads, aliased as `.score`) and `fusion` (the RRF
+value, ordering only). `relevance_of()` scores the candidate *union*, so a
+BM25-only hit cannot arrive without a gateable score and pass by default.
+
+Measured after the fix — on-topic 0.54–0.88, off-topic and gibberish 0.0, so
+there is a real noise floor to calibrate a threshold against:
+
+    ON   "OAuth callback returns 500 when state param missing" -> 0.5385
+    ON   "token refresh race intermittent 401 after login"     -> 0.8750
+    OFF  "banana bread recipe with walnuts"                    -> 0.0
+    JUNK "zzzz qqqq xyzzy plugh"                               -> 0.0
+
+Three new `RETRIEVAL_GATE_TASKS` drive the **real retriever** rather than a
+hand-built score dict, closing the blind spot that hid this. Verified they have
+teeth: monkeypatching the old rank-normalised scoring back in makes the
+off-topic and gibberish tasks **approve** and the suite exit 1. Plus 8 unit
+tests in `tests/test_retrieval.py` pinning the invariants — including that
+`fusion` is query-independent while `relevance` is not, which is the reason the
+two must never be the same field.
+
+Gates 24 -> 27, tests 38 -> 49.
+
+**Still open, and tracked in T10:** the demo similarity is a Jaccard proxy, not
+a cosine. Its scale is not an embedding model's, so the shipped
+`min_relevance_score` values remain uncalibrated until measured against the real
+embedder. What is fixed is the *kind* of quantity the gate receives.
 
 `tools/retrieval.py::retrieve()` ends with:
 

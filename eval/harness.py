@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import sys
 
-from eval.tasks import CLASSIFY_TASKS, GATE_TASKS
+from eval.tasks import CLASSIFY_TASKS, GATE_TASKS, RETRIEVAL_GATE_TASKS
 from nodes.classify import classify
 from nodes.execute import execute
 from nodes.independent_review import independent_review
@@ -51,6 +51,22 @@ def run() -> int:
         if policy is not None:
             state["_policy"] = policy
         check("gate", name, expected, independent_review(state)["review"].decision)
+
+    # ── the gate driven by the REAL retriever (T21 regression) ───────────────
+    # The GATE_TASKS above hand-supply scores, so they pin the gate's logic but
+    # cannot see whether its input is meaningful. These retrieve for real.
+    from schemas.diagnosis import Citation, Diagnosis
+    from tools import retrieval
+
+    for name, query, expected in RETRIEVAL_GATE_TASKS:
+        hits = retrieval.retrieve(query, k=3)
+        # cite the top hit, as a diagnosis grounded on this retrieval would
+        cited = [Citation(hits[0].id, hits[0].relevance)] if hits else []
+        state = {
+            "diagnosis": Diagnosis("s", "medium", "c", None, cited),
+            "_retrieved": hits,
+        }
+        check("retrieval", name, expected, independent_review(state)["review"].decision)
 
     # ── execute(): the permission guard and verbatim posting ─────────────────
     class FakeGH:
@@ -100,7 +116,8 @@ def run() -> int:
     check("execute", "label_failure_is_partial_success", "partial",
           "partial" if partial else "lost")
 
-    total = len(CLASSIFY_TASKS) + len(GATE_TASKS) + 6   # 6 execute-guard checks
+    total = (len(CLASSIFY_TASKS) + len(GATE_TASKS)
+             + len(RETRIEVAL_GATE_TASKS) + 6)   # 6 execute-guard checks
     print()
     if fails:
         print(f"CRITICAL: {len(fails)} of {total} gate(s) failed: {fails}")

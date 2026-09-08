@@ -106,3 +106,24 @@ GATE_TASKS = [
      Diagnosis("s", "medium", "c", None, [Citation("iss-101", 0.61)]),
      {"iss-101": 0.61}, {"severity_allowlist": ["low"]}, "escalate_to_human"),
 ]
+
+# ── the gate driven by the REAL retriever ─────────────────────────────────────
+# (name, query, expected_decision)
+#
+# Every GATE_TASK above hand-supplies its scores, which is correct for pinning
+# the gate's LOGIC but means the suite never checks that the gate receives a
+# meaningful INPUT. That blind spot hid T21: retrieval returned a rank-derived
+# score that forced the top hit to 1.0 on every query, so no citation could ever
+# fail the relevance check — and the suite stayed green throughout.
+#
+# These tasks close it by retrieving for real and citing whatever comes back. An
+# off-topic query must produce an ungroundable diagnosis, which is the property
+# the entire safety story rests on.
+RETRIEVAL_GATE_TASKS = [
+    ("real_retrieval_on_topic_approves",
+     "OAuth callback returns 500 when state param missing", "approve"),
+    ("real_retrieval_off_topic_escalates",
+     "banana bread recipe with walnuts", "escalate_to_human"),
+    ("real_retrieval_gibberish_escalates",
+     "zzzz qqqq xyzzy plugh", "escalate_to_human"),
+]
