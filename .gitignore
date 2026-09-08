@@ -20,7 +20,10 @@ env/
 .ipynb_checkpoints/
 
 # Editors / OS
-.vscode/
+# .vscode/settings.json IS committed (shared editor behaviour, see
+# docs/DECISIONS.md); everything else under .vscode is local.
+.vscode/*
+!.vscode/settings.json
 .idea/
 .DS_Store
 Thumbs.db

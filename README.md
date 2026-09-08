@@ -52,6 +52,9 @@ routes to a human on the same conditions. See [docs/MULTI_TENANT.md](docs/MULTI_
 ```bash
 conda activate CodeReviewerAgent
 
+# can this machine run the agent? platform, models, memory arithmetic, gates
+python -m app.doctor
+
 # safety-gate regression suite — needs NO dependencies at all
 python -m eval.harness
 
@@ -62,7 +65,20 @@ python -m eval.demo_multitenant
 python -c "import json, config; print(json.dumps(config.registered(), indent=2))"
 ```
 
-Everything beyond that needs `pip install -r requirements.txt`.
+Everything beyond that needs `pip install -r requirements-dev.txt`.
+
+### Working on two machines
+
+This is developed on both an M4 Pro Mac and a CUDA desktop, and neither is the
+"real" one. `CRA_PLATFORM` (auto-detected) decides *how* to run; `CRA_PROFILE`
+decides *which* models — and the default profile is sized to fit the smaller
+machine so results stay comparable. Interpreter paths, model download commands,
+per-machine LM Studio settings and every decision behind this live in
+**[docs/DECISIONS.md](docs/DECISIONS.md)**. Start there on a fresh clone.
+
+```bash
+python -m app.doctor          # tells you what this machine is missing
+```
 
 ## Layout
 
@@ -74,7 +90,10 @@ Everything beyond that needs `pip install -r requirements.txt`.
 | `surfaces/` | Capabilities (`code_review`, `log_review`) via `@surface(name)`. |
 | `tenants/` | One directory per codebase: policy + prompt overrides. |
 | `registry.py`, `config.py` | The plug: decorators register, env resolves. |
-| `eval/` | Safety-gate suite, 100% bar, `pass^k` semantics. |
+| `eval/` | Safety-gate suite, 100% bar, `pass^k` semantics. Dependency-free. |
+| `tests/` | Unit tests. Deliberately separate from the gate suite. |
+| `app/doctor.py` | Environment check. Stdlib only, so it runs before setup does. |
+| `adapters/platforms/` | The only code that knows about hardware. |
 | `docs/` | Architecture, the honest gap map, roadmap, standards. |
 
 ## Status — what runs vs. what is stubbed
@@ -100,3 +119,6 @@ Scope cuts are represented in the schema and documented in the node docstrings, 
 - [docs/BEST_PRACTICES.md](docs/BEST_PRACTICES.md) — accuracy-first engineering standards
 - [docs/MULTI_TENANT.md](docs/MULTI_TENANT.md) — how a codebase plugs in
 - [docs/MILESONE_ADAPTATION.md](docs/MILESONE_ADAPTATION.md) — the two concrete surfaces
+- [docs/DECISIONS.md](docs/DECISIONS.md) — **cross-machine handoff**: what was decided and why, machine specs, model downloads, things discovered the hard way
+- [TODO.md](TODO.md) — the code-level worklist (T1–T13), with "done when" for each
+- [MODEL_CARD.md](MODEL_CARD.md) — scope limits and known failure modes

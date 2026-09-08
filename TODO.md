@@ -215,8 +215,10 @@ eval `[ ]`.
 - [x] `MODEL_CARD.md` — scope limits, as SF-Crime has. States plainly: this agent
       never pushes code, only comments; it acts as the approving human's identity;
       it never mutates infrastructure or a database.
-- [ ] `.vscode/settings.json` — SF-Crime commits the interpreter path. Two
-      machines means one committed path is wrong on the other; needs a decision.
+- [x] `.vscode/settings.json` — committed, but WITHOUT an interpreter path:
+      one committed path is wrong on the other machine, so it is selected per
+      machine instead. Both paths are in docs/DECISIONS.md section 1. Also sets
+      python.analysis.extraPaths, which fixes the spurious import errors.
 - [ ] `requirements-lock.txt` — `pip freeze` once the environment is real
 - [x] `.gitattributes` (eol=lf) — 97bf3a9. Load-bearing with two machines.
 - [x] Split requirements (core / -local / -dev) — 97bf3a9
