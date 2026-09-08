@@ -1,0 +1,15 @@
+{
+  "enabled_surfaces": ["code_review", "log_review"],
+  "code_review": {
+    "min_relevance_score": 0.35,
+    "severity_allowlist": ["low", "medium"],
+    "allowed_actions": ["comment", "comment+label"],
+    "risky_areas": ["migrations", "auth", "permission", "credly", "celery", "routing"]
+  },
+  "log_review": {
+    "min_relevance_score": 0.30,
+    "severity_allowlist": ["low", "medium"],
+    "allowed_actions": ["report"],
+    "anomaly_threshold": 5
+  }
+}

@@ -1,1 +1,102 @@
-# Code-Reviewer-Agent
+# Code Reviewer Agent
+
+A multi-tenant, plug-and-play **agentic code-review microservice**. One guarded agent
+graph is reused across pluggable *surfaces* (PR code review, daily log review), and each
+plugged-in codebase brings its own prompts and its own guardrail policy.
+
+The design bet, in one line: **detectors and tools find, the LLM explains and prioritizes,
+and code decides.** The LLM is never the source of truth and never emits the verdict.
+
+## The graph
+
+```
+target (PR ref | issue url | YYYY-MM-DD)
+  └─ fetch_evidence → normalize_evidence → classify   (RULE-BASED, zero LLM calls)
+        ├─ deterministic     → await_approval → execute → END
+        ├─ human_review      → END                       (no LLM touches it)
+        └─ ai_investigation  → generate_diagnosis        (RAG-grounded, cited)
+                             → independent_review        (SEPARATE LLM call; EXPLAINS only)
+                                  │ decision = 3 Python booleans over real data:
+                                  │   groundedness_ok · risk_ok · permission_ok
+                                  ├─ approve           → await_approval → execute → END
+                                  └─ escalate_to_human → END
+```
+
+## Non-negotiable invariants (not tenant-overridable)
+
+1. **The judge never emits a verdict.** `independent_review` asks a second, independent LLM
+   for free-text `reasoning` only; the approve/escalate decision is three booleans computed
+   in Python from the retrieved scores, the severity allowlist, and the action allowlist.
+2. **`execute` refuses without approval, checked in the node body** — not just in graph
+   routing. A future shortcut edge straight to `execute` still cannot bypass the gate.
+3. **The approved action is posted verbatim**, never recomputed after approval.
+4. **Evidence is untrusted data, never instructions** (diffs and log lines can carry
+   injected text).
+5. **Nothing mutates infra or the database.** The agent proposes; a human approves; writes
+   run as the approver's own identity.
+
+Tenants tune *values* (thresholds, allowlists, prompts). They cannot remove a *boundary*.
+
+## Multi-tenant = multi-codebase
+
+A "tenant" is one codebase. `tenants/<name>/policy.json` carries the `codebase` binding
+plus thresholds; `tenants/<name>/prompts/<surface>/<node>.md` overrides prompts. Everything
+falls back to `tenants/_default/` (prompts by file lookup, policy by deep merge).
+
+The same diagnosis can be **approved for one codebase and escalated for another**, purely
+from policy — no code change. Escalate-to-human is deliberately **shared**: every codebase
+routes to a human on the same conditions. See [docs/MULTI_TENANT.md](docs/MULTI_TENANT.md).
+
+## Quickstart
+
+```bash
+conda activate CodeReviewerAgent
+
+# safety-gate regression suite — needs NO dependencies at all
+python -m eval.harness
+
+# same diagnosis, two codebases, different policies
+python -m eval.demo_multitenant
+
+# what's plugged into this deployment
+python -c "import json, config; print(json.dumps(config.registered(), indent=2))"
+```
+
+Everything beyond that needs `pip install -r requirements.txt`.
+
+## Layout
+
+| Path | Role |
+|---|---|
+| `ports/interfaces.py` | The contracts. Core imports **only** these, never a provider. |
+| `nodes/`, `app/graph.py` | The core graph. Holds the safety design. |
+| `adapters/` | Concrete providers, self-registering via `@adapter(kind, name)`. |
+| `surfaces/` | Capabilities (`code_review`, `log_review`) via `@surface(name)`. |
+| `tenants/` | One directory per codebase: policy + prompt overrides. |
+| `registry.py`, `config.py` | The plug: decorators register, env resolves. |
+| `eval/` | Safety-gate suite, 100% bar, `pass^k` semantics. |
+| `docs/` | Architecture, the honest gap map, roadmap, standards. |
+
+## Status — what runs vs. what is stubbed
+
+**Runs today:** the rule-based `classify` routing, the three-boolean gate (including
+tenant-policy resolution), the `execute` permission guard, the plugin registry, the
+filesystem tenant store, and hybrid retrieval (dense + BM25 fused with RRF) over a small
+in-memory corpus.
+
+**Stubbed, deliberately and visibly** (`NotImplementedError`, not fake success): the GitHub
+and GitLab clients, the S3 log source, the OpenAI client, the vector index and ingest,
+`interrupt()`/resume with a real checkpointer, and the `/run` + `/approve` endpoints.
+
+Scope cuts are represented in the schema and documented in the node docstrings, in
+[docs/ROADMAP.md](docs/ROADMAP.md), and in [docs/ARCHITECTURE_GAPS.md](docs/ARCHITECTURE_GAPS.md)
+(G1–G17, prioritized P0–P2). A precisely-owned gap reads better than a vague claim.
+
+## Docs
+
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — as-built system view (single source of truth)
+- [docs/ARCHITECTURE_GAPS.md](docs/ARCHITECTURE_GAPS.md) — honest audit, G1–G17
+- [docs/ROADMAP.md](docs/ROADMAP.md) — prioritized work + accuracy track
+- [docs/BEST_PRACTICES.md](docs/BEST_PRACTICES.md) — accuracy-first engineering standards
+- [docs/MULTI_TENANT.md](docs/MULTI_TENANT.md) — how a codebase plugs in
+- [docs/MILESONE_ADAPTATION.md](docs/MILESONE_ADAPTATION.md) — the two concrete surfaces
