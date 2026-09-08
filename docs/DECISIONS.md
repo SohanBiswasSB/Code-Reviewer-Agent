@@ -627,3 +627,134 @@ Defaulting low would auto-approve whatever the model failed to express clearly �
 the wrong direction to fail, and an easy mistake to make while writing a parser.
 
 Tests 63 to 96. Gates 32. ruff clean.
+
+### 2026-09-09 — the org contract was not actually generic
+
+Asking "what does T6 even mean" turned up a design leak worth recording. The
+shared `_default` code-review prompt opened *"You are a senior reviewer of the
+MilesOne Django + Celery backend"*, and its scrutiny list named Credly and
+Celery; the log contract named the backend and celery-worker streams and the Zoom
+sweep. Since `_default` is prepended to every tenant, **every other project was
+being told it was reviewing MilesOne.**
+
+`_default` now carries the guardrails plus universal risk categories that hold
+regardless of stack — migrations, auth boundaries, credential handling,
+concurrency and background work, data access and transactions, external calls,
+injection, observability. The MilesOne material moved into `tenants/milesone/`,
+including a new `log_review/diagnosis.md` for that service's patterns. A test
+fails if project vocabulary reappears in `_default`.
+
+Also added `tenants/_template/` to copy when onboarding, and `tenants()` now
+excludes any `_`-prefixed directory rather than excluding `_default` by name, so
+neither the template nor a future one can register itself as a real project.
+
+### 2026-09-09 — T11, T15, T17, T22 closed
+
+**T15 was the dangerous one.** LangGraph warned on every state type that
+"deserializing unregistered type … will be blocked in a future version". On a
+release that enforces it, **every paused run becomes unresumable** — which
+destroys the single property the whole design rests on, since a durable pause is
+what makes the approval gate real rather than a UI illusion. Verified rather than
+assumed: the suite passes with `LANGGRAPH_STRICT_MSGPACK=true`, CI now runs it
+twice (once strict) so it cannot regress quietly, and a unit test round-trips
+every state type through `JsonPlusSerializer`.
+
+**T11** — Pydantic v2. `IssueEvidence` and `CodeChange` use `extra="forbid"`: an
+unexpected provider field means the payload shape changed, and finding that out
+at the edge beats finding out when a node reads something no longer there.
+
+**T17** — `Diagnosis` gains `findings[]`, and the org contract stopped asking the
+model for citation *scores* (they come from the retriever; asking invites the
+wrong assumption even though the parser ignores them).
+
+**T22** — the third grounding check exists. A new `Entailer` port, defaulting to
+**lexical** content-word overlap: crude, but *code* rather than a model, because
+the gate's booleans must be computable with no provider reachable or the safety
+suite stops being runnable everywhere. A cross-encoder NLI adapter sits behind
+the same port. Both return a **score** that `independent_review` thresholds — a
+port returning a boolean would be making the decision. `ReviewResult` now carries
+four booleans plus a `failures` list, because a gate that only says "escalated"
+makes the human redo the diagnosis to find out what tripped.
+
+Two things this exposed, both worth keeping:
+
+- **The eval fixtures were degenerate.** `Diagnosis("s","medium","c")` with empty
+  snippet text pinned the id and score checks but made entailment impossible to
+  exercise — you cannot ask whether "c" follows from "". That is the **third**
+  time a degenerate fixture hid a real defect (T21's constant scores, T5's
+  evidence shape). The tasks are now written as a real diagnosis and a real
+  snippet would be, with an entailed claim and an overreaching one.
+- **The offline stub modelled an ungrounded diagnosis.** It asserted "possible
+  duplicate of a known auth regression", which entails nothing about whatever was
+  retrieved, so once entailment existed every offline run escalated. It now
+  derives its claim from the cited passage.
+
+Gates 32 to 36. Tests 96 to 101.
+
+---
+
+## 9. RESUME HERE (session ended 2026-09-09)
+
+Everything below is current as of commit `6c1029a`, working tree clean, all
+commits pushed to `ID_SB_Ongoing_Development_Branch`.
+
+### State
+
+```
+ruff check .   clean
+pytest         101 passed
+eval.harness   36 gates pass (pass^k)
+app.doctor     exits 1 only because LM Studio is not running
+TODO.md        18 of 23 closed, 5 partial
+```
+
+**All of P0 is closed.** The pipeline runs end to end offline: resolve tenant ->
+fetch -> normalise -> classify -> retrieve -> diagnose -> independent review
+(4 code-computed booleans) -> `interrupt()` -> human approves -> single guarded
+write. `/run`, `/approve` and `/runs/{id}` work over HTTP.
+
+### Still open, in the order I would take them
+
+1. **T12 InputGuard** — nothing redacts PII or secrets before evidence reaches a
+   provider. The fencing added in T20 is *delimiting*, not redaction, so
+   "evidence is untrusted" is still partly enforced by prompt wording — which the
+   prompts themselves say is not a boundary. Plan: `@adapter("guard","regex")`
+   for emails/phones/tokens/keys plus injection-phrase neutralisation, applied in
+   `nodes/_render.py` before any provider call, recording what it redacted.
+2. **T13 Reranker** — port defined, no adapter. Plan: a lexical default (so it
+   works offline) plus a `sentence-transformers` CrossEncoder behind the same
+   port, wired as retrieve-wide-then-rerank in `generate_diagnosis`. **Note:** per
+   T21's lesson, the reranker's calibrated score should then *supersede* the dense
+   relevance as the number the gate reads.
+3. **T23 Tracer** — no run records its retrieved ids, scores, citations, booleans
+   or the prompt actually sent. Plan: a stdlib JSONL tracer, which also gets G6
+   (AuditSink) most of the way. Remember **T21 would have been obvious in a trace**
+   showing every score as 1.0.
+4. **T19 / T20 leftovers** — delete the duplicate `prompts/*.md` (they duplicate
+   `tenants/_default/prompts/**` with nothing preventing drift); add few-shot
+   exemplars to the org contract; add a prompt-level eval.
+5. **T10 Retrieval** — the big one. Real index + idempotent namespaced ingest, and
+   then **re-measure every `min_relevance_score`**: the shipped 0.35/0.40 were
+   calibrated for `text-embedding-3-small`@512 dims and mean nothing for the
+   768-dim embedder. Method is in the PDF: score on-topic vs off-topic queries and
+   set the bar above the noise cluster.
+6. **T1 live** — nothing has yet called a real model. Needs the models downloaded
+   (see section 3.4) and `lms server start`.
+
+### Two things only you can answer
+
+- **The tenant list.** `tenants/project_a` **is** MilesOne (so it is duplicated)
+  and `project_b` stands in for Masterclass. Real names + repo, language, 2–4
+  risky areas, and the signature failure mode per project. `tests/test_tenants.py`,
+  `tests/test_graph_resume.py` and `eval/demo_multitenant.py` reference the
+  placeholders and need updating alongside.
+- **Mac verification.** Every number in `adapters/platforms/mac.py` is reasoned,
+  not measured. `python -m app.doctor` there is the first step.
+
+### Recurring lesson, stated once
+
+Three separate defects were invisible because a green suite was substituting
+something convenient for the real input: T21 (hand-supplied scores hid a constant
+relevance), T5 (hand-built post-normalise evidence hid an evidence-shape
+mismatch), T22 (degenerate fixtures made a whole check unexercisable). When a
+suite passes, ask what it is standing in for.
