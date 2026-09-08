@@ -145,8 +145,11 @@ class Platform(Protocol):
     The default profile must run on EVERY platform. A platform advertises the
     profiles it can actually hold via `profiles`; asking for one it can't fit is
     an error, not a silent downgrade to something else.
+
+    Residency is COMPUTED from the profile's weight cost against a per-platform
+    memory budget, not declared — which is why runtime() takes the profile.
     """
     name: str
     profiles: tuple[str, ...]        # profiles this hardware can actually hold
-    def runtime(self) -> dict: ...
+    def runtime(self, profile: str) -> dict: ...
     def models(self, profile: str) -> dict: ...   # role -> model id

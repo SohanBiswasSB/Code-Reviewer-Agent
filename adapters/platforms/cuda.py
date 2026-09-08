@@ -17,6 +17,9 @@ import os
 from registry import adapter
 from adapters.platforms import base
 
+VRAM_BUDGET_GB = 5.0        # of 6 GB; the rest is display + driver overhead
+KV_RESERVE_GB = 1.0         # 8k context at q8_0 KV
+
 
 @adapter("platform", "cuda")
 class CudaPlatform:
@@ -24,7 +27,9 @@ class CudaPlatform:
     # 6 GB cannot hold mac_headroom's ~15 GB of weights. Not offered.
     profiles = ("portable",)
 
-    def runtime(self) -> dict:
+    def runtime(self, profile: str = base.DEFAULT_PROFILE) -> dict:
+        models = base.resolve(profile, self.profiles)
+        residency, accounting = base.plan_residency(models, VRAM_BUDGET_GB, KV_RESERVE_GB)
         cpus = os.cpu_count() or 8
         return {
             # NOT "cuda". LM Studio already owns all 6 GB for the diagnosis
@@ -34,12 +39,14 @@ class CudaPlatform:
             "reranker_device": "cpu",
             "llm_backend": "cuda",        # LM Studio: llama.cpp CUDA runtime
             "quant": "Q4_K_M",            # GGUF; Pascal has no FP16 fast path
+            "lms_format_flag": "--gguf",  # what `lms get` needs on this machine
             "context": 8192,              # KV cache shares the 6 GB with weights
             "kv_cache_dtype": "q8_0",     # ~halves KV cost vs f16
-            "residency": "jit_swap",      # cannot hold diagnosis + judge together
+            "residency": residency,       # computed: 6 GB cannot hold both
             "gpu_layers": -1,             # offload all layers that fit
             "threads": max(1, cpus // 2), # physical cores; SMT does not help llama.cpp
             "flash_attention": True,
+            "memory": accounting,
         }
 
     def models(self, profile: str = base.DEFAULT_PROFILE) -> dict:

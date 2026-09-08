@@ -105,7 +105,7 @@ def registered() -> dict:
     }
     out["hardware"] = {
         "detected": detect_platform(),
-        "runtime": plat.runtime(),
+        "runtime": plat.runtime(get_profile()),
         "models": get_models(),
         "embedding_dims": _profiles.EMBEDDING_DIMS,
     }
