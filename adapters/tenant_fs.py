@@ -110,5 +110,12 @@ class FsTenantStore:
         return pol
 
     def tenants(self) -> list[str]:
-        return [d for d in os.listdir(self.root)
-                if os.path.isdir(os.path.join(self.root, d)) and d != DEFAULT]
+        """Real codebases only.
+
+        An underscore prefix marks a directory that is NOT a project: `_default`
+        is the org contract, `_template` is the skeleton to copy. Excluding by
+        prefix rather than by name means adding another such directory does not
+        silently register itself as a tenant that doctor and the tests iterate.
+        """
+        return [d for d in sorted(os.listdir(self.root))
+                if os.path.isdir(os.path.join(self.root, d)) and not d.startswith("_")]

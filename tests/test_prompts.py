@@ -162,14 +162,47 @@ def test_the_pinned_prompt_is_what_gets_sent(resolved_state):
 
 def test_evidence_goes_in_the_user_turn_and_is_fenced(resolved_state):
     """System content is trusted operator instruction; a diff is not. Fencing
-    gives an injected "ignore the above" a visible boundary to be inside of."""
+    gives an injected "ignore the above" a visible boundary to be inside of.
+
+    Asserts on the CONTENT, not on the fence marker: the org contract legitimately
+    *mentions* the marker while explaining the convention, so checking for the
+    string alone would fail on a correct prompt. The property that matters is that
+    the untrusted material itself never reaches the system turn.
+    """
     from nodes.generate_diagnosis import generate_diagnosis
 
     llm = _Recorder(DIAGNOSIS_JSON)
     generate_diagnosis(resolved_state, llm=llm, retriever=_FixedRetriever())
     call = llm.calls[0]
+
+    diff_body = RAW_PR["diff"]
+    assert diff_body in call["user"], "the change must reach the model"
+    assert diff_body not in call["system"], (
+        "untrusted evidence must never enter the system turn, which carries "
+        "trusted operator authority"
+    )
+    # and it must be fenced where it does appear
     assert "UNTRUSTED_EVIDENCE" in call["user"]
-    assert "UNTRUSTED_EVIDENCE" not in call["system"]
+
+
+def test_the_org_contract_is_free_of_any_project_specifics():
+    """The regression guard for the leak this split fixed.
+
+    `_default` is shared by every codebase, so a project's stack, service or
+    vendor names must not appear in it. They had: the default code-review prompt
+    opened "You are a senior reviewer of the MilesOne Django + Celery backend",
+    so every OTHER project was told it was reviewing MilesOne. Cheap to check,
+    and invisible without a check.
+    """
+    project_vocabulary = ["milesone", "credly", "zoom", "django", "celery",
+                          "masterclass", "cloudwatch"]
+    for path in pathlib.Path("tenants/_default/prompts").rglob("*.md"):
+        text = path.read_text(encoding="utf-8").lower()
+        found = [word for word in project_vocabulary if word in text]
+        assert not found, (
+            f"{path} is the shared org contract but names {found} — move that "
+            f"into the owning tenant's overlay"
+        )
 
 
 def test_the_namespace_reaches_the_retriever(resolved_state):
