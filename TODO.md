@@ -44,7 +44,7 @@ to avoid. The platform layer already resolves both ids; nothing consumes them.
 **Done when:** `get_llm("diagnosis")` / `get_llm("judge")` resolve distinct models
 from the active profile, and asking for a role the profile does not define raises.
 
-### T3. The resume path does not exist `[ ]`
+### T3. The resume path does not exist `[x]`
 
 `await_approval` builds an interrupt payload but never calls `interrupt()`.
 Nothing ever writes `approved` into state. `app/deps.py::make_checkpointer()`
@@ -59,7 +59,25 @@ the pipeline is unusable. A paused run is also supposed to be durable state
 survives a process restart, `POST /approve` resumes on the same `thread_id` with
 `Command(resume=True/False)`, and approval sets `approved` so `execute` proceeds.
 
-### T4. Double approval gate `[ ]`
+**CLOSED.** `await_approval` calls `interrupt(payload)`; it is the sole writer of
+`approved`, taken only from the resume value. `make_checkpointer()` returns
+`AsyncPostgresSaver` when `DATABASE_URL` is set and warns loudly on the
+MemorySaver fallback. `/run/{surface}`, `/approve`, `/runs/{thread_id}` are
+implemented and async, because `AsyncPostgresSaver` requires the async path —
+writing them synchronously would have locked the service to the in-memory saver.
+
+Verified against the real graph: suspends at `await_approval`; `resume=True`
+posts; `resume=False` raises `PermissionError`; `{"approved": True}` posts;
+`"yes please"`, `1` and `{"approved": "yes"}` are all refused. HTTP end to end:
+`/run` returns `awaiting_approval` with the action, reasoning and policy version;
+`/approve` executes or returns `refused`.
+
+**Still open:** durability across a real restart is untested — only MemorySaver
+has been exercised, so the Postgres path is written but unproven. The pause
+surviving a restart is the half of this that matters most, and it is not yet
+demonstrated.
+
+### T4. Double approval gate `[x]`
 
 `app/graph.py` compiles with `interrupt_before=["execute"]` *and* routes through
 `await_approval`. Two mechanisms for one gate.
@@ -70,6 +88,17 @@ silently leave the other as the only gate. Pick `interrupt()` inside
 
 **Done when:** exactly one mechanism remains, and a test asserts a run suspends
 before any write.
+
+**CLOSED.** `interrupt_before` dropped; `await_approval` owns the gate by calling
+`interrupt()`. That is the right half to keep because the payload matters — the
+approver sees the exact action, the judge's reasoning and the policy version,
+whereas `interrupt_before` suspends with no indication of what is about to
+happen. A gate whose contents the approver cannot see is a rubber stamp.
+
+`execute`'s in-node `PermissionError` was NOT the mechanism removed: routing
+decides whether execute is reached, the guard re-establishes the precondition
+regardless of how it was reached. `build_graph` now also refuses to compile
+without a checkpointer, since `interrupt()` suspends by persisting.
 
 ### T5. Nodes bypass their own ports (G2) `[ ]`
 
@@ -145,7 +174,7 @@ a graph run, as a confusing error. And `adapters/platforms/mac.py` is currently
 residency with its arithmetic, LM Studio reachability, per-role model presence,
 and exits non-zero on a real problem.
 
-### T14. The graph never resolves the tenant `[ ]`
+### T14. The graph never resolves the tenant `[x]`
 
 Measured, not inferred: a real `invoke()` returns state containing `tenant` and
 `surface` but **no `_policy` and no `_surface`**. `build_graph()` takes neither,
@@ -163,6 +192,27 @@ built-in issue-triage branch even when `surface="code_review"`.
 resolved policy and surface to state before `classify`, and a test asserts a
 strict tenant's threshold actually applies to a graph run rather than to a
 hand-built state dict.
+
+**CLOSED** as a `resolve_tenant` node rather than a `build_graph` argument, on
+purpose: running inside the graph means the resolved policy lands in the
+checkpoint, so a run that pauses and resumes hours later is judged against the
+policy it *started* with even if the tenant edits `policy.json` meanwhile. That
+is the substance of G8, and compile-time binding would have thrown it away.
+`_policy_version` (a content hash) is pinned alongside and shown to the approver.
+
+Only serialisable values enter state — `_surface_name` is a string, and the
+Surface object is resolved lazily by the nodes that need it (T15).
+
+A surface the tenant has not enabled now raises **in the graph**, not only at the
+HTTP boundary, since the scheduled job never goes through HTTP.
+
+**Two things this uncovered:**
+1. `app/state.py` must declare every key a node writes. LangGraph keeps only the
+   channels the schema names, so `_policy_version` and `_surface_name` were
+   silently dropped until declared. A missing field fails *quietly*.
+2. Enabling delegation exposed that `classify` flattened evidence with
+   `__dict__`, which drops computed properties — so `has_failing_ci` and
+   `is_information_sparse` were invisible to any surface routing on them. Fixed.
 
 ### T15. Dataclasses are not checkpoint-serialisable `[ ]`
 

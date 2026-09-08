@@ -416,3 +416,85 @@ Not fixed, and still tracked in T10: the demo similarity is a Jaccard proxy on a
 different scale from any embedding model, so the shipped `min_relevance_score`
 values are still uncalibrated. What T21 fixed is the *kind* of number the gate
 receives, not its calibration.
+
+### 2026-09-09 — T14, T4 and T3 closed: the gate actually works now
+
+The approval gate runs end to end for the first time. Verified against the real
+graph with only the GitHub network calls stubbed:
+
+    resume=True                -> approved=True  -> posted the comment + label
+    resume={"approved": True}  -> approved=True  -> posted
+    resume=False               -> execute REFUSED (approved is not True)
+    resume="yes please"        -> execute REFUSED
+    resume=1                   -> execute REFUSED
+    resume={"approved": "yes"} -> execute REFUSED
+    SUSPENDED at ('await_approval',)
+
+And over HTTP: `/run` returns `awaiting_approval` with the action, the reasoning
+and the policy version; `/approve` executes or returns `refused`; `/runs/{id}`
+reports what a thread is waiting on, which is how you find pending gates after a
+restart.
+
+**Design choices worth not re-litigating later.**
+
+*The tenant is resolved by a NODE, not a `build_graph(tenant, surface)`
+argument.* Running inside the graph means the resolved policy lands in the
+checkpoint, so a run that pauses and resumes hours later is judged against the
+policy it *started* with even if the policy file changed meanwhile. That is the
+substance of G8, and compile-time binding would have discarded it. A
+`_policy_version` content hash is pinned alongside and shown to the approver.
+
+*Only serialisable values enter state.* `_surface_name` is a string; the Surface
+object is resolved lazily. Putting a class instance in a channel would add
+another unregistered type to T15, and a paused run that cannot be deserialised
+destroys the durability the gate depends on.
+
+*`await_approval` won the gate, not `interrupt_before`.* Both suspend; only
+`interrupt()` carries a payload. A gate whose contents the approver cannot see is
+a rubber stamp. `execute`'s in-node guard was NOT the mechanism removed — routing
+decides whether execute is reached, the guard re-establishes the precondition
+regardless of how it was reached.
+
+*`build_graph` now refuses without a checkpointer.* `interrupt()` suspends by
+persisting; with nowhere to persist, the gate silently evaporates on restart.
+
+**Four things learned the hard way, all worth keeping.**
+
+1. **The state schema must declare every key a node writes.** LangGraph keeps
+   only the channels the schema names, and an undeclared key is *silently
+   dropped* — which is why `_policy_version` and `_surface_name` came back
+   `None` from a run whose `resolve_tenant` had definitely returned them. It
+   fails quietly, not loudly.
+
+2. **Enabling surface delegation exposed a lossy conversion.** `classify` built
+   its evidence dict from `__dict__`, which returns stored fields only and drops
+   computed properties — so `has_failing_ci` and `is_information_sparse`, the
+   exact signals a surface routes on, were invisible. Fixed to include properties.
+
+3. **Enabling delegation also exposed T5 concretely.** The real `code_review`
+   surface routes on `touched_areas`, which issue-shaped evidence does not carry,
+   so it returns `human_review` and never reaches the gate. It fails *safe*, but
+   the code_review surface is non-functional until fetch/normalize produce
+   code-review evidence. The gate tests therefore use an injected issue-shaped
+   surface, and say so.
+
+4. **A falsy resume value does not resume at all.** Measured: a resume of `{}`
+   leaves the run parked at the gate rather than continuing. Safe, but a
+   *different* mechanism from the PermissionError, so it is pinned separately.
+   And a resume of `None` raises `UnboundLocalError: cannot access local variable
+   'resume_is_map'` from `langgraph/pregel/_loop.py` — an upstream bug. The
+   `/approve` endpoint coerces to a real bool, so it cannot send either.
+
+**Also corrected one of my own tests rather than the code.** A test asserting
+that project_a's 0.40 threshold escalates what `_default`'s 0.35 approves failed:
+the evidence grounds at 0.5385, which clears both. The premise was wrong, not the
+implementation. Forcing a divergence would have meant hunting a query landing
+between the two on a four-document Jaccard corpus — a brittle test of the corpus
+rather than the code. The threshold semantics stay pinned by the paired
+hand-supplied gate tasks; the graph test now asserts *resolution*.
+
+**Still not true:** durability across a real restart is untested. Only
+MemorySaver has been exercised, so the Postgres path is written but unproven —
+and the pause surviving a restart is the half of T3 that matters most.
+
+Gates 27. Tests 49 to 62. ruff clean.
