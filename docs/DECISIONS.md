@@ -336,3 +336,49 @@ found is a mismatch between the prompts and the code:
   version marker, no eval coverage. The first two matter more here than they
   would with a frontier model, because the default profile is a 7B diagnosis
   model and a 4B judge.
+
+### 2026-09-09 (end of session) — RAG audit against the PDF
+
+Measured the retriever instead of reading it, and found the most serious defect
+so far.
+
+**T21 — the grounding gate is inert against real retrieval output.**
+`tools/retrieval.py` returns the RRF fused score divided by the top score, so
+the best hit is always exactly 1.0. RRF is `sum(1/(60+rank))` — a function of
+rank position with no similarity magnitude in it. Measured across on-topic,
+off-topic and gibberish queries, the scores were **identical every time**:
+`[1.0, 0.984, 0.968]`. Therefore no citation can fail `groundedness_ok` at any
+threshold below 0.968, and the relevance half of the gate does nothing.
+
+It looked correct because `eval/tasks.py` hand-supplies scores. The suite proves
+the gate *logic*; it never proves the gate gets a meaningful *input*. A green
+24/24 run cannot see this.
+
+The design lesson worth keeping: the PDF's calibration method (on-topic cosine
+~0.53–0.63 vs off-topic ~0.21–0.22, threshold above the noise cluster) needs a
+**calibrated magnitude**. A rank has no noise cluster. **RRF is right for
+ordering and wrong for gating** — the gate needs the dense cosine carried
+through separately, or a cross-encoder score from the reranker.
+
+This compounds with T10: the thresholds were already invalid for a new embedding
+space; they are *also* the wrong kind of quantity.
+
+**T22 — the third grounding check is missing.** The PDF's safety-gate design is
+three checks: id is real, relevance clears a calibrated bar, and an
+**entailment/faithfulness check between the claim and the cited passage's text**.
+The first is implemented, the second is defective, the third does not exist.
+Checks 1 and 2 can only establish that a real, on-topic snippet was cited — they
+cannot catch a claim that overreaches what the passage supports, which is the
+most common RAG failure. The snippet text is already sitting in `_retrieved`.
+
+**T23 — no tracing at all.** The `Tracer` port has no implementation, and no run
+records its retrieved ids, scores, citations, booleans or the prompt actually
+sent. T21 would have been obvious in a trace showing every score as 1.0.
+
+**What the RAG stack does have,** for balance: hybrid dense+BM25 retrieval fused
+with real RRF (an improvement on the PDF's dense-cosine-only reference), and
+`classify` is genuinely a form of Adaptive RAG — a pre-retrieval routing
+decision that skips retrieval entirely for the deterministic and human_review
+paths. Not built: reranking (port only), MMR, contextual retrieval, multi-query
+and HyDE fusion, parent-document expansion, AST-aware chunking, and the
+corrective-RAG re-retrieve loop (its prompt exists; no node, and no loop cap).

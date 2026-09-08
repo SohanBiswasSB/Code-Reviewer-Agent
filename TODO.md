@@ -281,6 +281,84 @@ schema, refusal criteria. Missing:
 - **No eval coverage.** No prompt is exercised by any test, so all of the above
   is unverified against a real model.
 
+### T21. CRITICAL — the grounding gate is a no-op on real retrieval output `[ ]`
+
+`tools/retrieval.py::retrieve()` ends with:
+
+    top = ordered[0][1] if ordered else 1.0
+    return [Snippet(id=cid, text=..., score=round(s / top, 3))]
+
+The fused value is a **Reciprocal Rank Fusion** score, `sum(1/(60 + rank))` —
+purely a function of *rank position*, carrying no information about semantic
+similarity magnitude. Dividing by the top score then forces the best hit to
+exactly 1.0 every time. Measured:
+
+    ON-TOPIC  "OAuth callback returns 500..."      -> [1.0, 0.984, 0.968]
+    OFF-TOPIC "banana bread recipe with walnuts"   -> [1.0, 0.984, 0.968]
+    GIBBERISH "zzzz qqqq xyzzy plugh"              -> [1.0, 0.984, 0.968]
+
+**Why it matters:** `groundedness_ok` requires
+`retrieved[c.snippet_id] >= min_relevance_score`. Since the top snippet always
+scores 1.0 and the third still scores 0.968, **no citation can ever fail the
+score check** at 0.35, 0.40, or even 0.55. The relevance half of the grounding
+gate — the centre of the entire safety story — is currently inert against real
+retriever output.
+
+It looks like it works because `eval/tasks.py` **hand-supplies** the scores
+(`{"iss-101": 0.22}`). The suite proves the gate *logic* is correct; it never
+proves the gate receives a meaningful *input*, because it bypasses the retriever.
+So this defect is invisible to a green 24/24 run.
+
+**The deeper design point:** the PDF's threshold method (measure on-topic
+~0.53–0.63 vs off-topic ~0.21–0.22 cosine, set the bar above the noise cluster)
+requires a **calibrated magnitude**. Rank fusion cannot supply one — there is no
+noise cluster in a rank. So RRF is the right tool for *ordering* and the wrong
+tool for *gating*. The gate needs a separate, calibrated number: the dense
+cosine carried through alongside the fused rank, or a cross-encoder score from
+the reranker (T13).
+
+**Done when:** `Snippet` carries a calibrated relevance score distinct from its
+fusion rank; an off-topic query demonstrably fails `groundedness_ok`; and a gate
+task drives the *real* retriever rather than a hand-built score dict.
+
+### T22. The third grounding check does not exist `[ ]`
+
+The PDF specifies grounding-as-a-safety-gate in three steps: (1) validate the
+cited id is real, (2) check its retrieval relevance against a calibrated
+threshold, (3) **run an entailment/faithfulness check between the specific claim
+and the specific cited passage's text**. Only after all three pass do you serve.
+
+Implemented: (1) fully, (2) present but defective (T21), (3) **absent entirely**.
+
+**Why it matters:** (1) and (2) together only establish that a real, topically
+relevant snippet was cited. They cannot detect the most common RAG failure —
+a claim that overreaches what its cited passage actually supports. The snippet
+text is already in `_retrieved`; nothing compares it to the claim.
+
+**Done when:** a faithfulness check runs per claim against its cited passage's
+text, its verdict is code-computed (not the judge's free text), and it becomes a
+fourth boolean or folds into `groundedness_ok`.
+
+### T23. No tracing — the decision trace cannot be reconstructed `[ ]`
+
+The `Tracer` port exists; nothing implements it. There is no span tree, and no
+per-run record of the retrieved ids, their scores, which were cited, the three
+booleans, or the prompt actually sent.
+
+**Why it matters:** the PDF is explicit that agent observability needs the
+*entire decision trace*, because a wrong final answer can originate in query
+construction, retrieval, the diagnosis, or the gate — and those look identical
+from outside while needing completely different fixes. This system will produce
+exactly that class of failure. Worth noting T21 would have been caught
+immediately by a trace showing every score as 1.0.
+
+Overlaps G6 (AuditSink: the immutable per-run record) but is distinct: G6 is the
+compliance artefact, this is the debugging one.
+
+**Done when:** every node, retrieval call, score and boolean is spanned
+(OpenTelemetry `gen_ai.*` or Langfuse), and the exact prompt sent is captured —
+not the template, since caching and context assembly can alter it.
+
 ### T10. Retrieval is a toy `[ ]`
 
 `tools/retrieval.py` runs on a 4-document in-memory corpus. RRF is real; the
