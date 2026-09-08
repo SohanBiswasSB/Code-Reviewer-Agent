@@ -17,17 +17,7 @@ to the deserialisation problem that would make paused runs unresumable (T15).
 """
 from __future__ import annotations
 
-
-def _active_surface(state: dict):
-    """The Surface driving this run, or None for the built-in issue-triage path."""
-    surface = state.get("_surface")
-    if surface is not None:
-        return surface
-    name = state.get("_surface_name")
-    if not name:
-        return None
-    import config  # composition root; nodes never import a provider
-    return config.get_surface(name)
+from nodes._surface import active_surface
 
 
 def _as_dict(ev) -> dict:
@@ -54,7 +44,7 @@ def _as_dict(ev) -> dict:
 
 
 def classify(state: dict) -> dict:
-    surface = _active_surface(state)
+    surface = active_surface(state)
     if surface is not None and hasattr(surface, "classify"):
         return {"route": surface.classify(_as_dict(state["evidence"]))}
 

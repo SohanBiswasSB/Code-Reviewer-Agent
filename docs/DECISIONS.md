@@ -498,3 +498,71 @@ MemorySaver has been exercised, so the Postgres path is written but unproven —
 and the pause surviving a restart is the half of T3 that matters most.
 
 Gates 27. Tests 49 to 62. ruff clean.
+
+### 2026-09-09 — T5 closed: nodes now reach providers only through ports
+
+No file under `nodes/` imports `tools/` any more — checked with a grep rather
+than assumed. `fetch_evidence` gathers via the surface's `EvidenceSource`,
+`generate_diagnosis` retrieves via the `Retriever` port using the surface's
+`build_query`, and `execute` writes via the surface's `ActionSink`.
+`GitHubSource.gather` and `PRCommentSink.emit` are implemented rather than
+raising.
+
+**G1 is enforced end to end now, and the proof is a refusal.** The namespace comes
+from `policy.codebase.repo`, so a real run for `project_a` raises — the
+four-document demo corpus cannot be partitioned. That single assertion proves
+the policy resolves, the namespace reaches the retriever, and an adapter that
+cannot honour isolation fails loudly instead of quietly citing across codebases.
+`_default` declares no codebase, retrieves un-namespaced, and proceeds, which is
+why the other graph tests use it.
+
+**The code_review surface finally works.** It owns a `normalize`, because its
+evidence *shape* differs from issue triage — that was the missing piece behind it
+returning `human_review` for every change. Verified on a PR payload:
+
+    files          ['app/migrations/0007_add_bio.py', 'app/models/user.py']
+    touched_areas  ['migrations']        <- detected as risky
+    route          ai_investigation
+    review         escalate_to_human     <- ungroundable vs the demo corpus
+    wrote          nothing
+
+That last line is the point. A migration diff does not ground against an
+auth-themed corpus, so it escalated rather than posting. My probe script assumed
+approval and raised a KeyError — the script was wrong, not the pipeline.
+
+**Decisions worth keeping.**
+
+*Normalisation is per-shape, owned by the surface.* A GitHub issue and a code
+diff are not interchangeable, and a surface routing on `touched_areas` gets
+nothing from an `IssueEvidence`. Surfaces without a `normalize` fall back to the
+built-in issue normaliser.
+
+*The port's shape is the only shape a node sees.* `Retriever.retrieve` returns
+dicts, so `independent_review` reads `s["id"]`/`s["score"]` and
+`tools/retrieval.py`'s `Snippet` stays an implementation detail behind its
+adapter. Aligning on this is what surfaced the mismatch: eleven graph tests
+failed with `'dict' object has no attribute 'id'`, which was the right failure.
+
+*`ActionSink.emit` takes an explicit `target`.* Folding the destination into the
+action dict would mean mutating the approved payload, and "posted verbatim" has
+to mean exactly that.
+
+*Partial-success handling moved into the sink.* It is provider-specific: on
+GitHub, commenting is open to any authenticated user while labelling needs
+triage/write access, so a 403 on the label after a successful comment is routine
+rather than an error. The gate suite now exercises the real `PRCommentSink` for
+that case instead of a fake client.
+
+*`touched_areas` changed meaning, deliberately.* It used to be raw paths that
+`classify` filtered; it is now already filtered to risky areas by `normalize`, so
+`classify` only asks whether it is empty. The same field name meaning two
+different things at two points in the pipeline was the worse option. One eval
+task had to be updated for this — a real contract change, not a test fudge.
+
+**Five new gate tasks drive raw provider payloads through the surface's real
+`normalize`.** The previous delegation tasks hand-built post-normalise evidence,
+which is exactly how the shape mismatch stayed invisible while everything was
+green. Same lesson as T21: ask what a passing suite is substituting for the real
+input.
+
+Gates 27 to 32. Tests 62 to 63. ruff clean.

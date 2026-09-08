@@ -118,34 +118,36 @@ def test_policy_is_resolved_into_state(posted, issue_surface):
     assert out["_policy_version"]
 
 
-def test_each_tenant_is_gated_by_its_own_policy_on_a_real_run(posted, issue_surface):
-    """T14's "done when": a real graph run is judged by the TENANT's policy.
+def test_a_tenant_with_a_codebase_forces_namespaced_retrieval(posted, issue_surface):
+    """G1, end to end: a tenant bound to a codebase retrieves in its namespace.
 
-    Deliberately asserts *resolution*, not threshold arithmetic. The evidence
-    here grounds at 0.5385, which clears both _default's 0.35 and project_a's
-    0.40, so this run cannot show a divergent outcome — and forcing one would
-    mean hunting a query that lands between the two on a 4-document Jaccard
-    corpus, which would be a brittle test of the corpus rather than of the code.
-    The threshold semantics are pinned precisely by the paired GATE_TASKS
-    (`same_diagnosis_lenient_policy_approves` / `..._strict_policy_escalates`).
+    project_a's policy declares `codebase.repo = org/project-a`, so
+    `generate_diagnosis` passes that as the retrieval namespace. The demo
+    retriever cannot partition a four-document in-memory corpus, so it REFUSES.
 
-    Before T14 both runs would have shown the module default 0.35, because
-    nothing ever called the TenantStore.
+    That refusal is the assertion. It proves three things at once, none of which
+    was true before T14/T5: the tenant's policy is resolved into the run, the
+    namespace reaches the retriever, and an adapter that cannot honour isolation
+    fails loudly rather than quietly retrieving across codebases. Grounding is
+    the whole safety story, so a silent cross-codebase citation would be the
+    worst available failure.
+
+    `_default` declares no codebase, so it retrieves un-namespaced and proceeds —
+    which is why the other tests in this file use it.
     """
-    lenient, lenient_cfg = _graph(), _cfg("t-lenient")
-    out_lenient = _start(lenient, lenient_cfg, tenant="_default")
+    g = _graph()
+    with pytest.raises(NotImplementedError, match="namespace-scoped"):
+        _start(g, _cfg("t-namespaced"), tenant="project_a")
+    assert posted == []
 
-    strict, strict_cfg = _graph(), _cfg("t-strict")
-    out_strict = _start(strict, strict_cfg, tenant="project_a")
 
-    assert out_lenient["_policy"]["min_relevance_score"] == 0.35
-    assert out_strict["_policy"]["min_relevance_score"] == 0.40
-    assert out_lenient["_policy_version"] != out_strict["_policy_version"], (
-        "different policies must pin different versions, or a resumed run "
-        "cannot prove which guardrails it was judged against"
-    )
-    # project_a also carries a codebase binding; _default does not
-    assert out_strict["_policy"]["codebase"]["repo"] == "org/project-a"
+def test_default_tenant_retrieves_unnamespaced_and_reaches_the_gate(posted, issue_surface):
+    """The counterpart: no codebase binding means no namespace, so the demo
+    retriever can serve it and the run reaches the approval gate."""
+    g, cfg = _graph(), _cfg("t-unnamespaced")
+    out = _start(g, cfg, tenant="_default")
+    assert out["_policy"].get("codebase") in ({}, None)
+    assert g.get_state(cfg).next == ("await_approval",)
 
 
 def test_a_surface_the_tenant_has_not_enabled_is_refused_in_the_graph(posted):

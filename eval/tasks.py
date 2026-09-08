@@ -37,14 +37,54 @@ CLASSIFY_TASKS = [
 
     # -- G2: when a Surface is injected, ITS rule-based classify must drive the
     # route. Untested before, so surfaces could silently stop being consulted.
+    #
+    # These take POST-normalise evidence: `touched_areas` is already filtered to
+    # risky areas by CodeReviewSurface.normalize, so classify only asks whether
+    # it is empty. (It used to filter inside classify, which meant the same field
+    # name meant two different things at two points in the pipeline.)
     ("delegation_failing_ci",
-     {"_surface": CodeReviewSurface(), "evidence": {"has_failing_ci": True}},
+     {"_surface": CodeReviewSurface(),
+      "evidence": {"has_failing_ci": True, "touched_areas": [], "files": []}},
      "deterministic"),
     ("delegation_risky_area",
-     {"_surface": CodeReviewSurface(), "evidence": {"touched_areas": ["auth"]}},
+     {"_surface": CodeReviewSurface(),
+      "evidence": {"touched_areas": ["auth"], "files": ["app/auth/views.py"]}},
      "ai_investigation"),
     ("delegation_trivial",
-     {"_surface": CodeReviewSurface(), "evidence": {"touched_areas": ["docs"]}},
+     {"_surface": CodeReviewSurface(),
+      "evidence": {"touched_areas": [], "files": ["docs/readme.md"], "is_trivial": True}},
+     "human_review"),
+]
+
+# ── the Surface's OWN normalize -> classify chain ─────────────────────────────
+# (name, raw_provider_payload, expected_route)
+#
+# The tasks above hand-build post-normalise evidence, which pins classify but not
+# the normaliser feeding it. That gap is exactly how the code_review surface came
+# to receive issue-shaped evidence and route everything to human_review while
+# every test stayed green (T5). These drive raw provider payloads through the
+# surface's real normalize.
+SURFACE_PIPELINE_TASKS = [
+    ("pipeline_failing_ci_beats_risk",
+     {"html_url": "u", "title": "fix auth", "files": [{"filename": "app/auth/views.py"}],
+      "check_runs": [{"name": "build", "conclusion": "failure"}]},
+     "deterministic"),
+    ("pipeline_migration_is_risky",
+     {"html_url": "u", "title": "add column",
+      "files": [{"filename": "app/migrations/0002_add_col.py"}], "check_runs": []},
+     "ai_investigation"),
+    ("pipeline_celery_is_risky",
+     {"html_url": "u", "title": "task tweak",
+      "files": [{"filename": "worker/celery_tasks.py"}], "check_runs": []},
+     "ai_investigation"),
+    ("pipeline_docs_only_is_trivial",
+     {"html_url": "u", "title": "typo",
+      "files": [{"filename": "docs/setup.md"}, {"filename": "README.md"}],
+      "check_runs": []},
+     "human_review"),
+    ("pipeline_ordinary_code_needs_a_human",
+     {"html_url": "u", "title": "refactor helper",
+      "files": [{"filename": "app/utils/strings.py"}], "check_runs": []},
      "human_review"),
 ]
 

@@ -16,17 +16,23 @@ from __future__ import annotations
 
 import sys
 
-from eval.tasks import CLASSIFY_TASKS, GATE_TASKS, RETRIEVAL_GATE_TASKS
+from eval.tasks import (
+    CLASSIFY_TASKS,
+    GATE_TASKS,
+    RETRIEVAL_GATE_TASKS,
+    SURFACE_PIPELINE_TASKS,
+)
 from nodes.classify import classify
 from nodes.execute import execute
 from nodes.independent_review import independent_review
 
 
-class _Snippet:
-    """Minimal retrieved-snippet stand-in: the gate only reads .id and .score."""
+def _snippet(sid: str, score: float) -> dict:
+    """A retrieved snippet in the Retriever PORT's shape: a dict, not an object.
 
-    def __init__(self, sid: str, score: float):
-        self.id, self.score = sid, score
+    The gate reads only "id" and "score"; "score" is the calibrated relevance.
+    """
+    return {"id": sid, "text": "", "score": score}
 
 
 def run() -> int:
@@ -46,22 +52,35 @@ def run() -> int:
     for name, diag, retrieved, policy, expected in GATE_TASKS:
         state = {
             "diagnosis": diag,
-            "_retrieved": [_Snippet(i, s) for i, s in retrieved.items()],
+            "_retrieved": [_snippet(i, s) for i, s in retrieved.items()],
         }
         if policy is not None:
             state["_policy"] = policy
         check("gate", name, expected, independent_review(state)["review"].decision)
 
+    # ── the Surface's own normalize -> classify chain (T5 regression) ────────
+    from nodes.normalize_evidence import normalize_evidence
+    from surfaces.code_review import CodeReviewSurface
+
+    for name, raw, expected in SURFACE_PIPELINE_TASKS:
+        surface = CodeReviewSurface()
+        state = {"_surface": surface, "_raw": raw}
+        state.update(normalize_evidence(state))
+        check("pipeline", name, expected, classify(state)["route"])
+
     # ── the gate driven by the REAL retriever (T21 regression) ───────────────
     # The GATE_TASKS above hand-supply scores, so they pin the gate's logic but
     # cannot see whether its input is meaningful. These retrieve for real.
+    # Through the ADAPTER, not tools/retrieval directly: the port's dict shape is
+    # what a node actually receives, so that is what must be exercised.
+    from adapters.retriever_hybrid import HybridRetriever
     from schemas.diagnosis import Citation, Diagnosis
-    from tools import retrieval
 
+    retriever = HybridRetriever()
     for name, query, expected in RETRIEVAL_GATE_TASKS:
-        hits = retrieval.retrieve(query, k=3)
+        hits = retriever.retrieve(query, k=3)
         # cite the top hit, as a diagnosis grounded on this retrieval would
-        cited = [Citation(hits[0].id, hits[0].relevance)] if hits else []
+        cited = [Citation(hits[0]["id"], hits[0]["score"])] if hits else []
         state = {
             "diagnosis": Diagnosis("s", "medium", "c", None, cited),
             "_retrieved": hits,
@@ -69,20 +88,21 @@ def run() -> int:
         check("retrieval", name, expected, independent_review(state)["review"].decision)
 
     # ── execute(): the permission guard and verbatim posting ─────────────────
-    class FakeGH:
-        """No test may ever reach real GitHub. The suite must never post."""
+    class FakeSink:
+        """No test may ever reach a real provider. The suite must never post."""
 
-        def post_comment(self, url, body, token=None):
-            return {"body": body}
+        def __init__(self):
+            self.calls = []
 
-        def add_label(self, url, label, token=None):
-            return {"label": label}
+        def emit(self, action, *, target, identity=None):
+            self.calls.append((action, target, identity))
+            return {"comment": {"body": action["comment"]}, "label": action.get("label")}
 
     # refuses without approval -- checked IN THE NODE, so a future shortcut edge
     # straight to execute still cannot bypass the gate
     try:
         execute({"approved": False, "target": "u",
-                 "proposed_action": {"comment": "x"}}, github=FakeGH())
+                 "proposed_action": {"comment": "x"}}, sink=FakeSink())
         check("execute", "refuses_without_approval", "PermissionError", "NO-RAISE")
     except PermissionError:
         check("execute", "refuses_without_approval", "PermissionError", "PermissionError")
@@ -93,31 +113,42 @@ def run() -> int:
     for label, bad in truthy_but_not_true:
         try:
             execute({"approved": bad, "target": "u",
-                     "proposed_action": {"comment": "x"}}, github=FakeGH())
+                     "proposed_action": {"comment": "x"}}, sink=FakeSink())
             check("execute", label, "PermissionError", "NO-RAISE")
         except PermissionError:
             check("execute", label, "PermissionError", "PermissionError")
 
     # posts the approved action VERBATIM -- never recomputed after approval
     res = execute({"approved": True, "target": "u",
-                   "proposed_action": {"comment": "VERBATIM", "label": None}}, github=FakeGH())
+                   "proposed_action": {"comment": "VERBATIM", "label": None}}, sink=FakeSink())
     check("execute", "posts_verbatim_when_approved", "VERBATIM", res["result"]["comment"]["body"])
 
     # a failing label add is a PARTIAL success -- the comment really was posted,
-    # so it must not be discarded by raising
-    class LabelFailsGH(FakeGH):
-        def add_label(self, url, label, token=None):
-            raise RuntimeError("403 needs triage/write access")
+    # so it must not be discarded by raising. This exercises the REAL
+    # PRCommentSink, since that is where the partial-success handling lives now.
+    from adapters.action_sinks import PRCommentSink
+    from tools import github_client
 
-    res = execute({"approved": True, "target": "u",
-                   "proposed_action": {"comment": "posted", "label": "bug"}}, github=LabelFailsGH())
+    saved = (github_client.post_comment, github_client.add_label)
+    github_client.post_comment = lambda url, body, token=None: {"body": body}
+
+    def _label_403(url, label, token=None):
+        raise RuntimeError("403 needs triage/write access")
+
+    github_client.add_label = _label_403
+    try:
+        res = execute({"approved": True, "target": "u",
+                       "proposed_action": {"comment": "posted", "label": "bug"}},
+                      sink=PRCommentSink())
+    finally:
+        github_client.post_comment, github_client.add_label = saved
     partial = (res["result"]["comment"]["body"] == "posted"
                and "skipped" in (res["result"]["label"] or {}))
     check("execute", "label_failure_is_partial_success", "partial",
           "partial" if partial else "lost")
 
-    total = (len(CLASSIFY_TASKS) + len(GATE_TASKS)
-             + len(RETRIEVAL_GATE_TASKS) + 6)   # 6 execute-guard checks
+    total = (len(CLASSIFY_TASKS) + len(GATE_TASKS) + len(RETRIEVAL_GATE_TASKS)
+             + len(SURFACE_PIPELINE_TASKS) + 6)   # 6 execute-guard checks
     print()
     if fails:
         print(f"CRITICAL: {len(fails)} of {total} gate(s) failed: {fails}")

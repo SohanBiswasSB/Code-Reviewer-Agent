@@ -39,8 +39,21 @@ class EvidenceSource(Protocol):
 
 @runtime_checkable
 class ActionSink(Protocol):
-    # perform the approved action (post PR comment, write report, open ticket)
-    def emit(self, action: dict, *, identity: str | None = None) -> dict: ...
+    """Perform the approved action (post a PR comment, write a report, open a ticket).
+
+    `target` is separate from `action` on purpose. The action is the content a
+    human approved and `execute` posts it verbatim; the target is only where it
+    goes. Folding the destination into the action dict would mean mutating the
+    approved payload, and "posted verbatim" has to mean exactly that.
+
+    `identity` is the approver's own credential, so the write is attributable to
+    the person who authorised it rather than to a shared service token.
+
+    A partial failure must be REPORTED, not raised: if a comment posts and a
+    label then fails on permissions, the comment really did happen and throwing
+    it away is worse than reporting both outcomes.
+    """
+    def emit(self, action: dict, *, target: str, identity: str | None = None) -> dict: ...
 
 
 @runtime_checkable
@@ -62,12 +75,17 @@ class Surface(Protocol):
     shared graph. Register with @registry.surface("name").
     """
     name: str
-    source: EvidenceSource
-    sink: ActionSink
-    diagnosis_prompt: str     # path under prompts/
-    judge_prompt: str
+    source_name: str          # which @adapter("source", ...) to gather with
+    sink_name: str            # which @adapter("sink", ...) to emit through
     def build_query(self, evidence: dict) -> str: ...
     def classify(self, evidence: dict) -> str: ...      # rule-based route
+
+    # Optional. A surface that gathers a different SHAPE of evidence must say how
+    # to normalise it -- issue evidence and a code diff are not interchangeable,
+    # and a surface routing on `touched_areas` gets nothing useful from an
+    # IssueEvidence. Surfaces without one fall back to the built-in issue
+    # normaliser.
+    def normalize(self, raw: dict) -> object: ...
 
 
 @runtime_checkable

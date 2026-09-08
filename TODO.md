@@ -100,7 +100,7 @@ decides whether execute is reached, the guard re-establishes the precondition
 regardless of how it was reached. `build_graph` now also refuses to compile
 without a checkpointer, since `interrupt()` suspends by persisting.
 
-### T5. Nodes bypass their own ports (G2) `[ ]`
+### T5. Nodes bypass their own ports (G2) `[x]`
 
 `fetch_evidence` imports `tools.github_client` directly; `generate_diagnosis`
 imports `tools.retrieval` directly. Neither goes through `EvidenceSource` /
@@ -114,6 +114,37 @@ Project B's code. The port signature is fixed; the caller ignores it.
 **Done when:** every node reaches its provider through a port, the resolved
 surface is injected into state, and retrieval always carries the tenant's
 namespace.
+
+**CLOSED.** No file under `nodes/` imports `tools/` any more (checked, not
+assumed). `fetch_evidence` gathers through the surface's `EvidenceSource`,
+`generate_diagnosis` retrieves through the `Retriever` port using the surface's
+`build_query`, and `execute` writes through the surface's `ActionSink`.
+`GitHubSource.gather` and `PRCommentSink.emit` are now implemented rather than
+raising, with the partial-success handling moved into the sink where it belongs
+(a 403 on a label after a successful comment is provider-specific and routine).
+
+**G1 is now enforced end to end.** `namespace_for()` derives the namespace from
+`policy.codebase.repo`, and a real run for `project_a` **raises** because the
+four-document demo corpus cannot be partitioned. That refusal is the test: it
+proves the policy resolves, the namespace reaches the retriever, and an adapter
+that cannot honour isolation fails loudly instead of quietly citing across
+codebases.
+
+**The port's shape is now the only shape a node sees.** `Retriever.retrieve`
+returns dicts, so `independent_review` reads `s["id"]`/`s["score"]` and
+`tools/retrieval.py`'s `Snippet` stays behind its adapter.
+
+**And the code_review surface finally works.** It owns a `normalize`, because its
+evidence SHAPE differs from issue triage — the missing piece that made it return
+`human_review` for every change. Verified on a PR payload: `migrations` detected
+as risky -> `ai_investigation` -> ungroundable against the demo corpus ->
+`escalate_to_human`, writing nothing. `ActionSink.emit` also gained an explicit
+`target`, so the destination never has to be folded into the approved action —
+"posted verbatim" has to mean exactly that.
+
+Gates 27 -> 32, including five that drive raw provider payloads through the
+surface's real `normalize` (the previous tasks hand-built post-normalise
+evidence, which is precisely how the shape mismatch stayed invisible).
 
 ### T6. Tenant prompts are never loaded `[ ]`
 
@@ -296,7 +327,7 @@ check that never happened. That is worse than saying nothing.
 **Done when:** the judge receives the retrieved snippets, and its prompt asks
 only for checks it can actually perform.
 
-### T19. Two copies of every prompt, and the surfaces point at the wrong one `[ ]`
+### T19. Two copies of every prompt, and the surfaces point at the wrong one `[~]`
 
 `prompts/code_review_diagnosis.md` is **byte-identical** to
 `tenants/_default/prompts/code_review/diagnosis.md`. `prompts/README.md` says the
@@ -310,6 +341,11 @@ tenant node name is `diagnosis`.
 **Done when:** one source of truth. Either delete the flat copies and have
 surfaces name node keys (`"diagnosis"`, `"judge"`) for the store to resolve, or
 keep them and make the duplication mechanical.
+
+**PARTLY DONE** with T5: both surfaces now declare node KEYS
+(`diagnosis_prompt = "diagnosis"`) instead of flat paths, so they no longer point
+at the non-canonical copies. Still open: the duplicate files under `prompts/`
+remain, and nothing prevents them drifting from `tenants/_default/prompts/**`.
 
 ### T20. Prompt-engineering standards from BEST_PRACTICES section 11 unmet `[ ]`
 

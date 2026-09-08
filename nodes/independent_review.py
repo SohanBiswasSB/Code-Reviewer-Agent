@@ -16,7 +16,10 @@ ALLOWED_ACTIONS = {"comment", "comment+label"}
 
 def independent_review(state: dict, judge_llm=None) -> dict:
     diag = state["diagnosis"]
-    retrieved = {s.id: s.score for s in state["_retrieved"]}
+    # The Retriever PORT returns dicts, so that is the only shape a node ever
+    # sees -- tools/retrieval.py's Snippet stays behind its adapter. "score"
+    # is the calibrated relevance, never the rank-fusion value (T21).
+    retrieved = {s["id"]: s["score"] for s in state["_retrieved"]}
 
     # Guardrails come from the TENANT'S resolved policy (state["_policy"]), not from
     # hardcoded constants — each org/project plugs in its own thresholds/allowlists.

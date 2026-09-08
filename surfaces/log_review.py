@@ -5,8 +5,9 @@ from registry import surface
 class LogReviewSurface:
     name = "log_review"
     source_name, sink_name = "s3logs", "report"
-    diagnosis_prompt = "prompts/log_review_analysis.md"
-    judge_prompt = "prompts/log_review_judge.md"
+    # Node KEYS, resolved per tenant by the TenantStore (T19).
+    diagnosis_prompt = "diagnosis"
+    judge_prompt = "judge"
 
     def build_query(self, evidence: dict) -> str:
         sigs = ", ".join(c.get("signal", "") for c in evidence.get("candidates", []))
