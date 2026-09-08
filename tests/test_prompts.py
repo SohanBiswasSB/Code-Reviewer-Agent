@@ -266,7 +266,9 @@ def test_an_llm_node_refuses_to_run_without_a_pinned_prompt():
     from schemas.diagnosis import Citation, Diagnosis
 
     state = {
-        "diagnosis": Diagnosis("s", "medium", "c", None, [Citation("iss-101", 0.61)]),
+        "diagnosis": Diagnosis(
+            summary="s", severity="medium", proposed_comment="c",
+            citations=[Citation(snippet_id="iss-101", score=0.61)]),
         "_retrieved": [{"id": "iss-101", "text": "t", "score": 0.61}],
     }
     with pytest.raises(ValueError, match="no judge prompt in state"):

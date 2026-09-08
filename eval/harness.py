@@ -27,14 +27,6 @@ from nodes.execute import execute
 from nodes.independent_review import independent_review
 
 
-def _snippet(sid: str, score: float) -> dict:
-    """A retrieved snippet in the Retriever PORT's shape: a dict, not an object.
-
-    The gate reads only "id" and "score"; "score" is the calibrated relevance.
-    """
-    return {"id": sid, "text": "", "score": score}
-
-
 def run() -> int:
     fails: list[str] = []
 
@@ -49,11 +41,8 @@ def run() -> int:
         check("classify", name, expected, classify(state)["route"])
 
     # ── independent_review(): the three booleans, under real policies ────────
-    for name, diag, retrieved, policy, expected in GATE_TASKS:
-        state = {
-            "diagnosis": diag,
-            "_retrieved": [_snippet(i, s) for i, s in retrieved.items()],
-        }
+    for name, diagnosis, retrieved, policy, expected in GATE_TASKS:
+        state = {"diagnosis": diagnosis, "_retrieved": retrieved}
         if policy is not None:
             state["_policy"] = policy
         check("gate", name, expected, independent_review(state)["review"].decision)
@@ -80,9 +69,17 @@ def run() -> int:
     for name, query, expected in RETRIEVAL_GATE_TASKS:
         hits = retriever.retrieve(query, k=3)
         # cite the top hit, as a diagnosis grounded on this retrieval would
-        cited = [Citation(hits[0]["id"], hits[0]["score"])] if hits else []
+        cited = ([Citation(snippet_id=hits[0]["id"], score=hits[0]["score"])]
+                 if hits else [])
         state = {
-            "diagnosis": Diagnosis("s", "medium", "c", None, cited),
+            # The claim paraphrases the demo corpus's auth snippet, so an
+            # ON-TOPIC query grounds AND entails, while an off-topic one fails
+            # the relevance check first.
+            "diagnosis": Diagnosis(
+                summary="auth regression", severity="medium",
+                proposed_comment=("The OAuth callback returns a 500 when the state "
+                                  "param is missing; fix in the auth middleware."),
+                proposed_label=None, citations=cited),
             "_retrieved": hits,
         }
         check("retrieval", name, expected, independent_review(state)["review"].decision)

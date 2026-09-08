@@ -131,6 +131,23 @@ class Notifier(Protocol):
 
 # ── accuracy-first ports (cost is no object) ─────────────────────────────────
 @runtime_checkable
+class Entailer(Protocol):
+    """Does this claim actually FOLLOW from this passage? (T22)
+
+    The third of the three grounding checks the design calls for. The first two
+    -- the cited id is real, and its retrieval relevance clears a calibrated bar
+    -- together prove only that a real, on-topic snippet was cited. They cannot
+    catch a claim that OVERREACHES what its passage supports, which is the most
+    common RAG failure and the one a citation makes look trustworthy.
+
+    Returns a SCORE, not a verdict, for the same reason the retriever does:
+    `independent_review` thresholds it in Python. A port that returned a boolean
+    would be making the decision, and no component outside the gate may.
+    """
+    def score(self, claim: str, passage: str) -> float: ...
+
+
+@runtime_checkable
 class Reranker(Protocol):
     """Cross-encoder rerank of a wide candidate set → precise top-n. Ensemble-able."""
     def rerank(self, query: str, candidates: list[dict], top_n: int = 8) -> list[dict]: ...

@@ -245,7 +245,7 @@ HTTP boundary, since the scheduled job never goes through HTTP.
    `__dict__`, which drops computed properties — so `has_failing_ci` and
    `is_information_sparse` were invisible to any surface routing on them. Fixed.
 
-### T15. Dataclasses are not checkpoint-serialisable `[ ]`
+### T15. Dataclasses are not checkpoint-serialisable `[x]`
 
 Running with a real checkpointer emits, for every state type:
 
@@ -287,7 +287,7 @@ under P2 hardening. **It is misfiled: promote it.**
 the store), and a test asserts a tenant-resolved prompt still contains the
 org-level grounding and no-verdict clauses.
 
-### T17. The diagnosis prompt asks for a shape the schema cannot hold `[ ]`
+### T17. The diagnosis prompt asks for a shape the schema cannot hold `[x]`
 
 `prompts/code_review_diagnosis.md` specifies a `findings[]` array of
 `{severity, file, line, issue, suggestion, grounded, citation_ids}` alongside
@@ -435,7 +435,7 @@ the reranker (T13).
 fusion rank; an off-topic query demonstrably fails `groundedness_ok`; and a gate
 task drives the *real* retriever rather than a hand-built score dict.
 
-### T22. The third grounding check does not exist `[ ]`
+### T22. The third grounding check does not exist `[x]`
 
 The PDF specifies grounding-as-a-safety-gate in three steps: (1) validate the
 cited id is real, (2) check its retrieval relevance against a calibrated
@@ -490,7 +490,7 @@ originally chosen.
 **Done when:** a real index exists, ingest is idempotent and namespaced per
 codebase, and the thresholds are re-measured with the method written down.
 
-### T11. Schemas are dataclasses; `normalize_evidence` does not validate `[ ]`
+### T11. Schemas are dataclasses; `normalize_evidence` does not validate `[x]`
 
 `schemas/` uses stdlib dataclasses with a TODO to move to Pydantic v2.
 `normalize_evidence` "just trusts normalized fields".

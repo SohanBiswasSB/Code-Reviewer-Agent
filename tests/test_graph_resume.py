@@ -230,3 +230,28 @@ def test_dict_shaped_approval_is_accepted(posted, issue_surface):
     resumed = g.invoke(Command(resume={"approved": True}), config=cfg)
     assert resumed["approved"] is True
     assert len(posted) == 1
+
+
+# ── T15: paused runs must survive a stricter serialiser ──────────────────────
+@pytest.mark.parametrize("value_factory", [
+    lambda: __import__("schemas.evidence", fromlist=["x"]).IssueEvidence(url="u", title="t"),
+    lambda: __import__("schemas.diagnosis", fromlist=["x"]).Citation(snippet_id="i", score=0.5),
+    lambda: __import__("schemas.diagnosis", fromlist=["x"]).Diagnosis(summary="s"),
+    lambda: __import__("schemas.diagnosis", fromlist=["x"]).ReviewResult(reasoning="r"),
+])
+def test_every_state_type_round_trips_through_the_checkpoint_serialiser(value_factory):
+    """The durable pause is the basis of the approval gate, so every type that
+    enters a channel must survive being written and read back.
+
+    LangGraph used to warn on all of these: "deserializing unregistered type ...
+    will be blocked in a future version". On a release that enforces it, every
+    paused run becomes unresumable — which destroys the one safety property the
+    whole design rests on. Pydantic models are handled natively.
+    """
+    from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+
+    serde = JsonPlusSerializer()
+    original = value_factory()
+    restored = serde.loads_typed(serde.dumps_typed(original))
+    assert restored == original
+    assert type(restored) is type(original)

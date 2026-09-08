@@ -27,7 +27,8 @@ def normalize_issue(raw: dict) -> IssueEvidence:
         title=raw.get("title", ""),
         body=raw.get("body", "") or "",
         labels=[lbl["name"] for lbl in raw.get("labels", [])],
-        check_runs=[CheckRun(c["name"], c["conclusion"]) for c in raw.get("check_runs", [])],
+        check_runs=[CheckRun(name=c["name"], conclusion=c["conclusion"])
+                    for c in raw.get("check_runs", [])],
     )
 
 

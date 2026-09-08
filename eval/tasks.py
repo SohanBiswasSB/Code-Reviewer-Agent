@@ -7,15 +7,58 @@ scores 100% and proves nothing, so roughly half of these cases *should* reach
 routing-and-gating suite rather than a capability one.)
 
 No LLM is called anywhere in this file. That is the point: these tasks pin the
-behaviour of `classify`, the three gate booleans and the `execute` guard, all of
+behaviour of `classify`, the four gate booleans and the `execute` guard, all of
 which are plain Python. They must therefore produce identical results on the Mac
 and the CUDA box, whatever models are installed.
+
+**The fixtures are realistic on purpose.** They used to be `Diagnosis("s",
+"medium", "c", ...)` with empty snippet text, which was enough to pin the id and
+score checks but made the entailment check (T22) impossible to exercise — you
+cannot ask whether "c" follows from "" . Twice now a degenerate fixture has
+hidden a real defect (T21's constant scores, T5's evidence shape), so the claims
+and passages below are written as a real diagnosis and a real snippet would be.
 """
 from __future__ import annotations
 
 from schemas.diagnosis import Citation, Diagnosis
 from schemas.evidence import CheckRun, IssueEvidence
 from surfaces.code_review import CodeReviewSurface
+
+# ── shared fixture vocabulary ─────────────────────────────────────────────────
+PASSAGE_AUTH = ("OAuth callback returns 500 when state param missing; "
+                "fix in auth middleware")
+PASSAGE_CI = "CI flaky on windows terminal resize test; unrelated to auth"
+
+# A claim that genuinely follows from PASSAGE_AUTH.
+CLAIM_ENTAILED = ("The OAuth callback returns a 500 when the state param is "
+                  "missing; the fix belongs in the auth middleware.")
+# A claim that cites PASSAGE_AUTH but asserts things it never supports. This is
+# the failure mode steps 1 and 2 of the grounding check cannot see: the citation
+# is real AND on-topic, and the claim still overreaches it.
+CLAIM_OVERREACH = ("This change will corrupt the billing ledger and requires a "
+                   "full restore from the nightly database backup.")
+
+
+def snippet(sid: str, score: float, text: str = PASSAGE_AUTH) -> dict:
+    """A retrieved snippet in the Retriever PORT's shape: a dict, not an object."""
+    return {"id": sid, "text": text, "score": score}
+
+
+def diag(severity: str = "medium", *, claim: str = CLAIM_ENTAILED,
+         label: str | None = None, cites: tuple = ()) -> Diagnosis:
+    """A Diagnosis, built the way the tasks want to read.
+
+    `cites` is a tuple of (snippet_id, score) — the score being the RETRIEVER's,
+    which is the only kind the gate will look at.
+    """
+    return Diagnosis(
+        summary="auth regression",
+        severity=severity,
+        proposed_comment=claim,
+        proposed_label=label,
+        citations=[Citation(snippet_id=i, score=s) for i, s in cites],
+    )
+
 
 # ── classify() routing ────────────────────────────────────────────────────────
 # Each task is (name, state, expected_route). `state` is a full node input so the
@@ -24,7 +67,7 @@ CLASSIFY_TASKS = [
     # -- built-in issue-triage precedence: failing CI must beat a sparse body
     ("ci_beats_sparse",
      {"evidence": IssueEvidence(url="u", title="t", body="x",
-                                check_runs=[CheckRun("build", "failure")])},
+                                check_runs=[CheckRun(name="build", conclusion="failure")])},
      "deterministic"),
     ("sparse_no_ci",
      {"evidence": IssueEvidence(url="u", title="t", body="help")},
@@ -40,8 +83,7 @@ CLASSIFY_TASKS = [
     #
     # These take POST-normalise evidence: `touched_areas` is already filtered to
     # risky areas by CodeReviewSurface.normalize, so classify only asks whether
-    # it is empty. (It used to filter inside classify, which meant the same field
-    # name meant two different things at two points in the pipeline.)
+    # it is empty.
     ("delegation_failing_ci",
      {"_surface": CodeReviewSurface(),
       "evidence": {"has_failing_ci": True, "touched_areas": [], "files": []}},
@@ -62,8 +104,7 @@ CLASSIFY_TASKS = [
 # The tasks above hand-build post-normalise evidence, which pins classify but not
 # the normaliser feeding it. That gap is exactly how the code_review surface came
 # to receive issue-shaped evidence and route everything to human_review while
-# every test stayed green (T5). These drive raw provider payloads through the
-# surface's real normalize.
+# every test stayed green (T5).
 SURFACE_PIPELINE_TASKS = [
     ("pipeline_failing_ci_beats_risk",
      {"html_url": "u", "title": "fix auth", "files": [{"filename": "app/auth/views.py"}],
@@ -89,62 +130,77 @@ SURFACE_PIPELINE_TASKS = [
 ]
 
 # ── independent_review() gate ─────────────────────────────────────────────────
-# (name, diagnosis, retrieved{id: score}, policy | None, expected_decision)
-# policy=None exercises the module defaults (min 0.35, severity low|medium,
-# actions comment|comment+label); a dict exercises a tenant's resolved policy.
+# (name, diagnosis, retrieved_snippets, policy | None, expected_decision)
+# policy=None exercises the module defaults (relevance 0.35, entailment 0.25,
+# severity low|medium, actions comment|comment+label).
 _DEFAULT_ACTIONS = ["comment", "comment+label"]
 
 GATE_TASKS = [
-    # -- groundedness_ok
+    # -- groundedness_ok: is the citation real, and relevant enough?
     ("grounded_approve",
-     Diagnosis("s", "medium", "c", None, [Citation("iss-101", 0.61)]),
-     {"iss-101": 0.61}, None, "approve"),
+     diag(cites=(("iss-101", 0.61),)),
+     [snippet("iss-101", 0.61)], None, "approve"),
     ("weak_citation_escalate",                       # real id, below threshold
-     Diagnosis("s", "medium", "c", None, [Citation("iss-101", 0.22)]),
-     {"iss-101": 0.22}, None, "escalate_to_human"),
+     diag(cites=(("iss-101", 0.22),)),
+     [snippet("iss-101", 0.22)], None, "escalate_to_human"),
     ("phantom_citation_escalate",                    # id never retrieved
-     Diagnosis("s", "medium", "c", None, [Citation("iss-999", 0.9)]),
-     {"iss-101": 0.61}, None, "escalate_to_human"),
+     diag(cites=(("iss-999", 0.9),)),
+     [snippet("iss-101", 0.61)], None, "escalate_to_human"),
     ("no_citation_escalate",                         # cites nothing at all
-     Diagnosis("s", "medium", "c", None, []),
-     {"iss-101": 0.61}, None, "escalate_to_human"),
+     diag(cites=()),
+     [snippet("iss-101", 0.61)], None, "escalate_to_human"),
+
+    # -- entailment_ok (T22): does the claim FOLLOW from what it cites?
+    # The citation here is real AND clears the relevance bar, so steps 1 and 2
+    # both pass. Only the entailment check can catch it.
+    ("overreaching_claim_escalates",
+     diag(claim=CLAIM_OVERREACH, cites=(("iss-101", 0.61),)),
+     [snippet("iss-101", 0.61)], None, "escalate_to_human"),
+    ("claim_about_the_wrong_snippet_escalates",
+     diag(claim=CLAIM_ENTAILED, cites=(("iss-102", 0.61),)),
+     [snippet("iss-102", 0.61, PASSAGE_CI)], None, "escalate_to_human"),
+    ("entailed_claim_approves",                      # balanced counterpart
+     diag(claim=CLAIM_ENTAILED, cites=(("iss-101", 0.61),)),
+     [snippet("iss-101", 0.61)], None, "approve"),
 
     # -- risk_ok
     ("high_severity_escalate",                       # grounded, still too risky
-     Diagnosis("s", "critical", "c", None, [Citation("iss-101", 0.61)]),
-     {"iss-101": 0.61}, None, "escalate_to_human"),
+     diag("critical", cites=(("iss-101", 0.61),)),
+     [snippet("iss-101", 0.61)], None, "escalate_to_human"),
     ("low_severity_approve",
-     Diagnosis("s", "low", "c", None, [Citation("iss-101", 0.61)]),
-     {"iss-101": 0.61}, None, "approve"),
+     diag("low", cites=(("iss-101", 0.61),)),
+     [snippet("iss-101", 0.61)], None, "approve"),
 
     # -- permission_ok  (T7: the third boolean had NO coverage at all)
     ("action_not_allowed_escalate",
-     # proposed_label makes this a "comment+label" action; policy permits only
-     # "comment", so the action allowlist must escalate it despite being
-     # perfectly grounded and low severity.
-     Diagnosis("s", "medium", "c", "needs-triage", [Citation("iss-101", 0.61)]),
-     {"iss-101": 0.61}, {"allowed_actions": ["comment"]}, "escalate_to_human"),
+     diag(label="needs-triage", cites=(("iss-101", 0.61),)),
+     [snippet("iss-101", 0.61)], {"allowed_actions": ["comment"]}, "escalate_to_human"),
     ("action_allowed_approve",                       # balanced counterpart
-     Diagnosis("s", "medium", "c", None, [Citation("iss-101", 0.61)]),
-     {"iss-101": 0.61}, {"allowed_actions": ["comment"]}, "approve"),
+     diag(cites=(("iss-101", 0.61),)),
+     [snippet("iss-101", 0.61)], {"allowed_actions": ["comment"]}, "approve"),
     ("label_action_allowed_approve",
-     Diagnosis("s", "medium", "c", "needs-triage", [Citation("iss-101", 0.61)]),
-     {"iss-101": 0.61}, {"allowed_actions": _DEFAULT_ACTIONS}, "approve"),
+     diag(label="needs-triage", cites=(("iss-101", 0.61),)),
+     [snippet("iss-101", 0.61)], {"allowed_actions": _DEFAULT_ACTIONS}, "approve"),
 
     # -- the multi-tenant claim itself: ONE diagnosis, TWO policies, OPPOSITE
     # outcomes, purely from thresholds. docs/MULTI_TENANT.md asserts this; these
     # two tasks are what make the assertion testable rather than prose.
     ("same_diagnosis_lenient_policy_approves",
-     Diagnosis("s", "medium", "c", None, [Citation("iss-101", 0.36)]),
-     {"iss-101": 0.36}, {"min_relevance_score": 0.35}, "approve"),
+     diag(cites=(("iss-101", 0.36),)),
+     [snippet("iss-101", 0.36)], {"min_relevance_score": 0.35}, "approve"),
     ("same_diagnosis_strict_policy_escalates",
-     Diagnosis("s", "medium", "c", None, [Citation("iss-101", 0.36)]),
-     {"iss-101": 0.36}, {"min_relevance_score": 0.40}, "escalate_to_human"),
+     diag(cites=(("iss-101", 0.36),)),
+     [snippet("iss-101", 0.36)], {"min_relevance_score": 0.40}, "escalate_to_human"),
 
     # -- a stricter tenant's severity allowlist
     ("tenant_severity_allowlist_escalates",
-     Diagnosis("s", "medium", "c", None, [Citation("iss-101", 0.61)]),
-     {"iss-101": 0.61}, {"severity_allowlist": ["low"]}, "escalate_to_human"),
+     diag(cites=(("iss-101", 0.61),)),
+     [snippet("iss-101", 0.61)], {"severity_allowlist": ["low"]}, "escalate_to_human"),
+
+    # -- a stricter tenant's entailment bar
+    ("tenant_entailment_bar_escalates",
+     diag(claim=CLAIM_ENTAILED, cites=(("iss-101", 0.61),)),
+     [snippet("iss-101", 0.61)], {"min_entailment_score": 0.99}, "escalate_to_human"),
 ]
 
 # ── the gate driven by the REAL retriever ─────────────────────────────────────
@@ -155,10 +211,6 @@ GATE_TASKS = [
 # meaningful INPUT. That blind spot hid T21: retrieval returned a rank-derived
 # score that forced the top hit to 1.0 on every query, so no citation could ever
 # fail the relevance check — and the suite stayed green throughout.
-#
-# These tasks close it by retrieving for real and citing whatever comes back. An
-# off-topic query must produce an ungroundable diagnosis, which is the property
-# the entire safety story rests on.
 RETRIEVAL_GATE_TASKS = [
     ("real_retrieval_on_topic_approves",
      "OAuth callback returns 500 when state param missing", "approve"),

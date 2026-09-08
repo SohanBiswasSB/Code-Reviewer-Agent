@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from nodes._render import render_evidence
 from nodes._surface import active_surface, namespace_for
-from schemas.diagnosis import Citation, Diagnosis
+from schemas.diagnosis import Citation, Diagnosis, Finding
 
 
 def _fallback_query(ev) -> str:
@@ -47,15 +47,25 @@ def generate_diagnosis(state: dict, llm=None, retriever=None) -> dict:
 
     if llm is None:
         # Offline stub so the pipeline runs end to end without a model server.
-        # It cites the top hit with the retriever's OWN relevance score -- never
-        # a model-supplied one, which would be gameable (see T17).
+        #
+        # Two things it does deliberately:
+        #   · cites the top hit with the retriever's OWN relevance score, never a
+        #     model-supplied one, which would be gameable (T17);
+        #   · DERIVES its claim from the cited passage's text, so the claim
+        #     actually follows from its citation. The stub previously asserted
+        #     "possible duplicate of a known auth regression", which entails
+        #     nothing about whatever was retrieved — so once the entailment check
+        #     existed (T22) every offline run escalated. A stub that models an
+        #     *ungrounded* diagnosis is not a useful stand-in for a grounded one.
         top = hits[0] if hits else None
+        claim = (f"Related to a known issue: {top['text']}." if top
+                 else "No related prior issue was retrieved.")
         diag = Diagnosis(
-            summary="[stub] likely auth-middleware regression",
+            summary="[stub] likely regression in the area described by the cited issue",
             severity="medium",
-            proposed_comment="Possible duplicate of a known auth regression; see linked issue.",
+            proposed_comment=claim,
             proposed_label="needs-triage",
-            citations=[Citation(top["id"], top["score"])] if top else [],
+            citations=[Citation(snippet_id=top["id"], score=top["score"])] if top else [],
         )
     else:
         # The TENANT's prompt, resolved and pinned by resolve_tenant (T6). Read
@@ -90,8 +100,10 @@ def _parse_diagnosis(raw: str, hits: list[dict]) -> Diagnosis:
       a malformed response escalates to a human. Defaulting low would auto-approve
       whatever the model failed to express clearly — the wrong direction to fail.
 
-    TODO(T17): the prompt documents a `findings[]` array that `Diagnosis` has no
-    field for, so those per-file findings are still dropped here.
+    · **`findings[]` is parsed** (T17). The prompt has always documented a
+      per-file, per-line findings array; `Diagnosis` had no field for it, so the
+      most useful half of the model's output was read and thrown away while
+      anyone reading the prompt would assume it was used.
     """
     import json as _json
 
@@ -102,7 +114,12 @@ def _parse_diagnosis(raw: str, hits: list[dict]) -> Diagnosis:
     for entry in data.get("citations", []):
         cid = entry.get("snippet_id") if isinstance(entry, dict) else entry
         if cid:
-            citations.append(Citation(cid, by_id.get(cid, 0.0)))
+            citations.append(Citation(snippet_id=cid, score=by_id.get(cid, 0.0)))
+
+    findings = [
+        Finding(**{k: v for k, v in f.items() if k in Finding.model_fields})
+        for f in data.get("findings", []) if isinstance(f, dict)
+    ]
 
     return Diagnosis(
         summary=data.get("summary", ""),
@@ -110,4 +127,5 @@ def _parse_diagnosis(raw: str, hits: list[dict]) -> Diagnosis:
         proposed_comment=data.get("proposed_comment", ""),
         proposed_label=data.get("proposed_label"),
         citations=citations,
+        findings=findings,
     )

@@ -24,6 +24,15 @@ jobs:
       - name: unit tests
         run: pytest
 
+      # The durable pause is the basis of the approval gate, so run the suite
+      # again with the SERIALISER SET TO STRICT. Without this an unregistered
+      # state type only warns -- and the release that starts enforcing it would
+      # make every paused run unresumable (T15).
+      - name: unit tests (strict checkpoint serialiser)
+        run: pytest
+        env:
+          LANGGRAPH_STRICT_MSGPACK: "true"
+
       # Reports FAIL when the model server is absent, which is expected in CI --
       # so assert only that it runs and produces a report.
       - name: doctor (report only)

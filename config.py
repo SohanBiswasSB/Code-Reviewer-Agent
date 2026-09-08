@@ -76,6 +76,17 @@ def get_sink(name: str):
     return registry.get_adapter("sink", name)()
 
 
+def get_entailer():
+    """The Entailer used by the gate's third grounding check (T22).
+
+    Defaults to the LEXICAL adapter on purpose: the gate's booleans must be
+    computable with no provider and no model download, or the safety suite stops
+    being runnable everywhere. Set ENTAILER=cross_encoder for the stronger
+    instrument once the model is present.
+    """
+    return registry.get_adapter("entailer", os.getenv("ENTAILER", "lexical"))()
+
+
 def get_tenant_store():
     return registry.get_adapter("tenant", os.getenv("TENANT_STORE", "fs"))()
 
