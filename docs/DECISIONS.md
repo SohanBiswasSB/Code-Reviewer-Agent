@@ -566,3 +566,64 @@ green. Same lesson as T21: ask what a passing suite is substituting for the real
 input.
 
 Gates 27 to 32. Tests 62 to 63. ruff clean.
+
+### 2026-09-09 — T16, T6, T18 closed: prompts compose, and are actually sent
+
+**T16 was the safety hole, and the demonstration is stark.** Prompt resolution
+fell back at *file* level, so a tenant override replaced `_default` outright.
+Restoring that old behaviour and measuring what each tenant would have sent:
+
+    _default      2733 chars   lost guardrails: none
+    milesone       518 chars   lost: grounding, untrusted, no_verdict, schema
+    project_a      207 chars   lost: grounding, untrusted, no_verdict, schema
+    project_b      215 chars   lost: grounding, untrusted, no_verdict, schema
+
+A 207-character prompt against a 2733-character org contract, with **all four
+guardrails gone** — for exactly the three codebases that bothered to customise
+anything, while the one nobody overrides kept everything. And it read as if it
+inherited, because each override says "Org contract applies (grounded-only,
+untrusted-input, no-verdict, structured JSON)" in prose, referring to a file the
+model never received.
+
+Prompts now **compose**: the org contract is always included, and a tenant file
+is a delta on top. `{{include _default}}` lets a tenant control placement; absent
+it, the contract is prepended and the delta follows under a visible
+`TENANT OVERLAY` header so a captured prompt can be attributed. This makes the
+invariant in MULTI_TENANT.md structural rather than documented: **tenants tune
+values, they never remove the boundary.** 24 parametrised tests assert every
+guardrail clause survives for every tenant.
+
+**T6 — prompts are resolved and PINNED by `resolve_tenant`,** not fetched by the
+LLM nodes. Same reasoning as the policy: they land in the checkpoint, so a run
+that pauses at the gate and resumes hours later uses the prompt text it started
+with even if the tenant edited the file meanwhile. `_prompt_version` is a content
+hash alongside `_policy_version`. A node with no pinned prompt **raises** rather
+than falling back to something hardcoded.
+
+**T18 — the judge now receives the retrieved snippets.** Its prompt tells it to
+verify citation ids against RETRIEVED; with only the diagnosis it could not, so
+any reasoning it produced about grounding was necessarily invented and then shown
+to a human approver as though real. The booleans always did the true check, so
+the *decision* was sound — but a justification asserting a check that never
+happened is worse than silence.
+
+**Three smaller decisions inside this work.**
+
+*Evidence is fenced, in the user turn only.* `nodes/_render.py` wraps untrusted
+material in explicit `<<<UNTRUSTED_EVIDENCE>>>` delimiters and never puts it in
+the system turn. Saying "treat this as data" is not a boundary — an injected
+"ignore the above" reads identically to a real instruction unless something marks
+where the data starts. This is the delimiting half of T20; the redaction half is
+T12 and is still open, so T20 is partial rather than done.
+
+*A model-supplied citation score is discarded.* `_parse_diagnosis` looks every
+score up in the retrieved hits. Verified: a model claiming `0.99` for a snippet
+the retriever scored `0.61` gets `0.61`. The gate compares against exactly this
+number, so trusting the model's would make grounding self-certified.
+
+*A missing severity defaults to `high`, not `low`.* `risk_ok` only passes
+allowlisted severities, so defaulting high means a malformed response escalates.
+Defaulting low would auto-approve whatever the model failed to express clearly —
+the wrong direction to fail, and an easy mistake to make while writing a parser.
+
+Tests 63 to 96. Gates 32. ruff clean.

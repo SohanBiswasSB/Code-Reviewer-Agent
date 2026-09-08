@@ -15,6 +15,7 @@ what a good query looks like for its own evidence shape.
 """
 from __future__ import annotations
 
+from nodes._render import render_evidence
 from nodes._surface import active_surface, namespace_for
 from schemas.diagnosis import Citation, Diagnosis
 
@@ -57,6 +58,56 @@ def generate_diagnosis(state: dict, llm=None, retriever=None) -> dict:
             citations=[Citation(top["id"], top["score"])] if top else [],
         )
     else:
-        diag = llm.diagnose(ev, hits)
+        # The TENANT's prompt, resolved and pinned by resolve_tenant (T6). Read
+        # from state rather than the store, so a resumed run uses the prompt it
+        # STARTED with even if the tenant edited the file meanwhile.
+        system = (state.get("_prompts") or {}).get("diagnosis")
+        if not system:
+            raise ValueError(
+                "generate_diagnosis: no diagnosis prompt in state. resolve_tenant "
+                "should have pinned it before this node ran."
+            )
+        diag = _parse_diagnosis(llm.complete(system, render_evidence(ev, hits)), hits)
 
     return {"diagnosis": diag, "_retrieved": hits}
+
+
+def _parse_diagnosis(raw: str, hits: list[dict]) -> Diagnosis:
+    """Turn the model's JSON into a Diagnosis.
+
+    Parsing lives here rather than in the adapter: an adapter that interpreted
+    responses would be one step away from making decisions, and the whole design
+    rests on the model never doing that.
+
+    Two deliberate choices:
+
+    · **Citation scores are looked up from `hits`, never taken from the model.**
+      A model-supplied relevance score would be trivially gameable if anything
+      trusted it, and the gate compares against exactly this number (T17).
+
+    · **An unparseable or missing severity defaults to `high`, not `low`.**
+      `risk_ok` only passes severities in the allowlist, so defaulting high means
+      a malformed response escalates to a human. Defaulting low would auto-approve
+      whatever the model failed to express clearly — the wrong direction to fail.
+
+    TODO(T17): the prompt documents a `findings[]` array that `Diagnosis` has no
+    field for, so those per-file findings are still dropped here.
+    """
+    import json as _json
+
+    data = _json.loads(raw)
+    by_id = {h["id"]: h.get("score", 0.0) for h in hits}
+
+    citations = []
+    for entry in data.get("citations", []):
+        cid = entry.get("snippet_id") if isinstance(entry, dict) else entry
+        if cid:
+            citations.append(Citation(cid, by_id.get(cid, 0.0)))
+
+    return Diagnosis(
+        summary=data.get("summary", ""),
+        severity=data.get("severity") or "high",
+        proposed_comment=data.get("proposed_comment", ""),
+        proposed_label=data.get("proposed_label"),
+        citations=citations,
+    )

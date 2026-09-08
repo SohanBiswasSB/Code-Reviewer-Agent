@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 
+from nodes._render import render_for_judge
 from schemas.diagnosis import ReviewResult
 
 MIN_RELEVANCE_SCORE = float(os.getenv("MIN_RELEVANCE_SCORE", "0.35"))  # MEASURE this
@@ -34,7 +35,19 @@ def independent_review(state: dict, judge_llm=None) -> dict:
     if judge_llm is None:
         reasoning = "[stub] citations checked against retrieved set and threshold."
     else:
-        reasoning = judge_llm.review_reasoning(diag)  # returns str, nothing else
+        # The TENANT's judge prompt, pinned by resolve_tenant (T6).
+        system = (state.get("_prompts") or {}).get("judge")
+        if not system:
+            raise ValueError(
+                "independent_review: no judge prompt in state. resolve_tenant "
+                "should have pinned it before this node ran."
+            )
+        # T18: the judge receives the SAME retrieved evidence, because its prompt
+        # instructs it to verify citation ids against RETRIEVED. Given only the
+        # diagnosis it could not perform that check, so its reasoning about
+        # grounding was necessarily invented — and shown to a human approver as
+        # though it were real.
+        reasoning = judge_llm.complete(system, render_for_judge(diag, state["_retrieved"]))
 
     # 2) code DECIDES — three booleans from real data, never parsed from the llm.
     groundedness_ok = bool(diag.citations) and all(

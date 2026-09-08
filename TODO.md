@@ -146,7 +146,7 @@ Gates 27 -> 32, including five that drive raw provider payloads through the
 surface's real `normalize` (the previous tasks hand-built post-normalise
 evidence, which is precisely how the shape mismatch stayed invisible).
 
-### T6. Tenant prompts are never loaded `[ ]`
+### T6. Tenant prompts are never loaded `[x]`
 
 `TenantStore.prompt()` is called by **nothing**. `policy()` is wired into the gate
 (good), but both LLM nodes ignore the tenant's prompt files entirely.
@@ -264,7 +264,7 @@ unresumable** — the worst possible failure for a design whose safety property 
 explicitly registered as allowed msgpack modules, and a test round-trips a
 suspended run through a checkpointer without warnings.
 
-### T16. Tenant prompt overrides STRIP every guardrail `[ ]`
+### T16. Tenant prompt overrides STRIP every guardrail `[x]`
 
 `FsTenantStore.prompt()` falls back at **file** level: a tenant file is returned
 *instead of* `_default`, never merged. But all three tenant overrides are 3–7
@@ -310,7 +310,7 @@ harmless, but asking for it invites exactly the wrong assumption. Ask for ids on
 **Done when:** `Diagnosis` carries typed `findings`, the prompt no longer asks
 for scores, and a schema-constrained call round-trips the documented shape.
 
-### T18. The judge cannot do what its own prompt instructs `[ ]`
+### T18. The judge cannot do what its own prompt instructs `[x]`
 
 `prompts/code_review_judge.md` tells the judge to check whether every
 `citation_id` in the diagnosis actually appears in RETRIEVED, and says it sees
@@ -347,7 +347,7 @@ keep them and make the duplication mechanical.
 at the non-canonical copies. Still open: the duplicate files under `prompts/`
 remain, and nothing prevents them drifting from `tenants/_default/prompts/**`.
 
-### T20. Prompt-engineering standards from BEST_PRACTICES section 11 unmet `[ ]`
+### T20. Prompt-engineering standards from BEST_PRACTICES section 11 unmet `[~]`
 
 The standard is "role + explicit output schema + few-shot exemplars +
 delimited/spotlighted untrusted input + chain-of-thought + self-check + refusal

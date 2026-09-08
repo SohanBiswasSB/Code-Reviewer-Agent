@@ -47,8 +47,25 @@ def _policy_version(policy: dict) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
 
 
-def resolve_tenant(state: dict, store=None) -> dict:
-    """Attach `_policy`, `_surface_name` and `_policy_version` to state."""
+def _prompt_version(prompts: dict) -> str:
+    """Content hash of the composed prompts, for the same reason as the policy.
+
+    A prompt is production configuration. A run that pauses at the gate and
+    resumes hours later must be able to state which prompt text produced the
+    diagnosis a human approved — "the tenant's prompt" is not an answer when the
+    file is editable mid-run.
+    """
+    canonical = json.dumps(prompts, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
+
+
+def resolve_tenant(state: dict, store=None, surface=None) -> dict:
+    """Resolve policy AND prompts once, and pin both into state.
+
+    Prompts are resolved here rather than in the LLM nodes so that they land in
+    the checkpoint alongside the policy. That is what stops a resumed run from
+    mixing versions — the substance of G8, and the reason this is a node.
+    """
     surface_name = state.get("surface")
     if not surface_name:
         raise ValueError("resolve_tenant: state['surface'] is required")
@@ -68,8 +85,28 @@ def resolve_tenant(state: dict, store=None) -> dict:
             f"(enabled: {enabled})"
         )
 
+    # Which prompt node keys this surface needs. Resolved from the surface so a
+    # new surface with different nodes needs no change here.
+    if surface is None:
+        surface = state.get("_surface")
+        if surface is None:
+            import config
+            surface = config.get_surface(surface_name)
+
+    node_keys = {
+        "diagnosis": getattr(surface, "diagnosis_prompt", "diagnosis"),
+        "judge": getattr(surface, "judge_prompt", "judge"),
+    }
+    prompts = {}
+    for role, node in node_keys.items():
+        # Missing prompts must fail HERE, before any model call and before the
+        # human sees a gate — not deep inside generate_diagnosis.
+        prompts[role] = store.prompt(tenant, surface_name, node)
+
     return {
         "_policy": policy,
         "_surface_name": surface_name,
         "_policy_version": _policy_version(policy),
+        "_prompts": prompts,
+        "_prompt_version": _prompt_version(prompts),
     }

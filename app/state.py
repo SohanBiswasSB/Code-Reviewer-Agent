@@ -28,6 +28,8 @@ class TriageState(TypedDict, total=False):
     _policy: dict               # tenant+surface guardrails (thresholds, allowlists)
     _surface_name: str          # a NAME, not the object: checkpoints must serialise
     _policy_version: str        # content hash, so a resumed run cannot mix versions
+    _prompts: dict              # role -> composed prompt text, pinned at run start
+    _prompt_version: str        # content hash of the above (G8)
 
     # ── produced as the run proceeds ─────────────────────────────────────────
     _raw: Any                   # unvalidated provider payload
