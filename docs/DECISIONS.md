@@ -304,3 +304,35 @@ Stubbed only `tools/github_client.py`'s network calls, gave the graph a real
   of anything except that the plumbing connects.
 
 Conclusion: the safety machinery works; the useful work does not exist yet.
+
+### 2026-09-09 (later still) — prompt audit
+
+Read all eight prompts against the code that is supposed to consume them. The
+prompts themselves are strong — the judge prompt in particular states outright
+that a verdict "will be ignored", which is the right way to encode
+judge-explains/code-decides in wording as well as in structure. Every problem
+found is a mismatch between the prompts and the code:
+
+- **T16 (safety hole).** Tenant prompt overrides do not inherit — the store falls
+  back at file level, so a tenant override *replaces* `_default`. Every override
+  in the repo is a short emphasis note that merely *mentions* the org contract in
+  prose. Once T6 lands, overriding tenants would get a prompt with no grounding
+  rule, no untrusted-input rule, no no-verdict rule and no schema, while
+  `_default` — which nobody overrides — keeps all of them. Filed as G14 under P2
+  hardening in ARCHITECTURE_GAPS; that is a misfiling and it should be promoted.
+- **T17.** The diagnosis prompt specifies a `findings[]` array that `Diagnosis`
+  has no field for, so the most useful half of the output would be dropped at
+  parse. It also asks the model for `citations[].score`, which must come from the
+  retriever — harmless today only because the gate looks the score up itself, but
+  it invites precisely the wrong assumption.
+- **T18.** The judge prompt instructs it to verify citation ids against
+  RETRIEVED, but `independent_review` passes only the diagnosis. The booleans
+  still do the real check, so the decision stays sound — but the reasoning shown
+  to a human approver would claim a check that never happened.
+- **T19.** `prompts/*.md` duplicates `tenants/_default/prompts/**` byte-for-byte,
+  and the surfaces point at the flat copies even though the README calls the
+  tenant copies canonical.
+- **T20.** No few-shot exemplars, no structural delimiting of untrusted input, no
+  version marker, no eval coverage. The first two matter more here than they
+  would with a frontier model, because the default profile is a 7B diagnosis
+  model and a 4B judge.
