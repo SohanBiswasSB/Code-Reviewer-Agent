@@ -264,6 +264,26 @@ unresumable** — the worst possible failure for a design whose safety property 
 explicitly registered as allowed msgpack modules, and a test round-trips a
 suspended run through a checkpointer without warnings.
 
+**CLOSED 2026-09-10 (fourth session), and the earlier diagnosis was wrong.**
+T11's Pydantic migration was *not* sufficient — it was the "or" branch of the
+done-when that was needed. Being a Pydantic model does not register a type;
+LangGraph added an explicit allowlist plus a strict mode, and an unregistered
+type is not an error but a **silent downgrade to `dict`**, so a resumed run loses
+the model it was written with and fails later as an `AttributeError` far from the
+cause.
+
+`app.state.CHECKPOINT_TYPES` now lists every model in `schemas/` as
+`(module, qualname)`, and `app.state.checkpoint_serde()` builds the serialiser
+carrying it — passed to both backends in `app/deps.py`. It lives beside
+`TriageState` because it is the same invariant as that module's docstring: a type
+that enters a channel must be declared, or it fails quietly.
+
+Three tests, teeth verified by deleting an entry: the round-trip test (now using
+the real serde, not a bare one — a bare serialiser "passes" strict mode by
+returning dicts), a nested round-trip asserting `has_failing_ci` survives, and a
+tripwire that walks `schemas/` and fails on any unregistered `BaseModel`.
+`pytest` and `LANGGRAPH_STRICT_MSGPACK=true pytest` both green.
+
 ### T16. Tenant prompt overrides STRIP every guardrail `[x]`
 
 `FsTenantStore.prompt()` falls back at **file** level: a tenant file is returned
@@ -523,13 +543,92 @@ exposes no rerank endpoint.
 `runtime()["reranker_device"]` names, with retrieval metrics proving it earns its
 cost.
 
+### T24. Documentation drift — the docs now understate what is built `[x]`
+
+**CLOSED 2026-09-10 (fourth session).** Every item below was corrected, and the
+three numbers that had drifted twice — the gate's boolean count, the gate-suite
+total, and the embedder's dimensionality — are now pinned by
+`tests/test_docs_consistency.py`, which asserts against the **files** rather than
+against a constant (a constant-to-constant assertion would be tautological; the
+point is that the human-facing sentence has to be updated too). It takes the gate
+total from the harness's own output, so the doc's claim is checked against the
+number of checks actually performed. `docs/DECISIONS.md` and `TODO.md` are
+excluded from the 768 check on purpose: they are append-only history and
+legitimately quote the old number while recording that it changed.
+
+Also fixed while here: `MODEL_CARD.md` said `execute()` "calls only
+`post_comment` / `add_label`", which stopped being where the limit is enforced
+when T5 moved writes behind the `ActionSink` port. The limit still holds; the
+row now names the mechanism that actually holds it.
+
+The original findings, kept because the line references show where this kind of
+claim accumulates:
+
+Found by reading all 2,629 lines of docs against the code on 2026-09-10. None of
+these are wrong-in-spirit; all of them are claims that were true when written and
+are now stale. They matter because `MODEL_CARD.md` and `README.md` are the two
+files a reader trusts first, and both understate the system.
+
+**The gate has FOUR booleans, not three** (T22 added `entailment_ok`):
+`MODEL_CARD.md:12`, `MODEL_CARD.md:26`, `README.md:19`, `README.md:28`,
+`README.md:101`, `docs/ARCHITECTURE.md:26`, `docs/ARCHITECTURE.md:61`.
+
+**Stale counts:** `MODEL_CARD.md:26` says the guard and booleans are covered by
+"24 regression tasks" — it is 36 gates. `docs/DECISIONS.md:300` (§7 cheat sheet)
+says "38 unit tests" — it is 144.
+
+**Stale embedder:** `MODEL_CARD.md:41` says "a 768-dimension embedder"; it is
+`bge-m3` at **1024** dims since 2026-09-10. The paragraph's *point* — that the
+thresholds are uncalibrated — is still exactly right, and is now worse.
+
+**`README.md:106-108` lists as stubbed three things that work:** `interrupt()`
+/resume with a real checkpointer, `POST /run`, and `POST /approve`. All closed by
+T3/T4. It also names a "GitLab client" — no GitLab adapter or client file exists
+at all, so there is nothing there to be a stub.
+
+**`docs/ARCHITECTURE.md:82`** calls G2 "the biggest open structural item" and says
+the fetch/diagnose/execute nodes still need surface delegation. T5 closed that;
+no file under `nodes/` imports `tools/` any more.
+
+**`docs/ROADMAP.md`** still annotates G1 as "port done; wire adapters + ingest"
+and G2 as "classify hook done; do fetch/diagnose/execute". G1's *enforcement* is
+done end to end (the retriever refuses un-namespaceable requests); only ingest is
+open. G2 is done.
+
+**`docs/DATA_STORAGE.md:224`** says "this working copy currently has neither
+`.git` nor `.gitignore`". Both exist.
+
+**`docs/DECISIONS.md` §6 "Where things stand"** describes the state before
+T3/T5/T6 closed. It is superseded by §8/§9 but does not say so, and it reads as
+current.
+
+**Both `README.md:62` and `docs/DECISIONS.md:300` advertise
+`python -m eval.demo_multitenant`**, which raises `TypeError`. See the
+known-broken note in §9 — fixing the script is the better resolution than
+removing the docs line.
+
+**Why it matters:** the project's stated culture is that a precisely-owned gap
+reads better than a vague claim. The inverse also holds — a doc that undersells
+what is built invites someone to rebuild it. And the four-boolean drift is the
+sharpest case: `MODEL_CARD.md` is the file that states the hard limits, so it
+should be the most accurate one in the repo.
+
+**Done when:** the counts, the boolean count and the embedder dims are correct in
+`README.md`, `MODEL_CARD.md` and `docs/ARCHITECTURE.md`; `README.md`'s status
+section reflects T3/T4/T5; `ROADMAP.md`'s G1/G2 annotations match reality; §6 is
+marked superseded; and a test or a `make docs-check` grep pins the numbers that
+have now drifted twice (boolean count, gate count, embedding dims) so this cannot
+recur silently.
+
 ---
 
 ## P2 — from the architecture audit
 
 Tracked in full in `docs/ARCHITECTURE_GAPS.md`; listed here so nothing lives in
-only one place: G6 AuditSink `[x]` (2026-09-10, docs/DATA_STORAGE.md) · G7 idempotency `[ ]` · G8 pin prompt+policy
-version into the checkpoint `[ ]` · G9 failure edges + retry/backoff `[ ]` ·
+only one place: G2 surface dispatch `[x]` (T5) · G4 log detect→aggregate→sample `[x]` ·
+G6 AuditSink `[x]` (2026-09-10, docs/DATA_STORAGE.md) · G7 idempotency `[ ]` · G8 pin prompt+policy
+version into the checkpoint `[x]` (`_policy_version` / `_prompt_version`, pinned by
+`resolve_tenant`) · G9 failure edges + retry/backoff `[ ]` ·
 G10 corrective-RAG loop cap `[ ]` · G11 policy schema validation `[ ]` ·
 G12 budgets/rate limits `[ ]` · G13 Notifier + approver authZ `[ ]` ·
 G14 prompt inheritance `[ ]` · G15 prompt/policy cache `[ ]` · G17 capability
@@ -539,7 +638,10 @@ eval `[ ]`.
 
 ## Hygiene
 
-- [x] `.env.example` — every setting, with the `CRA_` prefix convention
+- [~] `.env.example` — every setting, with the `CRA_` prefix convention. **The file
+      exists but is NOT in the repo**: `.gitignore:11`'s `.env.*` matches it, so it
+      has never been committed. Either add a `!.env.example` negation or drop this
+      claim — right now the box is ticked for a file a fresh clone does not get.
 - [x] `MODEL_CARD.md` — scope limits, as SF-Crime has. States plainly: this agent
       never pushes code, only comments; it acts as the approving human's identity;
       it never mutates infrastructure or a database.
@@ -547,7 +649,17 @@ eval `[ ]`.
       one committed path is wrong on the other machine, so it is selected per
       machine instead. Both paths are in docs/DECISIONS.md section 1. Also sets
       python.analysis.extraPaths, which fixes the spurious import errors.
-- [ ] `requirements-lock.txt` — `pip freeze` once the environment is real
+- [ ] `requirements-lock.txt` — `pip freeze` once the environment is real. Still
+      open **deliberately**: this Mac has `requirements.txt` only, so a freeze here
+      would omit `openai`, `sentence-transformers` and torch and claim a
+      completeness it does not have. Do it on the machine that has run a live model.
+- [x] Pin the core direct deps in `requirements.txt` — 2026-09-10. Not for
+      deployment hygiene: the checkpoint serialiser's treatment of unregistered
+      types changed under us between releases, and because a blocked type comes
+      back as a `dict` rather than raising, the change was silent. A dependency
+      whose behaviour the approval gate's durability rests on is a correctness
+      concern from the first run. (T15 is fixed properly by registration; the pin
+      makes a serialiser change a deliberate upgrade rather than a surprise.)
 - [x] `.gitattributes` (eol=lf) — 97bf3a9. Load-bearing with two machines.
 - [x] Split requirements (core / -local / -dev) — 97bf3a9
 

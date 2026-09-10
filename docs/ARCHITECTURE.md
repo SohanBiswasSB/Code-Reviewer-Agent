@@ -23,7 +23,7 @@ A plug-and-play, multi-tenant agentic microservice. Three ideas stack:
  │                                                            → diagnose (RAG, tenant prompt)│
  │                                                            → judge     (tenant prompt;    │
  │                                                              EXPLAINS only)               │
- │                                                                 │ 3 python booleans use   │
+ │                                                                 │ 4 python booleans use   │
  │                                                                 │ the TENANT policy       │
  │                                                     approve ────┘   escalate_to_human →END│
  │                                                            ▼         (SHARED safety net)  │
@@ -58,7 +58,8 @@ A plug-and-play, multi-tenant agentic microservice. Three ideas stack:
 2. `fetch_evidence` via the tenant's `EvidenceSource` (its repo diff, or its S3 logs).
 3. `normalize` → validated evidence; `classify` (rule-based) picks the route.
 4. `ai_investigation`: `diagnose` (RAG, tenant's diagnosis prompt) → `judge` (tenant's judge
-   prompt, reasoning only) → **3 booleans read the tenant policy** (relevance threshold,
+   prompt, reasoning only) → **4 booleans read the tenant policy** (relevance threshold,
+   entailment threshold,
    severity allowlist, allowed actions) → `approve` or **`escalate_to_human`**.
 5. `await_approval` → `interrupt()` (durable checkpoint) → human resumes → `execute`
    (guarded, verbatim, as the approver) or the log-review report sink (advisory only).
@@ -79,9 +80,14 @@ See **docs/ARCHITECTURE_GAPS.md** for the v1 architecture recheck (P0–P2). Por
 support them: `CredentialProvider` (per-tenant secrets), `InputGuard` (PII/secret redaction
 + injection neutralization), `AuditSink` (immutable run record), `Notifier` (approval
 notify + authZ). `Retriever` is now namespace-scoped so retrieval never crosses codebases.
-The biggest open structural item is **G2**: the graph must dispatch through the active
-`Surface` (source/query/classify/prompts/sink) — started in `classify`, pending for the
-other nodes.
+**G2 is closed** (T5): every node dispatches through the active `Surface` — source,
+query, classify, prompt keys and sink — and no file under `nodes/` imports `tools/`.
+**G1 is enforced** end to end: the namespace comes from `policy.codebase`, and a retriever
+that cannot honour one *refuses* rather than retrieving across codebases. The open half of
+G1 is ingest — which means every tenant that declares a `codebase` currently cannot
+retrieve at all, so only `_default` runs (T10). The biggest open structural items are now
+**G5/T12** (no redaction before evidence leaves the trust boundary) and **G9** (no failure
+edges, so a node error kills the run instead of routing to a human).
 
 ## Accuracy-first stance (cost is no object)
 Because this runs locally with no cost constraint, the design maximizes correctness (see

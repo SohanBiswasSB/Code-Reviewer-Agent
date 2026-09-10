@@ -9,12 +9,15 @@ node docstring + this file. Honesty about scope reads stronger than vague confid
 - [ ] `reject_retrieve_more` corrective-RAG loop (not wired)
 - [ ] Prompt-injection input guard + adversarial eval class
 - [ ] Multi-provider capability eval (OpenAI vs Claude vs local)
-- [x] AsyncPostgresSaver + real interrupt/resume  *(lifespan owns the async lifecycle)*
+- [x] AsyncPostgresSaver + real interrupt/resume  *(lifespan owns the async lifecycle;
+      the Postgres path itself is written but UNVERIFIED — no Postgres on either machine)*
 
 ## Architecture gaps (from docs/ARCHITECTURE_GAPS.md — prioritized)
 P0 (must close):
-- [ ] G1 tenant-scoped retrieval (namespace per codebase)   *(port done; wire adapters + ingest)*
-- [ ] G2 graph dispatches through the active Surface          *(classify hook done; do fetch/diagnose/execute)*
+- [~] G1 tenant-scoped retrieval (namespace per codebase)   *(port + ENFORCEMENT done: an
+      adapter that cannot honour a namespace refuses. Remaining: a real namespaced ingest —
+      until then a tenant with a `codebase` binding cannot retrieve at all, only `_default`)*
+- [x] G2 graph dispatches through the active Surface          *(T5: source/query/classify/prompts/sink)*
 - [ ] G3 per-tenant credentials (secret ref) + API authN/Z    *(CredentialProvider port done)*
 - [x] G4 log-review detect→aggregate→sample pipeline  *(adapters/detectors.py + source_s3logs)*
 - [ ] G5 PII/secret redaction before any LLM call (InputGuard)

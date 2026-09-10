@@ -48,3 +48,50 @@ class TriageState(TypedDict, total=False):
     approved: bool              # written ONLY by await_approval, from the resume
     result: dict
     _audit: dict                # did the run record persist? (G6) -- never the record itself
+
+
+# ── what may be reconstructed from a checkpoint (T15) ────────────────────────
+# Every non-primitive type that enters a channel above, listed as
+# (module, qualname). LangGraph's serialiser refuses to rebuild a type it was
+# not told about: it warns today, blocks under LANGGRAPH_STRICT_MSGPACK=true,
+# and will block by default in a future release. A blocked type does not raise
+# -- it comes back as a plain `dict`, so a resumed run silently loses the model
+# it was written with, and `review.decision` or `evidence.has_failing_ci` turns
+# into an AttributeError far from the cause.
+#
+# It lives next to TriageState because it is the same invariant as the module
+# docstring's: a type that enters a channel must be declared, or it fails
+# quietly rather than loudly. Adding a model to `evidence`/`diagnosis`/`review`
+# means adding it here, and `tests/test_graph_resume.py` pins that.
+#
+# Nested models do NOT need their own entry -- registering the outer type is
+# enough to rebuild `Diagnosis.citations[]` as `Citation` -- but they are listed
+# anyway, because any of them could become a channel value directly and the
+# cost of an extra line is nothing against the cost of the silent failure.
+CHECKPOINT_TYPES: tuple[tuple[str, str], ...] = (
+    ("schemas.evidence", "CheckRun"),
+    ("schemas.evidence", "LinkedPR"),
+    ("schemas.evidence", "IssueEvidence"),
+    ("schemas.evidence", "CodeChange"),
+    ("schemas.evidence", "LogSample"),
+    ("schemas.evidence", "LogCandidate"),
+    ("schemas.evidence", "LogWindow"),
+    ("schemas.diagnosis", "Citation"),
+    ("schemas.diagnosis", "Finding"),
+    ("schemas.diagnosis", "Diagnosis"),
+    ("schemas.diagnosis", "ReviewResult"),
+)
+
+
+def checkpoint_serde():
+    """The serialiser every checkpointer must use.
+
+    Built here rather than left to default so the allowlist above is applied
+    everywhere a checkpointer is constructed -- `app/deps.py` for both backends,
+    and the tests. A checkpointer created with the bare default serialiser is
+    the failure mode this exists to prevent, and it is invisible until a run
+    resumes.
+    """
+    from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+
+    return JsonPlusSerializer(allowed_msgpack_modules=CHECKPOINT_TYPES)

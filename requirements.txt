@@ -1,16 +1,33 @@
-# Core runtime. NOTE: intentionally unpinned in these first commits — pin exact
-# versions (pip freeze > requirements-lock.txt) before anything is deployed.
+# Core runtime: the graph + the API.
 #
-#   requirements.txt        this file — the graph + the API
+#   requirements.txt        this file
 #   requirements-local.txt  local models: LM Studio client + in-process reranker
 #   requirements-dev.txt    tests + lint
 #
 # The safety-gate suite (python -m eval.harness) deliberately needs NONE of these.
+#
+# ── why these are pinned (2026-09-10) ────────────────────────────────────────
+# These were unpinned "until anything is deployed". That turned out to be the
+# wrong bar: the checkpoint SERIALISER's treatment of unregistered types changed
+# under us between releases, and because a blocked type comes back as a plain
+# dict rather than raising, the change was silent. An unpinned dependency whose
+# behaviour the approval gate's durability depends on is not a deployment
+# concern -- it is a correctness concern from the first run.
+#
+# `app.state.CHECKPOINT_TYPES` now registers our state types explicitly, so the
+# behaviour no longer depends on the default. The pin is belt-and-braces: it
+# makes a serialiser change show up as a deliberate upgrade rather than as a
+# resumed run quietly losing its types.
+#
+# requirements-lock.txt (full `pip freeze`) is still owed and is NOT this file --
+# it cannot be generated honestly until one machine has the local-model stack
+# installed too. See TODO.md Hygiene.
 
-langgraph
-langgraph-checkpoint-postgres   # AsyncPostgresSaver: durable paused runs (never SQLite/file)
-fastapi
-uvicorn[standard]
-pydantic>=2                     # schemas/ still uses dataclasses; migration is on the roadmap
-httpx                           # tools/github_client.py
-boto3                           # adapters/source_s3logs.py (log_review surface)
+langgraph==1.2.11
+langgraph-checkpoint==4.2.0        # the serialiser lives here; see the note above
+langgraph-checkpoint-postgres==3.1.2   # AsyncPostgresSaver: durable paused runs (never SQLite/file)
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+pydantic==2.13.5                  # schemas/ are Pydantic v2 models (T11)
+httpx==0.28.1                     # tools/github_client.py
+boto3==1.43.91                    # adapters/source_s3logs.py (log_review surface)

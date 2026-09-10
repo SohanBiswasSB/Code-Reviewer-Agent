@@ -243,15 +243,85 @@ def test_every_state_type_round_trips_through_the_checkpoint_serialiser(value_fa
     """The durable pause is the basis of the approval gate, so every type that
     enters a channel must survive being written and read back.
 
-    LangGraph used to warn on all of these: "deserializing unregistered type ...
-    will be blocked in a future version". On a release that enforces it, every
-    paused run becomes unresumable — which destroys the one safety property the
-    whole design rests on. Pydantic models are handled natively.
-    """
-    from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+    LangGraph warns on an unregistered type -- "deserializing unregistered type
+    ... will be blocked in a future version" -- blocks it under
+    LANGGRAPH_STRICT_MSGPACK=true, and will block by default eventually. A
+    blocked type does NOT raise: it comes back as a plain `dict`, so a resumed
+    run silently loses the model it was written with.
 
-    serde = JsonPlusSerializer()
+    The serialiser therefore comes from `app.state.checkpoint_serde()`, which
+    carries the CHECKPOINT_TYPES allowlist, and is the same one `app/deps.py`
+    gives both checkpointers. Constructing a bare `JsonPlusSerializer()` here
+    would test the default rather than what the service actually runs -- and
+    would pass under strict mode only by returning dicts.
+    """
+    from app.state import checkpoint_serde
+
+    serde = checkpoint_serde()
     original = value_factory()
     restored = serde.loads_typed(serde.dumps_typed(original))
     assert restored == original
     assert type(restored) is type(original)
+
+
+def test_nested_models_survive_the_round_trip():
+    """Registering the OUTER type must be enough to rebuild what it contains.
+
+    `Diagnosis.citations[]` and `.findings[]` are the values the gate and the
+    audit record read; `IssueEvidence.check_runs[]` is what `classify` routes on
+    via `has_failing_ci`. If a nested model came back as a dict, the failure
+    would surface as an AttributeError inside a node, far from the cause.
+    """
+    from app.state import checkpoint_serde
+    from schemas.diagnosis import Citation, Diagnosis, Finding
+    from schemas.evidence import CheckRun, IssueEvidence
+
+    serde = checkpoint_serde()
+
+    diag = Diagnosis(summary="s", citations=[Citation(snippet_id="i", score=0.5)],
+                     findings=[Finding(file="f.py")])
+    back = serde.loads_typed(serde.dumps_typed(diag))
+    assert type(back.citations[0]) is Citation
+    assert type(back.findings[0]) is Finding
+    assert back == diag
+
+    ev = IssueEvidence(url="u", title="t",
+                       check_runs=[CheckRun(name="ci", conclusion="failure")])
+    back_ev = serde.loads_typed(serde.dumps_typed(ev))
+    assert type(back_ev.check_runs[0]) is CheckRun
+    # The computed property is what the route depends on, so assert the property
+    # rather than only the field it is derived from.
+    assert back_ev.has_failing_ci is True
+
+
+def test_every_schema_model_is_registered_for_the_checkpoint():
+    """A model added to `schemas/` but not to CHECKPOINT_TYPES fails HERE.
+
+    This is the tripwire, and it is the reason the allowlist lists nested models
+    it does not strictly need: the failure it guards against is silent, so the
+    check has to be exhaustive rather than clever. Adding a model and forgetting
+    to register it is exactly the kind of omission that only shows up when a
+    paused run resumes -- which is the one moment it must not.
+    """
+    import inspect
+
+    from pydantic import BaseModel
+
+    import schemas.diagnosis as diagnosis
+    import schemas.evidence as evidence
+    from app.state import CHECKPOINT_TYPES
+
+    registered = set(CHECKPOINT_TYPES)
+    missing = []
+    for module in (evidence, diagnosis):
+        for name, obj in vars(module).items():
+            if (inspect.isclass(obj) and issubclass(obj, BaseModel)
+                    and obj is not BaseModel
+                    and obj.__module__ == module.__name__):
+                if (module.__name__, name) not in registered:
+                    missing.append(f"{module.__name__}.{name}")
+
+    assert not missing, (
+        f"not in app.state.CHECKPOINT_TYPES: {missing}. An unregistered model "
+        f"comes back from a checkpoint as a plain dict, silently."
+    )

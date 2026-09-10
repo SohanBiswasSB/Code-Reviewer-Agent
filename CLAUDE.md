@@ -147,9 +147,15 @@ returning `None`). Underscore-prefixed keys are internal plumbing.
 
 **Checkpoint serialisation:** only serialisable values go into state. `_surface_name`
 is a string, not the Surface object; `code_review`'s `normalize` returns a dict, not
-a dataclass. An unregistered msgpack type makes paused runs unresumable (T15) — which
-is why CI runs the suite a second time with `LANGGRAPH_STRICT_MSGPACK=true`, where it
-errors instead of warning.
+a dataclass. **Every model that enters a channel must be listed in
+`app.state.CHECKPOINT_TYPES`**, and every checkpointer must be built with
+`app.state.checkpoint_serde()` — `app/deps.py` does this for both backends. An
+unregistered type is not an error: it comes back from the checkpoint as a plain
+`dict`, so a resumed run silently loses the model it was written with and fails
+later as an `AttributeError` far from the cause (T15). CI runs the suite a second
+time with `LANGGRAPH_STRICT_MSGPACK=true`, and `tests/test_docs_consistency.py`
+plus the `schemas/` tripwire in `test_graph_resume.py` fail if a model is added
+without registering it.
 
 **Thresholds are measured, not guessed.** `MIN_RELEVANCE_SCORE` and
 `MIN_ENTAILMENT_SCORE` are calibrated numbers; the shipped 0.35/0.40 were calibrated
@@ -192,14 +198,93 @@ registry, the filesystem tenant store, JSONL audit + trace, and hybrid retrieval
 (dense + BM25, RRF-fused) over a small in-memory corpus.
 
 **Stubbed deliberately and visibly** (`NotImplementedError`, never fake success): the
-GitHub/GitLab clients, the S3 log source, the OpenAI client, the vector index and
-ingest, and `jobs/daily_log_review.py`. `generate_diagnosis` and `independent_review`
-have offline stub paths that model a *grounded* diagnosis so the pipeline runs end to
-end without a model server.
+four network calls in `tools/github_client.py` (the `EvidenceSource` / `ActionSink`
+adapters around it are real), the S3 read in `adapters/source_s3logs.py` (inject
+`reader=` and the rest of the pipeline runs — that is how the 200k-line figure was
+measured), `adapters/llm_openai.py`, `tools/ingest.py`, and `jobs/daily_log_review.py`.
+**There is no GitLab adapter at all** — it is named in the docs as what the port exists
+to make swappable, not as a stub. `generate_diagnosis` and `independent_review` have
+offline stub paths that model a *grounded* diagnosis so the pipeline runs end to end
+without a model server.
 
 Scope cuts are owned explicitly, not hidden: `docs/ARCHITECTURE_GAPS.md` (G1–G17,
-prioritized P0–P2), `TODO.md` (T1–T13, each with a "done when"), and the node
+prioritized P0–P2), `TODO.md` (T1–T24, each with a "done when"), and the node
 docstrings. When closing one, update the tracker in the same change.
+
+## Current state — carried over from the 2026-09-10 sessions
+
+Distilled from the session transcripts (`../chat-archive/`); `docs/DECISIONS.md` §8/§9 is
+the fuller narrative and the designated handoff. **Verify before relying on any of it** —
+this is a snapshot, not a guarantee.
+
+**Repo:** branch `ID_SB_Ongoing_Development_Branch` on
+`github.com/SohanBiswasSB/Code-Reviewer-Agent` (private). Re-run and confirmed on this Mac
+on 2026-09-10: **ruff clean · 152 tests pass (both normally and under
+`LANGGRAPH_STRICT_MSGPACK=true`) · 36/36 gates pass**, on Python 3.14.7 with langgraph
+1.2.11, pydantic 2.13.5, fastapi 0.141.1. Core deps are now pinned in `requirements.txt`.
+
+**T15 is closed, and the fix was registration — not a version pin.** An earlier note in
+`docs/DECISIONS.md` diagnosed the strict-serialiser failure as a dependency regression to
+"bisect and pin". It was not: langgraph *added* an explicit allowlist plus a strict mode,
+and its own warning names the fix. `app.state.CHECKPOINT_TYPES` now registers all eleven
+models in `schemas/`, and `app.state.checkpoint_serde()` is passed to both checkpointer
+backends. **The failure mode to remember: an unregistered type does not raise, it comes
+back as a plain `dict`** — so it is invisible until a resumed run touches an attribute.
+Both suites are green, so CI should pass.
+
+**Known broken / unverified** (each re-checked on 2026-09-10):
+
+- **No call has ever reached a live model server.** T1 is `[~]`: the LM Studio adapter and
+  the doctor checks exist, but the request shape (schema-constrained decoding, evidence in
+  the user turn) is unverified against a real model. `doctor` currently reports 2 FAILs on
+  this Mac — the `openai` client is not installed (only `requirements.txt` was installed
+  here, not `requirements-local.txt`) and LM Studio is not running.
+- The Postgres checkpointer path is unverified — there is no Postgres on this machine.
+- `.env.example` is **not in the repo**: `.gitignore:11`'s `.env.*` matches it, despite
+  `TODO.md` marking it done. Decide which is wrong. (`.dockerignore` *is* tracked — an
+  earlier session's note that it was also missing was wrong.)
+- `min_relevance_score` (0.35 / 0.40 in `tenants/*/policy.json`) is **uncalibrated** — those
+  numbers were measured for `text-embedding-3-small` at 512 dims and mean nothing in
+  bge-m3's 1024-dim space. `doctor` already warns. Re-measure once ingest (T10) exists.
+
+**The inference host is decided and implemented** (the `studio` platform + profile):
+
+| Role | Model | LM Studio name | Quant | ~Size |
+|---|---|---|---|---|
+| `diagnosis` | Qwen3-Coder-30B-A3B-Instruct | `qwen3-coder-30b-a3b` | MLX 6-bit | ~25 GB |
+| `judge` | Gemma-4-12B | `gemma-4-12b` | MLX 4-bit | ~7 GB |
+| `utility` | Qwen3-1.7B | `qwen3-1.7b` | MLX 4-bit | ~1.1 GB |
+| `embedding` | BGE-M3 | `bge-m3` | — | ~1.2 GB |
+
+A **64 GB Mac Studio**, LM Studio + the MLX runtime (not vLLM — no CUDA). ≈34 GB of
+weights, ~10 GB left for KV cache, everything resident at 32k context. Raise the GPU
+budget with `sudo sysctl iogpu.wired_limit_mb=49152`. `lms get <name> --mlx`, then
+`lms server start`. The **reranker stays in-process on the laptop** — neither LM Studio nor
+MLX exposes a rerank endpoint. Reach the Studio over **Tailscale, never a public IP**: LM
+Studio has no auth, the adapter's API key is a placeholder the server ignores, and T12
+(InputGuard) is open so nothing redacts secrets from diffs before they cross the wire.
+
+**Layer 0 is measured, not estimated:** 200,000 log lines in → **2,041 bytes** of evidence
+in the checkpoint. The reduction happens in the *source*, while lines are still a stream —
+there is no later point where it is still cheap.
+
+**A recurring defect shape, now seen five times** (T5, `action_type`, log_review's missing
+`normalize`, nested Pydantic reaching `build_query`, and `eval/demo_multitenant.py`): a
+component fails **safe**, renders a whole surface inert, and the suite stays green because
+a stub stood in for real input. When something routes to `human_review` or escalates 100%
+of the time, suspect this before concluding the guardrails are working.
+
+The fifth one adds a corollary worth applying: `demo_multitenant.py` was broken three ways
+for weeks because **nothing in the suite ran it**, while `README.md` told humans to run it.
+Anything a doc instructs a human to run should be exercised by CI, or the doc is an
+unchecked claim — the same argument as pinning the drifted doc numbers with a test (T24).
+
+**Git hygiene, specific to this repo:** clicking commit in VS Code's Source Control pane has
+twice produced a commit whose message is the unedited git template boilerplate (`b32e8d6`,
+`673447b`). Check `git log -1` after committing that way. Also: this directory has
+previously acquired a fresh `git init` on `main` with zero commits — committing that shape
+would produce a root commit with no ancestor in common with the remote, pushable only by
+force. Fetch the real history and reset onto it instead.
 
 ## Docs
 
@@ -212,8 +297,12 @@ docstrings. When closing one, update the tracker in the same change.
 - `docs/DATA_STORAGE.md` — audit records, reports, trust boundary
 - `docs/DECISIONS.md` — cross-machine handoff: machine specs, model downloads, what
   was decided and why, things discovered the hard way. **Start here on a fresh clone.**
-- `TODO.md` — code-level worklist (T1–T13)
+- `TODO.md` — code-level worklist (T1–T24), each with a "done when"
 - `MODEL_CARD.md` — scope limits and known failure modes
+- `../chat-archive/` — readable Claude Code session transcripts, kept **outside** this
+  repo (2.7 MB of JSONL per session, and a much wider sensitive surface than the
+  decisions themselves). `DECISIONS.md` §8/§9 remains the canonical handoff; the
+  archive is the raw source it was distilled from.
 
 ## Working style in this repo
 

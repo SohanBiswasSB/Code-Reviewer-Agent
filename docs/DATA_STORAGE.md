@@ -220,8 +220,8 @@ Two consequences worth taking:
 **The audit store inherits the unredacted trust boundary.** T12 is open, so a
 diagnosis quotes evidence, and evidence may contain PII or secrets. `var/` is
 therefore as sensitive as the source data and must not be committed, synced to a
-shared drive, or shipped to a log aggregator without redaction. Note this working
-copy currently has neither `.git` nor `.gitignore`.
+shared drive, or shipped to a log aggregator without redaction. `var/` is in
+`.gitignore` for exactly this reason.
 
 ---
 

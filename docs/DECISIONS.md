@@ -268,7 +268,12 @@ authority.
 
 ---
 
-## 6. Where things stand
+## 6. Where things stand (SUPERSEDED — see section 9)
+
+> **This section describes 2026-09-09, before T3/T5/T6 closed.** It is kept
+> because the append-only rule above says not to edit history away, but
+> **section 9 "RESUME HERE" is the current state and this one is not.**
+> Everything called "not done" below has since been done.
 
 Done: the plugin layer, the platform/profile layer with computed residency, the
 LM Studio adapter, role-bound LLMs, `doctor`, 24 safety gates, 38 unit tests,
@@ -295,7 +300,8 @@ conda activate CodeReviewerAgent
 
 python -m app.doctor              # is this machine able to run the agent?
 python -m eval.harness            # safety gates, 100% bar, no dependencies
-pytest                            # 38 unit tests
+pytest                            # 146 unit tests
+LANGGRAPH_STRICT_MSGPACK=true pytest   # same suite, strict serialiser (CI runs both)
 ruff check .
 python -m eval.demo_multitenant   # one diagnosis, two codebases, two outcomes
 
@@ -1026,78 +1032,284 @@ is the right behaviour and it is also T10: the corpus is a toy.
 Gates 36 (unchanged — model-independent). Tests 121 to 144. ruff clean.
 
 
+### 2026-09-10 (third session) — CLAUDE.md, a chat archive, and a full doc audit
+
+No behaviour changed. Three things were added, and reading the docs end to end
+against the code turned up enough drift to file as T24.
+
+**`CLAUDE.md` now exists** at the repo root — repository guidance loaded into
+every Claude Code session automatically. It carries what the code and this file
+already know, in the order an agent needs it: the graph, the layer map, **twelve
+invariants** stated as "do not weaken these", the conventions (adapters
+self-register; nodes reach providers only through ports; nothing outside
+`adapters/platforms/` branches on hardware; every state key must be declared),
+the environment, and the current state. The invariants are not new rules — they
+are the ones already enforced in code and argued for in the node docstrings,
+collected in one place so a future session cannot helpfully undo one.
+
+Written because the standing maintenance rule at the top of this file solves the
+cross-*machine* problem, and `CLAUDE.md` solves the cross-*session* one: an agent
+reads it before touching anything, without being told to.
+
+**Session transcripts are archived outside the repo**, at
+`Code_Reviewer_AI_Agent/chat-archive/` — a readable Markdown extract (prose and
+tool names, ~77 KB) beside the verbatim `.jsonl` (2.7 MB), plus
+`transcript_to_md.py` to regenerate one. Deliberately *not* in the repo, and the
+reasoning is worth keeping: a transcript is 2.7 MB per session containing the
+full contents of every file read and every command output — a far wider sensitive
+surface than the decisions themselves, in a private repo that already carries
+employer-internal detail, and not reviewable in a diff. **This file stays the
+canonical handoff**; the archive is the raw source it was distilled from, for when
+the exact wording of something is needed.
+
+**Every claim inherited from the previous session was re-verified rather than
+copied.** Confirmed on the Mac: ruff clean, 144 tests, 36/36 gates, and
+`LANGGRAPH_STRICT_MSGPACK=true` giving **4 failed / 140 passed** — all four
+parameters of `test_every_state_type_round_trips_through_the_checkpoint_serialiser`,
+on langgraph 1.2.11 / pydantic 2.13.5 / Python 3.14.7. So the §8 entry above is
+right and CI is red for the right reason.
+
+Two corrections came out of that:
+
+- **`eval/demo_multitenant.py`'s root cause is now known**, not just its symptom:
+  it calls `Diagnosis("s", "medium", …)` and `Citation("iss-1", …)` positionally,
+  which T11's Pydantic migration made illegal (`BaseModel.__init__() takes 1
+  positional argument`). A keyword-args fix per call site.
+- **`.dockerignore` IS tracked.** The previous session's note that it was missing
+  alongside `.env.example` was wrong; only `.env.example` is matched by
+  `.gitignore`'s `.env.*`.
+
+**A commit appeared mid-session with the git template boilerplate as its message**
+(`673447b`, containing `CLAUDE.md`) — the second time a VS Code Source Control
+click has done this here, after `b32e8d6`. It was amended to `fa6bcdc` and pushed.
+Recorded because the user has since stopped using the VS Code extension for this
+project, which removes the cause; if such a commit appears again, that assumption
+has broken.
+
+**T24 filed: the docs now understate what is built.** The gate has four booleans
+and three docs still say three; `MODEL_CARD.md` says 24 gates (36) and a 768-dim
+embedder (1024); `README.md` lists `interrupt()`/resume and the `/run` + `/approve`
+endpoints as stubbed when T3/T4 closed them, and names a GitLab client that does
+not exist as a file at all; `ARCHITECTURE.md` still calls G2 the biggest open
+structural item after T5 closed it. Full list with line references in `TODO.md`.
+
+The drift has one shape: each claim was true when written, and the project's habit
+of owning gaps precisely has left the *opposite* error unguarded. A doc that
+undersells what exists invites someone to rebuild it. Worth pinning the three
+numbers that have now drifted twice — boolean count, gate count, embedding dims —
+with a test, the same way `test_registered_report_includes_hardware` pins the dims
+already.
+
+Gates 36. Tests 144. ruff clean. No code changed.
+
+### 2026-09-10 (fourth session) — T15 closed properly, and CI is green
+
+**T15's real fix was registration, not a version pin — and the earlier diagnosis
+in this file was wrong.** The entry above says "most likely a dependency
+regression … bisect and pin". Bisecting was unnecessary: langgraph did not break
+anything, it **added an explicit allowlist** and a strict mode, and its own
+warning names the fix in the message —
+
+    Deserializing unregistered type schemas.diagnosis.ReviewResult from
+    checkpoint. This will be blocked in a future version. Set
+    LANGGRAPH_STRICT_MSGPACK=true to block now, or add to
+    allowed_msgpack_modules to allow explicitly: [('schemas.diagnosis',
+    'ReviewResult')]
+
+Measured: with a bare `JsonPlusSerializer()` under strict mode, `ReviewResult`
+round-trips to `dict`. With `allowed_msgpack_modules` set, all four types come
+back as themselves. So the correct fix was to tell the serialiser what our state
+types are, which is version-robust in a way a pin is not — a pin only postpones
+the default flipping.
+
+**`app.state.CHECKPOINT_TYPES`** now lists all eleven models in `schemas/` as
+`(module, qualname)`, and **`app.state.checkpoint_serde()`** builds the
+serialiser carrying it. It lives beside `TriageState` deliberately: it is the
+same invariant as that module's docstring — *a type that enters a channel must be
+declared, or it fails quietly rather than loudly.* `app/deps.py` passes that
+serde to **both** backends (`MemorySaver(serde=...)` and
+`AsyncPostgresSaver.from_conn_string(url, serde=...)`; both take it keyword-only,
+confirmed by reading the installed source, since `libpq` is missing here and the
+Postgres saver cannot even be imported).
+
+Nested models need no entry of their own — registering `Diagnosis` is enough to
+rebuild `citations[]` as `Citation` — but all eleven are listed anyway. The
+failure being guarded is *silent*, so the check should be exhaustive rather than
+clever, and an extra line costs nothing.
+
+**Three tests, and the teeth were verified.** The round-trip test now uses
+`checkpoint_serde()` rather than a bare serialiser — testing the default would
+have "passed" under strict mode by returning dicts. Added a nested round-trip
+(asserting `has_failing_ci` survives, not merely the field it derives from), and
+a tripwire that walks `schemas/` and fails if any `BaseModel` is missing from the
+allowlist. Deleting one entry makes **both** the round-trip param and the
+tripwire fail; restoring it makes them pass.
+
+**Requirements are pinned anyway,** but for a corrected reason: not to fix T15,
+but because an unpinned dependency whose behaviour the approval gate's durability
+depends on is a correctness concern from the first run, not a deployment concern.
+`requirements-lock.txt` is still owed and deliberately **not** written — this
+machine lacks the local-model stack, so a `pip freeze` here would claim a
+completeness it does not have.
+
+**T24 (doc drift) closed.** Four booleans were documented as three in five
+places; `MODEL_CARD.md` claimed 24 gates and a 768-dim embedder; `README.md`
+listed `interrupt()`/resume and both endpoints as stubbed after T3/T4 closed
+them, and named a GitLab client that exists as no file at all;
+`ARCHITECTURE.md` still called G2 the biggest open structural item after T5
+closed it. All corrected, and the numbers that have now drifted twice are pinned
+by a test.
+
+**`eval/demo_multitenant.py` fixed (N3), and it was broken three ways, not one.**
+Positional args into Pydantic models was only the first. It also passed retrieved
+snippets as ad-hoc attribute objects when the `Retriever` port returns **dicts**,
+and its snippets carried **no `text`** — so once T22 added entailment there was
+nothing to entail against and every run would have escalated, making the script
+print the opposite of the point it exists to make. That is the recurring lesson
+for the **fifth** time, and this time nothing was red because nothing ran the
+file. It now prints `approve` for both codebases when grounded and
+`escalate_to_human` with the failing reason when not.
+
+Gates 36. Tests 144 → **146**. ruff clean. **Both suites green, strict included —
+CI should now pass.**
+
 ---
 
-## 9. RESUME HERE (session ended 2026-09-10)
+## 9. RESUME HERE (updated 2026-09-10, fourth session)
 
-Working tree clean, all commits on `ID_SB_Ongoing_Development_Branch`.
+Working tree: `CLAUDE.md`, `README.md`, `MODEL_CARD.md`, `TODO.md`,
+`requirements.txt`, `app/state.py`, `app/deps.py`, `eval/demo_multitenant.py`,
+`tests/test_graph_resume.py`, four files under `docs/`, plus the new
+`tests/test_docs_consistency.py`. Branch `ID_SB_Ongoing_Development_Branch`,
+origin at `fa6bcdc`.
 
-### State
+### State — re-measured, not inherited
 
 ```
 ruff check .   clean
-pytest         144 passed
-eval.harness   36 gates pass (pass^k)
-pytest strict  4 FAILED  <-- LANGGRAPH_STRICT_MSGPACK, see below. CI is red on this.
-app.doctor     exits 1 only because LM Studio is not running
+pytest         146 passed
+pytest strict  146 passed   <-- LANGGRAPH_STRICT_MSGPACK=true. T15 CLOSED; CI green.
+eval.harness   36/36 gates pass (pass^k)
+demo_multitenant  runs; approve/approve grounded, escalate/escalate not
+app.doctor     2 FAIL: `openai` not installed here, LM Studio not running
 ```
 
-All of P0 is closed. The pipeline runs end to end offline, both surfaces now
-reach their sinks, every run is recorded, and every node is traced.
+Python 3.14.7 · langgraph 1.2.11 · pydantic 2.13.5 · fastapi 0.141.1.
 
-### What changed on 2026-09-10 (two sessions, see section 8)
+All of P0 is closed. The pipeline runs end to end offline, both surfaces reach
+their sinks, every run is recorded, every node is traced. **Nothing has ever
+called a live model**, which is the one sentence that most describes where this
+project actually is.
 
-1. **Models moved to a remote 64 GB Mac Studio** (section 1a). New `studio`
-   platform + profile; embedder changed to `bge-m3` (1024 dims).
-2. **Data storage — all four layers** (docs/DATA_STORAGE.md). Audit records,
-   log-review reports, per-node traces, checkpoint retention.
+### What is needed now — an ordered index
 
-### Still open, in the order I would take them
+The order is not preference; it is dependency. Items 4–8 need numbers that only
+**N2** can produce, so N2 is the one to do next. Numbers are kept stable as items
+close, so a reference to "N4" does not shift under anyone.
 
-1. **Pin `requirements.txt`, then fix or re-close T15.** The strict-serialiser
-   suite fails on langgraph 1.2.11; the likely cause is an upstream change since
-   T15 was verified, and requirements pin nothing. Bisect, pin, then decide
-   whether Pydantic state types need registering via `allowed_msgpack_modules`.
-   Paused runs still resume — only type fidelity is lost — but CI is red.
-2. **T12 InputGuard.** Still the biggest correctness-adjacent gap, and it now has
-   a second reason: `var/` durably stores evidence-derived text, so nothing
-   redacts PII before it reaches disk as well as before it reaches a provider.
-3. **T10 retrieval.** Real index + namespaced ingest, then **re-measure every
-   `min_relevance_score`** — they were calibrated for a 512-dim space, are now
-   nominally for a 1024-dim one, and mean nothing until measured. The log surface
-   escalates on the demo corpus for exactly this reason.
-4. **T13 Reranker** — port defined, no adapter. Its calibrated score should then
-   supersede dense relevance as the number the gate reads.
-5. **T1 live** — nothing has EVER called a real model. Download the four models
-   (section 3.4), `lms server start`, point `LMSTUDIO_BASE_URL` at the tailnet.
-6. **G7 idempotency** — now cheap: the audit store is the index and
-   `LogWindow.digest` is the content hash.
+**N1. ~~Pin `requirements.txt`, then fix or re-close T15.~~ DONE** (fourth
+session). T15 is closed by registering the state types in
+`app.state.CHECKPOINT_TYPES`, not by pinning — see §8. Core deps pinned too, for
+the separate reason given there. `requirements-lock.txt` still owed and cannot be
+written honestly from this machine.
+
+**N2. T1 — the first live model call. The single highest-value item.** Download
+the four `studio` models (§3.4), `lms server start` on the Mac Studio, put it on
+the tailnet, point `LMSTUDIO_BASE_URL` at it, `python -m app.doctor`, then one
+real `code_review` run. *Why:* every number in `adapters/platforms/studio.py` and
+`mac.py` is *reasoned, not measured*; the LM Studio request shape
+(schema-constrained decoding, evidence in the user turn) has never been checked
+against a real model; and `generate_diagnosis` still calls `complete()` **without**
+`json_schema` while `_parse_diagnosis` does a bare `json.loads` — so the first
+malformed response crashes the node rather than escalating. Wrap that parse, or
+pass the schema, before the first run. *Done when:* one grounded diagnosis from a
+real model is in `var/audit/`, and `doctor`'s memory arithmetic is confirmed or
+corrected against what actually loaded.
+
+**N3. ~~Fix `eval/demo_multitenant.py`.~~ DONE** (fourth session). It was broken
+three ways, not the one the symptom suggested — positional args, attribute-objects
+where the port returns dicts, and snippets with no `text` so entailment could
+never pass. See §8.
+
+**N4. T10 — retrieval, and the sharpest functional gap after N2.** A real
+namespaced index, idempotent ingest, then **re-measure every
+`min_relevance_score`** by scoring on-topic vs off-topic distributions and putting
+the bar above the noise cluster. *Note the consequence nobody has stated plainly:*
+`HybridRetriever` refuses any namespaced request, and the namespace comes from
+`policy.codebase`. So **every tenant that declares a codebase — `milesone`,
+`project_a`, `project_b` — cannot retrieve at all today.** Only `_default`, which
+declares none, can run. G1 is enforced by refusal, which is the right failure
+direction and also means the multi-tenant path is inert until the index exists.
+*Done when:* a real corpus per namespace, and the four `policy.json` thresholds
+carry measured numbers with the method written down.
+
+**N5. T13 — the reranker.** In-process `sentence-transformers` on
+`runtime()["reranker_device"]`, wide retrieve (top-100) to top-n, with retrieval
+metrics (hit@k / MRR / NDCG) proving it earns its cost. Its calibrated score
+should then **supersede dense relevance as the number the gate reads** — a
+cross-encoder score is a better instrument for `groundedness_ok` than a cosine.
+
+**N6. T12 — `InputGuard`.** Now urgent for two reasons, not one: nothing redacts
+PII or secrets before evidence reaches a provider **and** `var/` durably stores
+evidence-derived text on disk. Both surfaces' evidence is untrusted by the
+project's own invariant, and that invariant is currently enforced by prompt
+wording plus `_render.py`'s fencing — delimiting without redaction. *Done when:*
+redaction runs before any provider call and before any write to `var/`, with an
+adversarial eval class covering injected instructions.
+
+**N7. G3 — caller authN/Z and per-tenant credentials.** `POST /run/{surface}` has
+**no caller authentication and no caller→tenant authorization** — any caller may
+run any tenant against any repo, with one shared `GITHUB_TOKEN` as the blast
+radius. `resolve_tenant` enforces `enabled_surfaces`, which is a different and
+lesser check. The `TODO` at `app/main.py` says so honestly; it is still open.
+
+**N8. G7 — idempotency.** Cheap now: the audit store is the index and
+`LogWindow.digest` is the content hash. Without it, re-running a PR re-posts the
+comment and running the daily job twice re-emits the report.
+
+**N9. ~~T24 — documentation drift.~~ DONE** (fourth session). Boolean count, gate
+count, embedder dims, the stubbed list, and the stale G1/G2 annotations all
+corrected; the three numbers that had drifted twice are now pinned by a test.
+See §8.
 
 ### Two things only you can answer
 
 - **The tenant list.** `tenants/project_a` **is** MilesOne (duplicated) and
-  `project_b` stands in for Masterclass. Real names + repos, languages, 2-4 risky
+  `project_b` stands in for Masterclass. Real names + repos, languages, 2–4 risky
   areas each. `tests/test_tenants.py`, `tests/test_graph_resume.py` and
   `eval/demo_multitenant.py` reference the placeholders.
-- **Retention + where `CRA_DATA_DIR` points.** docs/DATA_STORAGE.md assumes
+- **Retention + where `CRA_DATA_DIR` points.** `docs/DATA_STORAGE.md` assumes
   keep-forever on local disk. If the daily log job runs as its own RunTask (G16)
   reports need shared storage, and anything derived from MilesOne production logs
   may carry a compliance clock.
 
 ### Known-broken, deliberately left
 
-- `eval/demo_multitenant.py` builds `Diagnosis(...)` positionally and passes
-  attribute-objects where the gate subscripts dicts. It predates T11's Pydantic
-  migration and raises `TypeError`. It is in the README quickstart.
-- `.env.example` is matched by `.gitignore`'s `.env.*`, so it is NOT in the repo
-  despite TODO.md marking it done. Decide whether to commit it with a negation
-  rule or drop the hygiene claim.
+- `.env.example` is matched by `.gitignore`'s `.env.*`, so it is **not** in the
+  repo despite `TODO.md` marking it done. Commit it with a negation rule, or drop
+  the hygiene claim. (`.dockerignore` *is* tracked — an earlier note said
+  otherwise and was wrong.)
+- `prompts/*.md` still duplicates `tenants/_default/prompts/**` with nothing
+  preventing drift (T19, partial).
 
-### Recurring lesson, now at four
+### Recurring lesson, now at five
 
 A green suite hid a defect by substituting something convenient for the real
 input: T21 (hand-supplied scores hid a constant relevance), T5 (hand-built
 evidence hid a shape mismatch), T22 (degenerate fixtures made a check
-unexercisable), and on 2026-09-10 the log surface — unreachable **three separate
-ways** while every test stayed green. When a suite passes, ask what it is
-standing in for.
+unexercisable), the log surface (unreachable **three separate ways** while every
+test stayed green), and now `eval/demo_multitenant.py` — broken three ways, for
+weeks, because **nothing in the suite ran it**. When a suite passes, ask what it
+is standing in for.
+
+The fifth one adds a corollary: the previous four were about fixtures standing in
+for real input. This one is about a file *nothing exercised at all* — advertised
+in the README quickstart, so the first thing a fresh clone runs and the first
+thing that fails. Anything a doc tells a human to run should be run by CI, or the
+doc is a claim nobody is checking. Same argument as pinning the drifted numbers
+with a test (T24).
+
+The N-list above is where the original version bites next: 36 gates and 146 tests
+all pass without a model, without an index, and without a network. That is by
+design and it is genuinely useful — and it means the suite currently proves the
+*guardrails* hold, not that the system *works*.

@@ -43,8 +43,10 @@ def settings() -> dict:
 
 def _memory_saver():
     from langgraph.checkpoint.memory import MemorySaver
+
+    from app.state import checkpoint_serde
     warnings.warn(_MEMORY_WARNING, RuntimeWarning, stacklevel=3)
-    return MemorySaver()
+    return MemorySaver(serde=checkpoint_serde())
 
 
 @asynccontextmanager
@@ -71,7 +73,11 @@ async def open_checkpointer():
             "non-durable."
         ) from None
 
-    async with AsyncPostgresSaver.from_conn_string(url) as saver:
+    from app.state import checkpoint_serde
+
+    async with AsyncPostgresSaver.from_conn_string(
+        url, serde=checkpoint_serde()
+    ) as saver:
         await saver.setup()          # idempotent; creates the checkpoint tables
         yield saver
 
