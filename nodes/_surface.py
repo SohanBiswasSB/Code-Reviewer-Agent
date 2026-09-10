@@ -37,3 +37,30 @@ def namespace_for(state: dict) -> str | None:
     """
     codebase = (state.get("_policy") or {}).get("codebase") or {}
     return codebase.get("repo") or None
+
+
+def evidence_as_dict(ev) -> dict:
+    """Evidence -> a plain, FULLY nested dict for a Surface to read.
+
+    `model_dump()` rather than `__dict__`, because `__dict__` on a Pydantic model
+    leaves nested models as models — so a surface doing `c.get("signal")` over
+    `LogWindow.candidates` would hit an AttributeError on a `LogCandidate`. The
+    port's contract with a surface is dicts all the way down.
+
+    Computed properties are added back afterwards: `model_dump()` omits them, and
+    `has_failing_ci` / `is_information_sparse` are exactly the signals a surface
+    routes on (the lossy-conversion bug found when delegation was enabled).
+    """
+    if isinstance(ev, dict):
+        return dict(ev)
+    dump = getattr(ev, "model_dump", None)
+    out = dump() if callable(dump) else dict(getattr(ev, "__dict__", {}))
+    for name in dir(type(ev)):
+        if name.startswith("_"):
+            continue
+        if isinstance(getattr(type(ev), name, None), property):
+            try:
+                out[name] = getattr(ev, name)
+            except Exception:      # a property that raises must not break routing
+                pass
+    return out

@@ -31,7 +31,23 @@ def execute(state: dict, sink=None) -> dict:
         import config
         sink = config.get_sink(surface.sink_name)
 
+    # Run METADATA, never content. The action itself is posted verbatim and is
+    # not touched here; `context` only tells a per-tenant sink (the daily report)
+    # which tenant and run it belongs to. Folding any of this into `action` would
+    # mean mutating the payload a human approved.
+    diag = state.get("diagnosis")
+    context = {
+        "tenant": state.get("tenant"),
+        "surface": state.get("surface") or state.get("_surface_name"),
+        "run_id": state.get("_run_id"),
+        "policy_version": state.get("_policy_version"),
+        "prompt_version": state.get("_prompt_version"),
+        "severity": getattr(diag, "severity", None),
+        "citations": [c.model_dump() for c in getattr(diag, "citations", [])],
+    }
+
     # identity = the approver's own token, so GitHub's permission model does the
     # real enforcement, and "the approver posted this" is verifiable from its
     # audit log rather than only from our UI.
-    return {"result": sink.emit(action, target=target, identity=state.get("github_token"))}
+    return {"result": sink.emit(action, target=target,
+                                identity=state.get("github_token"), context=context)}

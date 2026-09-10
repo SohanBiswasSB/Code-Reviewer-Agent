@@ -20,10 +20,12 @@ rather than editing history away.
 
 ---
 
-## 1. The two machines
+## 1. The machines
 
-Both are first-class. There is no primary and no fallback; the design must run on
-each, and results must be comparable between them.
+Two development machines, both first-class — there is no primary and no fallback;
+the design must run on each, and results must be comparable between them. Since
+2026-09-10 there is also a third machine that runs *models only* and never the
+graph (section 1a).
 
 | | Mac | Windows |
 |---|---|---|
@@ -44,7 +46,34 @@ pip install -r requirements-dev.txt
 ```
 
 The 6 GB VRAM on the Windows box is the tightest constraint in the project and
-is why the default model profile is sized the way it is.
+is why the **default** model profile is sized the way it is. It stopped being the
+binding constraint on 2026-09-10 — see the third machine below — but `portable`
+remains sized for it, because a default that only one machine can hold defeats
+the point of a shared profile.
+
+### 1a. The third machine — a REMOTE inference host (added 2026-09-10)
+
+| | Mac Studio |
+|---|---|
+| Memory | 64 GB unified |
+| Role | Serves models over the network. Does **not** run the graph. |
+| Runtime | LM Studio, MLX |
+| `CRA_PLATFORM` | `studio` — **never auto-detected**, must be set explicitly |
+| `CRA_PROFILE` | `studio` |
+| Reached via | `LMSTUDIO_BASE_URL`, over a tailnet (**not** a public IP) |
+
+This splits an assumption that was baked in everywhere: until now, the machine
+running the agent and the machine running the models were the same computer.
+`adapters/platforms/studio.py` documents which `runtime()` keys describe which
+machine. The agent still runs on the M4 Pro, and the reranker with it — it is
+in-process `sentence-transformers`, and no LM Studio or MLX server exposes a
+rerank endpoint, so it never touches the Studio.
+
+**vLLM was considered and rejected**: no CUDA on Apple Silicon. Staying on LM
+Studio also means the existing adapter needs no change at all, and its JIT
+load/auto-unload keeps all roles behind one port — vLLM serves one model per
+process, which would have forced a per-role `base_url` the config has no way to
+express.
 
 ---
 
@@ -83,27 +112,36 @@ cosmetic — without it each machine rewrites every file on its first commit.
 SF-Crime-Prediction uses a single `SFCRIME_PLATFORM`. Here it is split, because
 the two axes have opposite portability requirements:
 
-- **`CRA_PLATFORM`** (`mac` | `cuda` | `cpu`, auto-detected) — *how* to run:
-  quant format, context budget, KV dtype, residency, threads, reranker device.
-  **Must** differ per machine.
-- **`CRA_PROFILE`** (`portable` | `mac_resident` | `mac_max`) — *which* models.
-  **Must not** differ per machine, or Mac and Windows numbers stop being
-  comparable.
+- **`CRA_PLATFORM`** (`mac` | `cuda` | `cpu` auto-detected; `studio` set by hand)
+  — *how* to run: quant format, context budget, KV dtype, residency, threads,
+  reranker device. **Must** differ per machine. `studio` is the exception to
+  auto-detection, because a host reached over the network cannot be detected
+  locally.
+- **`CRA_PROFILE`** (`portable` | `mac_resident` | `mac_max` | `studio`) —
+  *which* models. **Must not** differ per machine, or Mac and Windows numbers
+  stop being comparable. `portable` is the one that must hold everywhere; the
+  others exist so a bigger machine can be measured *against* it, which only
+  works because the comparison baseline never moves.
 
 `adapters/platforms/` is the only code that knows about hardware. Nothing in
 `nodes/` branches on it.
 
 ### 3.2 The profiles
 
+Hot weights = diagnosis + judge + embedder, the set that must be co-resident to
+avoid a model swap mid-run.
+
 | Profile | Diagnosis | Judge | Hot weights | Runs on |
 |---|---|---|---|---|
-| `portable` (default) | `qwen2.5-coder-7b-instruct` | `gemma-4-e4b` | ~7.8 GB | both |
-| `mac_resident` | `gemma-4-12b` | `qwen3-8b` | ~11.8 GB | Mac |
-| `mac_max` | `google/gemma-4-26b-a4b-qat` | `qwen3-4b` | ~18.2 GB | Mac |
+| `portable` (default) | `qwen2.5-coder-7b-instruct` | `gemma-4-e4b` | ~8.9 GB | all three |
+| `mac_resident` | `gemma-4-12b` | `qwen3-8b` | ~12.9 GB | Mac, Studio |
+| `mac_max` | `google/gemma-4-26b-a4b-qat` | `qwen3-4b` | ~19.3 GB | Mac (swaps), Studio |
+| `studio` | `qwen3-coder-30b-a3b` @6-bit | `gemma-4-12b` | ~33.2 GB | Studio only |
 
 Pinned across every profile, and **not** profile-scoped:
 
-- `EMBEDDING_MODEL = text-embedding-nomic-embed-text-v1.5` (768 dims)
+- `EMBEDDING_MODEL = bge-m3` (**1024 dims**) — replaced
+  `text-embedding-nomic-embed-text-v1.5` (768) on 2026-09-10; see section 8
 - `RERANKER_MODEL = BAAI/bge-reranker-v2-m3` (in-process, CPU/MPS)
 
 ### 3.3 Why these choices
@@ -154,7 +192,11 @@ fails. A bare search term opens the variant picker, which is the reliable form.
 lms get qwen2.5-coder-7b-instruct        # diagnosis  ~4.7 GB
 lms get gemma-4-e4b                      # judge      ~3.0 GB  (prefer a QAT build)
 lms get qwen3-1.7b                       # utility    ~1.1 GB
-lms get text-embedding-nomic-embed-text-v1.5   # ~84 MB
+lms get bge-m3                           # embedding  ~1.2 GB, 1024 dims
+
+# the Mac Studio -- the `studio` profile, all resident
+lms get qwen3-coder-30b-a3b --mlx        # diagnosis  ~25 GB at 6-bit
+lms get gemma-4-12b --mlx                # judge      ~7.0 GB
 
 # Mac only
 lms get gemma-4-12b --mlx                # mac_resident diagnosis
@@ -691,70 +733,371 @@ Two things this exposed, both worth keeping:
 
 Gates 32 to 36. Tests 96 to 101.
 
+### 2026-09-10 — a third machine: models move to a remote 64 GB Mac Studio
+
+The 6 GB VRAM ceiling stopped being the binding constraint. Models now run on a
+64 GB Mac Studio reached over the network; the graph still runs on the M4 Pro.
+Added `adapters/platforms/studio.py` and a `studio` profile.
+
+**The models, and why each.**
+
+*Diagnosis: `qwen3-coder-30b-a3b` at MLX 6-bit (~25 GB).* This is the model
+`portable` settles for a 2.5-generation Qwen *instead of* — 30B-A3B is the
+smallest size Qwen3-Coder ships, and it does not fit 6 GB. MoE with ~3.3B active,
+so it decodes far faster than 30B suggests. 6-bit rather than 8-bit (~32 GB)
+because 32k of context is worth more than the last few points of quantisation
+quality: `render_evidence` puts the whole diff *plus* five retrieved snippets in
+the user turn. Revisit if real diffs turn out to fit in 16k.
+
+*Judge: `gemma-4-12b` (~7 GB).* Different family from Qwen, which is the only
+hard requirement. Deliberately not bigger: the judge writes free-text `reasoning`
+that a human reads and **cannot** affect the decision — four Python booleans do
+that. Deliberately not smaller either, since misleading reasoning shown to an
+approver is its own failure mode.
+
+*Utility: `qwen3-1.7b`. Reranker: unchanged, and it stays OFF the Studio* — it is
+in-process `sentence-transformers`, and no LM Studio or MLX server exposes a
+rerank endpoint, so it runs wherever the agent runs.
+
+**The embedder changed, and the timing was the whole argument.**
+`bge-m3` (1024 dims) replaces `text-embedding-nomic-embed-text-v1.5` (768). Doing
+this later would cost a full re-index plus a re-measurement of every tenant
+threshold; doing it now costs nothing, because T10 is open — there is no index and
+the corpus is four documents. This is the cheapest moment the change will ever
+have. `EMBEDDING_GB` went 0.1 -> 1.2, which shifts the hot-weight total of every
+profile (section 3.2 updated).
+
+It does **not** fix the calibration debt, and slightly enlarges it: the shipped
+0.35/0.40 were already meaningless for a 768-dim space and are now meaningless
+for a 1024-dim one. Still T10.
+
+**Two things the existing tests got right, worth recording.**
+
+1. **`test_registered_report_includes_hardware` failed on `768 != 1024`, exactly
+   as intended.** A hardcoded literal in a test is usually a smell; here it is a
+   tripwire, because changing the embedder silently re-scales every
+   `min_relevance_score`. Kept it a literal and updated it to 1024, with a comment
+   saying why — asserting `== base.EMBEDDING_DIMS` would be tautological and could
+   never fail.
+
+2. **`test_every_platform_supports_the_default_profile` iterated a hardcoded
+   `("cuda","mac","cpu")`,** so it silently stopped covering anything added after
+   it was written — `studio` registered and went unchecked. Now iterates the
+   registry. Same species as the recurring lesson at the end of this file: the
+   suite was substituting a fixed list for the real set.
+
+**Design notes worth not re-litigating.**
+
+*`CRA_PLATFORM=studio` is never auto-detected.* `detect_platform()` inspects the
+local machine, and nothing local can detect a box reached over the network. Set
+it explicitly or `auto` will describe the laptop.
+
+*`Platform.runtime()` now describes two machines, and says which key is which.*
+It was written when the models and the graph shared a computer. `reranker_device`
+and `threads` are agent-side; `quant`, `context`, `residency`, `memory` and the
+rest are inference-host-side. Splitting `Platform` into two ports is the real fix,
+deferred until a second remote topology exists to generalise from — documented in
+the module rather than pretended away.
+
+*The laptop must REFUSE the `studio` profile.* `mac.profiles` does not list it, so
+`CRA_PROFILE=studio` on the M4 Pro raises rather than trying to load 33 GB into 24.
+Pinned by test, since setting it out of habit is the obvious mistake.
+
+*vLLM was considered and rejected* — no CUDA on Apple Silicon. Staying on LM Studio
+means the adapter needs no change at all, and its JIT load/auto-unload keeps all
+roles behind one `base_url`; vLLM serves one model per process, which would have
+forced a per-role endpoint the config cannot express.
+
+**Security, stated plainly because the topology invites the mistake.** LM Studio
+has no authentication and `PLACEHOLDER_KEY` is an ignored placeholder, so a public
+IP here is an open inference endpoint on your own hardware. Use a tailnet. This
+matters more than usual while T12 is open: nothing yet redacts PII or secrets out
+of diffs and log lines before they cross the wire.
+
+Also added the `CRA_*` settings to `.env.example`, which had none despite the
+hygiene item claiming otherwise, and fixed the stale `mac_headroom` profile name in
+`config.py` and `adapters/platforms/cuda.py`.
+
+Gates 36 (unchanged — model-independent, as designed). Tests 101 to 105. ruff clean.
+
+**Not verified:** no call has still ever reached a live model. Every number in
+`studio.py` is reasoned, not measured, exactly as `mac.py`'s are. `python -m
+app.doctor` against the Studio with `lms server start` is the first step.
+
+
+### 2026-09-10 — the agent started keeping records (G6, Layers 1 and 3)
+
+Until today the system took actions and kept **no record of any of them**.
+`AuditSink` and `Tracer` were ports with no implementation, there was no
+`logging` call anywhere in the project, and nothing wrote a file. The only
+persistence was the checkpointer — which exists to make the approval gate's pause
+durable, and was accidentally serving as an audit trail while being keyed by
+`thread_id`, in-memory by default, and mutable.
+
+Design is in **docs/DATA_STORAGE.md**. Built: Layer 1 (run records) and Layer 3
+(log-review reports). Layer 0 (evidence by reference, with G4) and Layer 2
+(tracing, T23) are specified and not built.
+
+**The concern that started it was aimed slightly off-target, and the real answer
+is worth keeping.** Storing records does not touch the LLM context window — the
+model sees only what `nodes/_render.py` puts in the prompt. What *does* bloat is
+the CHECKPOINT: LangGraph re-serialises a channel's whole value every super-step,
+so anything large in `TriageState` is rewritten repeatedly. A diff is fine; a
+`LogWindow` at ~2M lines/day is not. Hence the rule in the design doc: **graph
+state carries references and digests, payloads live in a store.** Storing more,
+outside the checkpoint, costs nothing that matters.
+
+**Where records are written, and the one asymmetry.** `nodes/audit.py` sits on
+every edge that reaches END normally — `human_review`, `escalate_to_human`, and a
+completed `execute`. Those first two are OUTCOMES, not absences of one.
+
+A DENIAL cannot reach that node: resuming with anything that is not `True`
+continues into `execute`, whose `PermissionError` is what stops the run, and
+`test_truthy_is_not_approval` exists specifically to prove the guard rather than
+the routing is the mechanism. Routing denials around `execute` would delete that
+defence in depth. So `await_approval` — the node that observes the denial —
+records it. When G9 adds failure edges, both paths should collapse into one.
+
+Written in the GRAPH, not in `app/main.py`, for the reason `resolve_tenant` and
+`execute` give for their own checks: a record that exists only when the run came
+through HTTP is missing for the scheduled job and every future caller.
+
+**JSONL before Postgres, deliberately.** Stdlib only, so it works on a bare
+machine like `doctor` and the gate suite do; append-only is closer to immutable
+than a table anything can `UPDATE`; and it can exist *before* the first live
+model call. Waiting for Postgres would mean the first real diagnoses go
+unrecorded — the T21 mistake a second time, where the run that would have shown
+you the numbers is the one you did not record. `@adapter("audit","postgres")`
+behind the same port later.
+
+The audit sink defaults to a REAL writer. Silence has to be opted into
+(`CRA_AUDIT=null`) rather than being what you get by forgetting.
+
+**A blocker found on the way in: `log_review` could never be approved.**
+`independent_review` computed the action type as `comment` / `comment+label`,
+hardcoded, while every log-review policy allows only `["report"]`. So
+`permission_ok` was **false for every log-review run** — the surface escalated
+100% of the time and its `ReportSink` was unreachable. Layer 3 was unbuildable
+until this was fixed. The action type now comes from the Surface (which already
+declares its own sink), falling back to the comment shape when no surface is
+active so the gate stays computable from a bare state dict, which
+`eval/harness.py` depends on.
+
+Same shape as T5: it failed *safe*, and it made a whole surface inert, and
+nothing was red. That is now three times a green suite has hidden a defect by
+standing in for the real input.
+
+**`ActionSink.emit` gained `context`.** Run metadata — tenant, surface, run_id —
+kept separate from `action` for exactly the reason `target` already was: the
+action is what a human approved and it is posted verbatim, so nothing may be
+folded into it afterwards. `PRCommentSink` ignores it; `ReportSink` needs the
+tenant to know where its artefact belongs.
+
+**Reports store the ANALYSIS, not the logs.** The raw lines already live in S3,
+which is the source of record; copying them into a second store doubles the PII
+surface and buys nothing. `var/reports/<tenant>/<date>.{json,md}`. Sampled lines
+should be cited by S3 key + offset once G4 exists.
+
+**Measured, on a real end-to-end run:** the record's `retrieved` field came back
+`[0.5385, 0.0, 0.0, 0.0]` — a genuine noise floor, the post-T21 behaviour, now
+permanently captured. That field is the reason the layer earns its place: T21
+would have been ONE LINE of this showing every score as 1.0.
+
+**Discovered while verifying, and NOT fixed: T15 is only partly closed.**
+Under `LANGGRAPH_STRICT_MSGPACK=true` the four Pydantic state types round-trip to
+plain **dicts**, not back to their classes — `test_every_state_type_round_trips_
+through_the_checkpoint_serialiser` fails on all four parameters.
+
+**Most likely a dependency regression, not a claim that was never true.**
+`requirements.txt` pins nothing (`langgraph`, by its own note "pin exact versions
+before anything is deployed"), and this machine resolved **langgraph 1.2.11 /
+langgraph-checkpoint 4.2.0** — newer than whatever was installed when T15 was
+verified. So a serialiser change upstream almost certainly flipped it. NOT
+confirmed by bisecting versions; someone should, and then pin.
+
+CI *does* run the suite twice, strict included — the earlier note in this entry
+saying otherwise was read off a stale local snapshot, not the repo. Which means
+**CI on this branch is red right now**, and correctly so: it is catching exactly
+what it was added to catch.
+
+The catastrophe T15 warned about — paused runs becoming unresumable — does
+**not** happen: all 116 other tests pass under strict, including every
+approval, denial and execute path. The real impact is loss of type fidelity
+across a resume. `nodes/_audit.py` is written to tolerate it (`ReviewResult.
+decision` is a property, so it is recomputed from the booleans when `review`
+comes back as a dict), and that tolerance is pinned by a test. But the claim in
+section 8 above should be corrected once someone confirms it on the Windows box.
+
+Also: `var/` added to `.gitignore` — it inherits the unredacted trust boundary
+while T12 is open.
+
+Gates 36 (unchanged — model-independent). Tests 105 to 121. ruff clean.
+
+
+### 2026-09-10 — Layers 0, 2 and 4: the log surface became feasible
+
+Design in **docs/DATA_STORAGE.md**. All four layers now exist.
+
+**Layer 0 — the measured result is the argument.** 200,000 log lines in,
+**2,041 bytes** of evidence out. LangGraph re-serialises a channel's whole value
+every super-step, so without this a day of logs (G4 puts it at ~2M lines) would
+be rewritten on every step of every run. That, not the LLM context window, was
+always the real constraint.
+
+**The reduction happens in the SOURCE, not in `normalize_evidence`.** The lines
+have to be reduced while they are still a stream. A `gather()` returning 2M lines
+for a later node to summarise would already have put them in memory and, the
+moment they landed in `_raw`, in every checkpoint of the run. There is no later
+point at which the reduction is still cheap. So `adapters/source_s3logs.py`
+streams in windows, runs detectors over each, keeps running counts over **every**
+line, and caps the sample. `LogWindow` (`extra="forbid"`) validates the result, so
+a source that regresses to returning raw lines fails loudly rather than quietly
+making every super-step rewrite a day.
+
+Only the S3 read is stubbed. Inject `reader=` and the whole pipeline runs offline
+— which is how the 200k-line figure above was measured rather than estimated.
+
+**Detectors are regex and counting, deliberately.** They run over the full stream
+before any model sees anything, so they must be cheap enough to touch every line;
+a model-backed detector could not, which would defeat the point. Ordered table,
+first match wins, so a traceback line is not also counted as a generic `ERROR` and
+inflating the noisiest signal.
+
+**`log_review` was unreachable in THREE separate ways.** Two were found today:
+no `normalize`, so it fell back to the issue normaliser and raised `KeyError` on
+`html_url`; and nested Pydantic models reaching `build_query`, which calls
+`.get()`. The third was yesterday's `action_type`. Each failed safe and left the
+surface inert with a green suite — the same shape as T5, now four times.
+
+`evidence_as_dict` in `nodes/_surface.py` fixes the nesting generally:
+`model_dump()` rather than `__dict__`, because `__dict__` leaves nested models as
+models, and the port's contract with a surface is dicts all the way down.
+Computed properties are added back, since `model_dump()` omits them and
+`has_failing_ci` is exactly what a surface routes on.
+
+**Layer 2 — spans wrap in `build_graph`, not inside nodes.** One insertion point,
+no node learns about tracing, and a node added later is covered without anyone
+remembering to instrument it. `nodes/` stays free of observability concerns the
+same way it is free of provider concerns.
+
+Two details worth keeping. `interrupt()` suspends by RAISING, so a naive tracer
+marks every run that reaches the approval gate — the normal path — as a failure;
+those are recorded as `suspended`. And tracing is best-effort: a span that could
+take down the run it observes is worse than no span at all.
+
+Prompt text is **off by default** (`CRA_TRACE_PROMPTS=1` to enable). T12 is open,
+so nothing redacts PII or secrets from evidence; tracing every prompt verbatim
+would create a durable copy of exactly what the guard is meant to remove. Hashes
+always, text only while debugging.
+
+Tracing defaults ON, unlike most debugging tooling, for one specific reason: the
+first live model runs are imminent, and a trace you have to switch on after
+something looks wrong is a trace you do not have for the run that went wrong.
+T21 is the standing example.
+
+**Layer 4 — and a real bug found on the way in.**
+`AsyncPostgresSaver.from_conn_string()` returns an async **context manager**, and
+`get_graph()` handed that object straight to `build_graph`. So with `DATABASE_URL`
+set, the graph was compiled with a context manager as its checkpointer — failing
+at first use, far from the cause, and **only in the configuration that matters**.
+Memory-only development never touched it. `app/deps.py::open_checkpointer()` now
+owns the lifecycle and a FastAPI lifespan enters it once; `get_graph()` refuses
+the Postgres path rather than rebuilding the same bug. NOT verified against a real
+Postgres — there is none on this machine.
+
+`jobs/prune_checkpoints.py` is dry-run by default. **A suspended thread is a
+pending human approval and never expires**; deleting one would silently discard a
+decision somebody was asked to make, and they would find out by the run simply
+never resuming. The audit store is the index (the checkpointer has no "list every
+thread" query), but the live state is re-checked before each deletion — the record
+says what happened *when it was written*, and the checkpointer is the authority on
+what is pending now. Deletion goes through `delete_thread`, never raw SQL, so it
+works on any backend.
+
+Also: `thread_id` is now mirrored into state, because a record that cannot name
+its thread cannot authorise deleting it. Declared in `TriageState` — an
+undeclared key is silently dropped, which is the lesson from T14.
+
+**Still not true:** no call has ever reached a live model. And the log surface
+escalates on the demo corpus, correctly — four auth-themed documents cannot ground
+"db_error, traceback", so `groundedness_ok` fails and it routes to a human. That
+is the right behaviour and it is also T10: the corpus is a toy.
+
+Gates 36 (unchanged — model-independent). Tests 121 to 144. ruff clean.
+
+
 ---
 
-## 9. RESUME HERE (session ended 2026-09-09)
+## 9. RESUME HERE (session ended 2026-09-10)
 
-Everything below is current as of commit `6c1029a`, working tree clean, all
-commits pushed to `ID_SB_Ongoing_Development_Branch`.
+Working tree clean, all commits on `ID_SB_Ongoing_Development_Branch`.
 
 ### State
 
 ```
 ruff check .   clean
-pytest         101 passed
+pytest         144 passed
 eval.harness   36 gates pass (pass^k)
+pytest strict  4 FAILED  <-- LANGGRAPH_STRICT_MSGPACK, see below. CI is red on this.
 app.doctor     exits 1 only because LM Studio is not running
-TODO.md        18 of 23 closed, 5 partial
 ```
 
-**All of P0 is closed.** The pipeline runs end to end offline: resolve tenant ->
-fetch -> normalise -> classify -> retrieve -> diagnose -> independent review
-(4 code-computed booleans) -> `interrupt()` -> human approves -> single guarded
-write. `/run`, `/approve` and `/runs/{id}` work over HTTP.
+All of P0 is closed. The pipeline runs end to end offline, both surfaces now
+reach their sinks, every run is recorded, and every node is traced.
+
+### What changed on 2026-09-10 (two sessions, see section 8)
+
+1. **Models moved to a remote 64 GB Mac Studio** (section 1a). New `studio`
+   platform + profile; embedder changed to `bge-m3` (1024 dims).
+2. **Data storage — all four layers** (docs/DATA_STORAGE.md). Audit records,
+   log-review reports, per-node traces, checkpoint retention.
 
 ### Still open, in the order I would take them
 
-1. **T12 InputGuard** — nothing redacts PII or secrets before evidence reaches a
-   provider. The fencing added in T20 is *delimiting*, not redaction, so
-   "evidence is untrusted" is still partly enforced by prompt wording — which the
-   prompts themselves say is not a boundary. Plan: `@adapter("guard","regex")`
-   for emails/phones/tokens/keys plus injection-phrase neutralisation, applied in
-   `nodes/_render.py` before any provider call, recording what it redacted.
-2. **T13 Reranker** — port defined, no adapter. Plan: a lexical default (so it
-   works offline) plus a `sentence-transformers` CrossEncoder behind the same
-   port, wired as retrieve-wide-then-rerank in `generate_diagnosis`. **Note:** per
-   T21's lesson, the reranker's calibrated score should then *supersede* the dense
-   relevance as the number the gate reads.
-3. **T23 Tracer** — no run records its retrieved ids, scores, citations, booleans
-   or the prompt actually sent. Plan: a stdlib JSONL tracer, which also gets G6
-   (AuditSink) most of the way. Remember **T21 would have been obvious in a trace**
-   showing every score as 1.0.
-4. **T19 / T20 leftovers** — delete the duplicate `prompts/*.md` (they duplicate
-   `tenants/_default/prompts/**` with nothing preventing drift); add few-shot
-   exemplars to the org contract; add a prompt-level eval.
-5. **T10 Retrieval** — the big one. Real index + idempotent namespaced ingest, and
-   then **re-measure every `min_relevance_score`**: the shipped 0.35/0.40 were
-   calibrated for `text-embedding-3-small`@512 dims and mean nothing for the
-   768-dim embedder. Method is in the PDF: score on-topic vs off-topic queries and
-   set the bar above the noise cluster.
-6. **T1 live** — nothing has yet called a real model. Needs the models downloaded
-   (see section 3.4) and `lms server start`.
+1. **Pin `requirements.txt`, then fix or re-close T15.** The strict-serialiser
+   suite fails on langgraph 1.2.11; the likely cause is an upstream change since
+   T15 was verified, and requirements pin nothing. Bisect, pin, then decide
+   whether Pydantic state types need registering via `allowed_msgpack_modules`.
+   Paused runs still resume — only type fidelity is lost — but CI is red.
+2. **T12 InputGuard.** Still the biggest correctness-adjacent gap, and it now has
+   a second reason: `var/` durably stores evidence-derived text, so nothing
+   redacts PII before it reaches disk as well as before it reaches a provider.
+3. **T10 retrieval.** Real index + namespaced ingest, then **re-measure every
+   `min_relevance_score`** — they were calibrated for a 512-dim space, are now
+   nominally for a 1024-dim one, and mean nothing until measured. The log surface
+   escalates on the demo corpus for exactly this reason.
+4. **T13 Reranker** — port defined, no adapter. Its calibrated score should then
+   supersede dense relevance as the number the gate reads.
+5. **T1 live** — nothing has EVER called a real model. Download the four models
+   (section 3.4), `lms server start`, point `LMSTUDIO_BASE_URL` at the tailnet.
+6. **G7 idempotency** — now cheap: the audit store is the index and
+   `LogWindow.digest` is the content hash.
 
 ### Two things only you can answer
 
-- **The tenant list.** `tenants/project_a` **is** MilesOne (so it is duplicated)
-  and `project_b` stands in for Masterclass. Real names + repo, language, 2–4
-  risky areas, and the signature failure mode per project. `tests/test_tenants.py`,
-  `tests/test_graph_resume.py` and `eval/demo_multitenant.py` reference the
-  placeholders and need updating alongside.
-- **Mac verification.** Every number in `adapters/platforms/mac.py` is reasoned,
-  not measured. `python -m app.doctor` there is the first step.
+- **The tenant list.** `tenants/project_a` **is** MilesOne (duplicated) and
+  `project_b` stands in for Masterclass. Real names + repos, languages, 2-4 risky
+  areas each. `tests/test_tenants.py`, `tests/test_graph_resume.py` and
+  `eval/demo_multitenant.py` reference the placeholders.
+- **Retention + where `CRA_DATA_DIR` points.** docs/DATA_STORAGE.md assumes
+  keep-forever on local disk. If the daily log job runs as its own RunTask (G16)
+  reports need shared storage, and anything derived from MilesOne production logs
+  may carry a compliance clock.
 
-### Recurring lesson, stated once
+### Known-broken, deliberately left
 
-Three separate defects were invisible because a green suite was substituting
-something convenient for the real input: T21 (hand-supplied scores hid a constant
-relevance), T5 (hand-built post-normalise evidence hid an evidence-shape
-mismatch), T22 (degenerate fixtures made a whole check unexercisable). When a
-suite passes, ask what it is standing in for.
+- `eval/demo_multitenant.py` builds `Diagnosis(...)` positionally and passes
+  attribute-objects where the gate subscripts dicts. It predates T11's Pydantic
+  migration and raises `TypeError`. It is in the README quickstart.
+- `.env.example` is matched by `.gitignore`'s `.env.*`, so it is NOT in the repo
+  despite TODO.md marking it done. Decide whether to commit it with a negation
+  rule or drop the hygiene claim.
+
+### Recurring lesson, now at four
+
+A green suite hid a defect by substituting something convenient for the real
+input: T21 (hand-supplied scores hid a constant relevance), T5 (hand-built
+evidence hid a shape mismatch), T22 (degenerate fixtures made a check
+unexercisable), and on 2026-09-10 the log surface — unreachable **three separate
+ways** while every test stayed green. When a suite passes, ask what it is
+standing in for.

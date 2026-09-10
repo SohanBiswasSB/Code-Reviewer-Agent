@@ -12,10 +12,32 @@ the in-memory saver.
 from __future__ import annotations
 
 import uuid
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 
-app = FastAPI(title="Code Reviewer Agent (plug-and-play)")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Own the checkpointer's lifecycle for the life of the process.
+
+    `AsyncPostgresSaver` is an async context manager; entering it here is what
+    makes the durable-approval path actually work, and closing it on shutdown is
+    what returns the connections. Building the graph lazily per request could
+    not do either -- see app/deps.py.
+    """
+    from app.deps import open_checkpointer, set_graph
+    from app.graph import build_graph
+
+    async with open_checkpointer() as saver:
+        set_graph(build_graph(checkpointer=saver))
+        try:
+            yield
+        finally:
+            set_graph(None)
+
+
+app = FastAPI(title="Code Reviewer Agent (plug-and-play)", lifespan=lifespan)
 
 
 @app.get("/healthz")
@@ -79,6 +101,9 @@ async def run_surface(surface: str, body: dict):
                 "tenant": body.get("tenant", "_default"),
                 "surface": surface,
                 "target": target,
+                # Mirrored into state so the audit record can name its thread;
+                # the graph itself keys on config, not on this.
+                "thread_id": thread_id,
                 "github_token": body.get("github_token"),
             },
             config=cfg,

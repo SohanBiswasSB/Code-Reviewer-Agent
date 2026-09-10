@@ -4,7 +4,7 @@
     SURFACES=code_review,log_review
     TENANT_STORE=fs
     CRA_PLATFORM=auto    # auto | cuda | mac | cpu   -> HOW to run
-    CRA_PROFILE=portable # portable | mac_headroom   -> WHICH models
+    CRA_PROFILE=portable # portable | mac_resident | mac_max | studio -> WHICH models
 
 Importing this module imports adapters/ and surfaces/ so every @adapter/@surface
 decorator has run before anything asks the registry for a plug.
@@ -87,8 +87,39 @@ def get_entailer():
     return registry.get_adapter("entailer", os.getenv("ENTAILER", "lexical"))()
 
 
+def get_detector():
+    """The log-review Detector (G4). Rule-based, and that is the point.
+
+    Detectors run over the FULL stream before any model sees anything, so they
+    must be cheap enough to touch every line of a ~2M-line day. A model-backed
+    detector could not, which is why this resolves to code.
+    """
+    return registry.get_adapter("detector", os.getenv("DETECTOR", "signals"))()
+
+
 def get_tenant_store():
     return registry.get_adapter("tenant", os.getenv("TENANT_STORE", "fs"))()
+
+
+def get_audit_sink():
+    """One immutable record per run (G6). Defaults to append-only JSONL.
+
+    Defaults to a REAL sink rather than a no-op: an agent that takes actions and
+    keeps no record of them is the gap this closes, so silence has to be opted
+    into (CRA_AUDIT=null) rather than being what you get by forgetting.
+    """
+    return registry.get_adapter("audit", os.getenv("CRA_AUDIT", "jsonl"))()
+
+
+def get_tracer():
+    """Spans per node/retrieval/LLM call (T23). Defaults to append-only JSONL.
+
+    ON by default, unlike most debugging tooling. The reason is specific: the
+    first live model runs are imminent, and a trace that has to be switched on
+    after something looks wrong is a trace you do not have for the run that went
+    wrong. T21 is the standing example.
+    """
+    return registry.get_adapter("tracer", os.getenv("CRA_TRACE", "jsonl"))()
 
 
 def get_surface(name: str):
@@ -147,6 +178,8 @@ def registered() -> dict:
         "llm": os.getenv("LLM_PROVIDER", "lmstudio"),
         "retriever": os.getenv("RETRIEVER", "hybrid"),
         "tenant_store": os.getenv("TENANT_STORE", "fs"),
+        "audit": os.getenv("CRA_AUDIT", "jsonl"),
+        "tracer": os.getenv("CRA_TRACE", "jsonl"),
         "surfaces": enabled_surfaces(),
         "platform": plat.name,
         "profile": get_profile(),

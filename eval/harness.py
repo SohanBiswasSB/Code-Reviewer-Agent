@@ -91,7 +91,10 @@ def run() -> int:
         def __init__(self):
             self.calls = []
 
-        def emit(self, action, *, target, identity=None):
+        # `context` is run metadata (tenant, run_id) that `execute` passes to
+        # per-tenant sinks. Accepted and ignored -- this fake asserts on the
+        # ACTION, which is the thing that must survive approval verbatim.
+        def emit(self, action, *, target, identity=None, context=None):
             self.calls.append((action, target, identity))
             return {"comment": {"body": action["comment"]}, "label": action.get("label")}
 

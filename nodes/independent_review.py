@@ -22,12 +22,35 @@ from __future__ import annotations
 import os
 
 from nodes._render import render_for_judge
+from nodes._surface import active_surface
 from schemas.diagnosis import ReviewResult
 
 MIN_RELEVANCE_SCORE = float(os.getenv("MIN_RELEVANCE_SCORE", "0.35"))  # MEASURE this
 MIN_ENTAILMENT_SCORE = float(os.getenv("MIN_ENTAILMENT_SCORE", "0.25"))
 SEVERITY_ALLOWLIST = {"low", "medium"}          # high/critical -> never auto-approve
 ALLOWED_ACTIONS = {"comment", "comment+label"}
+
+
+def _action_type(state: dict, diag) -> str:
+    """What KIND of action this diagnosis proposes, for the permission check.
+
+    Asked of the Surface, because the answer is surface-specific: code review
+    proposes a comment (optionally with a label), log review proposes a report.
+
+    Hardcoding the comment shape here made `permission_ok` FALSE for every
+    log-review run — every log-review policy allows only `["report"]` — so that
+    surface escalated 100% of the time and its ActionSink was unreachable. It
+    failed safe, and it made the whole surface inert, which is the same shape of
+    defect as T5.
+
+    Falls back to the comment shape when no surface is active, so the gate stays
+    computable from a bare state dict — which eval/harness.py depends on.
+    """
+    surface = active_surface(state)
+    fn = getattr(surface, "action_type", None) if surface is not None else None
+    if callable(fn):
+        return fn(diag)
+    return "comment+label" if diag.proposed_label else "comment"
 
 
 def _entailment(claim: str, cited_ids: list[str], retrieved: list[dict],
@@ -109,7 +132,7 @@ def independent_review(state: dict, judge_llm=None, entailer=None) -> dict:
     if not risk_ok:
         failures.append(f"severity {diag.severity!r} not in {sorted(severity_allowlist)}")
 
-    action_type = "comment+label" if diag.proposed_label else "comment"
+    action_type = _action_type(state, diag)
     permission_ok = action_type in allowed_actions
     if not permission_ok:
         failures.append(f"action {action_type!r} not in {sorted(allowed_actions)}")

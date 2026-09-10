@@ -23,11 +23,20 @@ from dataclasses import asdict, dataclass, field
 
 # Pinned across every profile and every platform. Changing either invalidates
 # the vector index and de-calibrates every tenant threshold. See docs/ROADMAP.md.
-# Verified against `lms ls` — LM Studio's own id, not the HF repo name.
-# 768 dims -- NOT the 512 that text-embedding-3-small was truncated to.
-EMBEDDING_MODEL = "text-embedding-nomic-embed-text-v1.5"
-EMBEDDING_DIMS = 768
-EMBEDDING_GB = 0.1
+#
+# BGE-M3 replaces nomic-embed-text-v1.5 (768 dims), and is changed NOW on purpose:
+# T10 is still open, so there is no index to re-embed and the corpus is four
+# documents. This is the cheapest moment the change will ever have. Once ingest
+# exists it costs a full re-index PLUS a re-measurement of every tenant's
+# min_relevance_score -- which is owed anyway, since the shipped 0.35/0.40 were
+# calibrated for text-embedding-3-small@512 and mean nothing in any other space.
+#
+# NOT yet verified against `lms ls` on the Studio; the other ids here were.
+# `llm_lmstudio.resolves_to()` matches loosely, so the catalog's probable
+# "text-embedding-bge-m3" still resolves from this shorter id.
+EMBEDDING_MODEL = "bge-m3"
+EMBEDDING_DIMS = 1024        # a DIFFERENT vector space from the 768-dim nomic model
+EMBEDDING_GB = 1.2           # 568M params at f16; nomic was ~0.1 GB
 RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"    # in-process cross-encoder, never an LM Studio call
 
 
@@ -114,10 +123,31 @@ MAC_MAX = ModelSet(
     weights_gb={"diagnosis": 15.6, "judge": 2.5, "utility": 1.1},
 )
 
+# The 64 GB Mac Studio used as a REMOTE inference host (adapters/platforms/studio.py).
+# Everything stays resident: ~33 GB of hot weights against a 48 GB budget leaves
+# room for a real 32k KV cache, so there is no diagnosis->judge swap at all.
+#
+# Qwen3-Coder-30B-A3B is the point of the profile. It is the model PORTABLE
+# settles for a 2.5-generation Qwen *instead of*, purely because 30B-A3B is the
+# smallest size Qwen3-Coder ships and it cannot fit 6 GB of VRAM. MoE with ~3.3B
+# active, so it decodes far faster than 30B suggests.
+#
+# 6-bit rather than 8-bit (~32 GB) deliberately: 32k of context is worth more
+# here than the last few points of quantisation quality, because render_evidence
+# puts the whole diff PLUS five retrieved snippets in the user turn. Revisit if
+# real diffs turn out to fit comfortably in 16k.
+STUDIO = ModelSet(
+    diagnosis="qwen3-coder-30b-a3b",
+    judge="gemma-4-12b",                      # Google family -> independent of Qwen
+    utility="qwen3-1.7b",
+    weights_gb={"diagnosis": 25.0, "judge": 7.0, "utility": 1.1},
+)
+
 PROFILES: dict[str, ModelSet] = {
     "portable": PORTABLE,
     "mac_resident": MAC_RESIDENT,
     "mac_max": MAC_MAX,
+    "studio": STUDIO,
 }
 
 DEFAULT_PROFILE = "portable"

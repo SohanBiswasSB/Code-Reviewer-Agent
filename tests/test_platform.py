@@ -20,8 +20,16 @@ def _clean_env(monkeypatch):
 
 
 def test_every_platform_supports_the_default_profile():
-    """`portable` must run everywhere, or cross-machine comparison is impossible."""
-    for name in ("cuda", "mac", "cpu"):
+    """`portable` must run everywhere, or cross-machine comparison is impossible.
+
+    Iterates the REGISTRY rather than a hardcoded list. The list version silently
+    stopped covering anything added after it was written, which is the opposite of
+    what a test named "every platform" promises — `studio` was registered and
+    unchecked until this changed.
+    """
+    registered = config.registry.list_registered()["adapters"]["platform"]
+    assert len(registered) >= 4, f"expected every platform to register: {registered}"
+    for name in registered:
         plat = config.registry.get_adapter("platform", name)()
         assert base.DEFAULT_PROFILE in plat.profiles, f"{name} cannot run the default profile"
 
@@ -47,10 +55,15 @@ def test_embedding_and_reranker_are_identical_across_profiles():
 @pytest.mark.parametrize(
     "platform,profile,expected",
     [
-        ("mac", "portable", "resident"),        # 10.8 GB of an 18 GB budget
-        ("mac", "mac_resident", "resident"),    # 14.8 GB
-        ("mac", "mac_max", "jit_swap"),         # 20.2 GB -> cannot co-reside
-        ("cuda", "portable", "jit_swap"),       # 8.8 GB against 5 GB of VRAM
+        # needed = hot weights (diagnosis + judge + embedder) + kv reserve
+        ("mac", "portable", "resident"),        # 11.9 GB of an 18 GB budget
+        ("mac", "mac_resident", "resident"),    # 15.9 GB
+        ("mac", "mac_max", "jit_swap"),         # 21.3 GB -> cannot co-reside
+        ("cuda", "portable", "jit_swap"),       # 9.9 GB against 5 GB of VRAM
+        # the 64 GB Studio holds its own profile with room for a 32k KV cache...
+        ("studio", "studio", "resident"),       # 39.2 GB of a 48 GB budget
+        # ...and comfortably holds what the 24 GB laptop has to swap for
+        ("studio", "mac_max", "resident"),      # 22.3 GB
     ],
 )
 def test_residency_is_computed_from_the_numbers(monkeypatch, platform, profile, expected):
@@ -63,10 +76,23 @@ def test_residency_is_computed_from_the_numbers(monkeypatch, platform, profile, 
     assert mem["needed_gb"] == pytest.approx(mem["hot_weights_gb"] + mem["kv_reserve_gb"], abs=0.01)
 
 
-def test_oversized_profile_raises_rather_than_downgrading(monkeypatch):
-    """A silent downgrade would label eval results with a profile that never ran."""
-    monkeypatch.setenv("CRA_PLATFORM", "cuda")
-    monkeypatch.setenv("CRA_PROFILE", "mac_max")
+@pytest.mark.parametrize(
+    "platform,profile",
+    [
+        ("cuda", "mac_max"),      # 6 GB of VRAM against ~19 GB of weights
+        ("mac", "studio"),        # the 24 GB laptop against a 33 GB profile
+        ("cpu", "studio"),
+    ],
+)
+def test_oversized_profile_raises_rather_than_downgrading(monkeypatch, platform, profile):
+    """A silent downgrade would label eval results with a profile that never ran.
+
+    `studio` matters here specifically: it names the models on the REMOTE host, so
+    nothing stops someone setting it on the laptop out of habit. It has to fail
+    loudly rather than quietly loading 33 GB of weights into 24 GB of memory.
+    """
+    monkeypatch.setenv("CRA_PLATFORM", platform)
+    monkeypatch.setenv("CRA_PROFILE", profile)
     with pytest.raises(ValueError, match="not supported on this platform"):
         config.get_models()
 

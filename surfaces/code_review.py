@@ -69,6 +69,16 @@ class CodeReviewSurface:
             "is_trivial": _is_trivial(files),
         }
 
+    def action_type(self, diagnosis) -> str:
+        """What the gate checks against this tenant's `allowed_actions`.
+
+        The label variant is a distinct permission on purpose: on GitHub,
+        commenting is open to any authenticated user while labelling needs
+        triage/write access, so a tenant may legitimately allow one and not
+        the other.
+        """
+        return "comment+label" if diagnosis.proposed_label else "comment"
+
     def build_query(self, evidence: dict) -> str:
         """Retrieval query. Paths matter as much as prose for finding prior work
         on the same modules, so they are part of the query rather than dropped."""

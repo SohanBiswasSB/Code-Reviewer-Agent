@@ -9,17 +9,17 @@ node docstring + this file. Honesty about scope reads stronger than vague confid
 - [ ] `reject_retrieve_more` corrective-RAG loop (not wired)
 - [ ] Prompt-injection input guard + adversarial eval class
 - [ ] Multi-provider capability eval (OpenAI vs Claude vs local)
-- [ ] AsyncPostgresSaver + real interrupt/resume (skeleton uses MemorySaver semantics)
+- [x] AsyncPostgresSaver + real interrupt/resume  *(lifespan owns the async lifecycle)*
 
 ## Architecture gaps (from docs/ARCHITECTURE_GAPS.md — prioritized)
 P0 (must close):
 - [ ] G1 tenant-scoped retrieval (namespace per codebase)   *(port done; wire adapters + ingest)*
 - [ ] G2 graph dispatches through the active Surface          *(classify hook done; do fetch/diagnose/execute)*
 - [ ] G3 per-tenant credentials (secret ref) + API authN/Z    *(CredentialProvider port done)*
-- [ ] G4 log-review detect→aggregate→sample pipeline (wire the Detector port)
+- [x] G4 log-review detect→aggregate→sample pipeline  *(adapters/detectors.py + source_s3logs)*
 - [ ] G5 PII/secret redaction before any LLM call (InputGuard)
 P1 (before real use):
-- [ ] G6 AuditSink: one immutable record per run              *(port done; add fs/db adapter)*
+- [x] G6 AuditSink: one immutable record per run              *(jsonl adapter; docs/DATA_STORAGE.md)*
 - [ ] G7 idempotency key -> no double-post on re-runs
 - [ ] G8 pin resolved prompt/policy (+version) into checkpointed state at run start
 - [ ] G9 failure edges: retry/backoff + fallback to human_review + dead-letter

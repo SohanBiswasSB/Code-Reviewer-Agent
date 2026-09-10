@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 
 DEFAULT_TENANT = "_default"
 
@@ -104,6 +105,10 @@ def resolve_tenant(state: dict, store=None, surface=None) -> dict:
         prompts[role] = store.prompt(tenant, surface_name, node)
 
     return {
+        # Minted here, not in the audit sink, so every record written for this
+        # run carries the same id -- a denial recorded by await_approval and a
+        # completion recorded by the audit node are the same run (G6).
+        "_run_id": state.get("_run_id") or str(uuid.uuid4()),
         "_policy": policy,
         "_surface_name": surface_name,
         "_policy_version": _policy_version(policy),

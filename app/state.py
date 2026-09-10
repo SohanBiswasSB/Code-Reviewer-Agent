@@ -22,9 +22,12 @@ class TriageState(TypedDict, total=False):
     tenant: str                 # which codebase is executing (resolves prompts + policy)
     surface: Literal["code_review", "log_review", "issue_triage"]
     target: str                 # PR/commit ref, issue url, or a date (YYYY-MM-DD)
+    thread_id: str              # the resumable identity, mirrored from config so the
+                                # audit record can name the thread a prune job must keep
     github_token: str | None    # the approver's own OAuth token, when present
 
     # ── resolved once, by resolve_tenant, and pinned for the whole run ───────
+    _run_id: str                # correlates every audit record written for this run
     _policy: dict               # tenant+surface guardrails (thresholds, allowlists)
     _surface_name: str          # a NAME, not the object: checkpoints must serialise
     _policy_version: str        # content hash, so a resumed run cannot mix versions
@@ -44,3 +47,4 @@ class TriageState(TypedDict, total=False):
     _interrupt_payload: dict    # what the human was actually shown
     approved: bool              # written ONLY by await_approval, from the resume
     result: dict
+    _audit: dict                # did the run record persist? (G6) -- never the record itself

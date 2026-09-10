@@ -52,8 +52,15 @@ class ActionSink(Protocol):
     A partial failure must be REPORTED, not raised: if a comment posts and a
     label then fails on permissions, the comment really did happen and throwing
     it away is worse than reporting both outcomes.
+
+    `context` is run METADATA — tenant, surface, run_id — never content. It is
+    separate from `action` for the same reason `target` is: the action is what a
+    human approved and it is posted verbatim, so nothing may be folded into it
+    afterwards. A sink that writes per-tenant artefacts (the daily report) needs
+    to know which tenant; a sink that posts to a URL ignores it.
     """
-    def emit(self, action: dict, *, target: str, identity: str | None = None) -> dict: ...
+    def emit(self, action: dict, *, target: str, identity: str | None = None,
+             context: dict | None = None) -> dict: ...
 
 
 @runtime_checkable

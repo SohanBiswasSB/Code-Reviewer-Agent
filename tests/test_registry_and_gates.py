@@ -32,11 +32,19 @@ def test_unknown_surface_error_lists_what_is_available():
 
 
 def test_registered_report_includes_hardware():
-    """GET /registered is how you find out what a deployment actually is."""
+    """GET /registered is how you find out what a deployment actually is.
+
+    `embedding_dims` stays a LITERAL rather than a reference to the constant, on
+    purpose. Asserting `== base.EMBEDDING_DIMS` would be tautological and could
+    never fail; the literal is a tripwire, because changing the embedder silently
+    re-scales every min_relevance_score in tenants/*/policy.json. Updating this
+    number is meant to be part of the cost of changing the pin — which is exactly
+    what it caught when nomic (768) was replaced by bge-m3.
+    """
     out = config.registered()
-    assert out["selected"]["platform"] in ("cuda", "mac", "cpu")
+    assert out["selected"]["platform"] in ("cuda", "mac", "cpu", "studio")
     assert out["hardware"]["models"]["diagnosis"]
-    assert out["hardware"]["embedding_dims"] == 768
+    assert out["hardware"]["embedding_dims"] == 1024
 
 
 def test_retriever_refuses_a_namespace_it_cannot_honour():

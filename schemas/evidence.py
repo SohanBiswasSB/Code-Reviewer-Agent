@@ -82,3 +82,61 @@ class CodeChange(BaseModel):
     touched_areas: list[str] = Field(default_factory=list)
     has_failing_ci: bool = False
     is_trivial: bool = False
+
+
+# ── log review (Layer 0: a BOUNDED window, never the day's lines) ────────────
+MAX_LINE_CHARS = 400        # one log line, truncated before it can enter state
+
+
+class LogSample(BaseModel):
+    """One retained example line, carrying where it came from.
+
+    `ref` + `line_no` are what make the sample checkable: a human reading the
+    report can go back to the export rather than trusting a copied string. The
+    text is kept because `generate_diagnosis` needs something to reason over —
+    G4's "sample only the candidates into diagnose" — but it is truncated and
+    capped so a day of logs can never reach the checkpoint.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    service: str = ""
+    line_no: int = 0
+    ref: str = ""
+    text: str = ""
+
+
+class LogCandidate(BaseModel):
+    """An anomaly a Detector flagged, aggregated across the whole day."""
+    model_config = ConfigDict(extra="forbid")
+
+    signal: str
+    severity: str = "medium"
+    count: int = 0
+    services: list[str] = Field(default_factory=list)
+    samples: list[LogSample] = Field(default_factory=list)
+
+
+class LogWindow(BaseModel):
+    """A day of logs, reduced to something that fits in a checkpoint.
+
+    This type is the whole point of Layer 0. LangGraph re-serialises a channel's
+    entire value on every super-step, so a `LogWindow` holding ~2M raw lines (G4's
+    figure for one day) would be rewritten repeatedly, per run. What it holds
+    instead is counts, detector candidates and a capped sample — kilobytes — plus
+    a `ref` to the export that remains the source of record.
+
+    `digest` is over the stream, so re-running the same day is detectable. That is
+    the natural idempotency key for G7.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    date: str = ""
+    ref: str = ""
+    digest: str = ""
+    line_count: int = 0
+    services: list[str] = Field(default_factory=list)
+    counts: dict[str, int] = Field(default_factory=dict)
+    candidates: list[LogCandidate] = Field(default_factory=list)
+    # True when a cap was hit, so a reader knows the sample is partial rather
+    # than assuming it saw everything the detectors found.
+    truncated: bool = False

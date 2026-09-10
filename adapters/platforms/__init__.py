@@ -6,4 +6,5 @@ from . import (  # noqa: F401  (self-register)
     cpu,
     cuda,
     mac,
+    studio,
 )

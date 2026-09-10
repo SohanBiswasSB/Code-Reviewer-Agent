@@ -453,7 +453,7 @@ text is already in `_retrieved`; nothing compares it to the claim.
 text, its verdict is code-computed (not the judge's free text), and it becomes a
 fourth boolean or folds into `groundedness_ok`.
 
-### T23. No tracing — the decision trace cannot be reconstructed `[ ]`
+### T23. No tracing — the decision trace cannot be reconstructed `[x]`
 
 The `Tracer` port exists; nothing implements it. There is no span tree, and no
 per-run record of the retrieved ids, their scores, which were cited, the three
@@ -528,7 +528,7 @@ cost.
 ## P2 — from the architecture audit
 
 Tracked in full in `docs/ARCHITECTURE_GAPS.md`; listed here so nothing lives in
-only one place: G6 AuditSink `[ ]` · G7 idempotency `[ ]` · G8 pin prompt+policy
+only one place: G6 AuditSink `[x]` (2026-09-10, docs/DATA_STORAGE.md) · G7 idempotency `[ ]` · G8 pin prompt+policy
 version into the checkpoint `[ ]` · G9 failure edges + retry/backoff `[ ]` ·
 G10 corrective-RAG loop cap `[ ]` · G11 policy schema validation `[ ]` ·
 G12 budgets/rate limits `[ ]` · G13 Notifier + approver authZ `[ ]` ·

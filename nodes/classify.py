@@ -17,36 +17,13 @@ to the deserialisation problem that would make paused runs unresumable (T15).
 """
 from __future__ import annotations
 
-from nodes._surface import active_surface
-
-
-def _as_dict(ev) -> dict:
-    """Flatten evidence for a Surface's rule-based classify.
-
-    `__dict__` alone is wrong: it returns stored fields only, so computed
-    properties are silently dropped — and `has_failing_ci` and
-    `is_information_sparse` are exactly the signals a surface routes on. A
-    surface asking for `has_failing_ci` would have got `None` and quietly taken
-    the wrong branch.
-    """
-    if isinstance(ev, dict):
-        return dict(ev)
-    out = dict(getattr(ev, "__dict__", {}))
-    for name in dir(type(ev)):
-        if name.startswith("_"):
-            continue
-        if isinstance(getattr(type(ev), name, None), property):
-            try:
-                out[name] = getattr(ev, name)
-            except Exception:      # a property that raises must not break routing
-                pass
-    return out
+from nodes._surface import active_surface, evidence_as_dict
 
 
 def classify(state: dict) -> dict:
     surface = active_surface(state)
     if surface is not None and hasattr(surface, "classify"):
-        return {"route": surface.classify(_as_dict(state["evidence"]))}
+        return {"route": surface.classify(evidence_as_dict(state["evidence"]))}
 
     ev = state["evidence"]
     if ev.has_failing_ci:                 # precedence locked by the eval suite

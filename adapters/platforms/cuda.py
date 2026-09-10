@@ -26,7 +26,8 @@ KV_RESERVE_GB = 1.0         # 8k context at q8_0 KV
 @adapter("platform", "cuda")
 class CudaPlatform:
     name = "cuda"
-    # 6 GB cannot hold mac_headroom's ~15 GB of weights. Not offered.
+    # 6 GB cannot hold mac_max's ~19 GB of weights, let alone studio's ~33 GB.
+    # Not offered.
     profiles = ("portable",)
 
     def runtime(self, profile: str = base.DEFAULT_PROFILE) -> dict:

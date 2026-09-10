@@ -16,7 +16,7 @@ what a good query looks like for its own evidence shape.
 from __future__ import annotations
 
 from nodes._render import render_evidence
-from nodes._surface import active_surface, namespace_for
+from nodes._surface import active_surface, evidence_as_dict, namespace_for
 from schemas.diagnosis import Citation, Diagnosis, Finding
 
 
@@ -31,7 +31,7 @@ def generate_diagnosis(state: dict, llm=None, retriever=None) -> dict:
     surface = active_surface(state)
 
     if surface is not None and hasattr(surface, "build_query"):
-        ev_dict = ev if isinstance(ev, dict) else getattr(ev, "__dict__", {})
+        ev_dict = evidence_as_dict(ev)
         query = surface.build_query(ev_dict) or _fallback_query(ev)
     else:
         query = _fallback_query(ev)

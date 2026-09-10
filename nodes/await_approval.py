@@ -25,11 +25,12 @@ regardless of how it was reached.
 from __future__ import annotations
 
 
-def await_approval(state: dict, interrupt_fn=None) -> dict:
+def await_approval(state: dict, interrupt_fn=None, audit_sink=None) -> dict:
     """Suspend for human approval; return the decision as `approved`.
 
     `interrupt_fn` is injectable so the node can be unit-tested without a
     running graph. In the graph it is LangGraph's own `interrupt`.
+    `audit_sink` is injectable for the same reason.
     """
     action = state.get("proposed_action")
     if action is None:
@@ -64,5 +65,18 @@ def await_approval(state: dict, interrupt_fn=None) -> dict:
     else:
         approved = decision is True
 
-    return {"proposed_action": action, "approved": approved,
-            "_interrupt_payload": payload}
+    out = {"proposed_action": action, "approved": approved,
+           "_interrupt_payload": payload}
+
+    if not approved:
+        # A denial is an OUTCOME and has to be recorded, but it cannot reach the
+        # `audit` node: resuming with anything that is not True continues into
+        # `execute`, whose PermissionError is what stops the run. That guard is
+        # the mechanism (tests/test_graph_resume.py pins it explicitly), and
+        # routing denials around `execute` to reach an audit node would remove
+        # the defence in depth those tests exist to prove. So the node that
+        # observes the denial records it. See docs/DATA_STORAGE.md.
+        from nodes._audit import write
+        out.update(write({**state, **out}, "denied", sink=audit_sink))
+
+    return out

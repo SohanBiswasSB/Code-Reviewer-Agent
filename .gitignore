@@ -32,3 +32,8 @@ Thumbs.db
 *.log
 runs/
 reports/
+
+# Audit records, traces and log-review reports (docs/DATA_STORAGE.md). These hold
+# evidence-derived text and, until T12 (InputGuard) lands, nothing redacts PII or
+# secrets out of it. As sensitive as the source data -- never commit it.
+var/
