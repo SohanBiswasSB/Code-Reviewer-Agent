@@ -7,7 +7,7 @@ node docstring + this file. Honesty about scope reads stronger than vague confid
 - [ ] Real vector index (retrieval.py runs on a tiny in-memory corpus)
 - [ ] Cross-encoder rerank + MMR (RRF fusion is real; rerank/MMR are TODOs)
 - [ ] `reject_retrieve_more` corrective-RAG loop (not wired)
-- [ ] Prompt-injection input guard + adversarial eval class
+- [x] Prompt-injection input guard + adversarial eval class  *(GUARD_TASKS in eval/tasks.py)*
 - [ ] Multi-provider capability eval (OpenAI vs Claude vs local)
 - [x] AsyncPostgresSaver + real interrupt/resume  *(lifespan owns the async lifecycle;
       the Postgres path itself is written but UNVERIFIED — no Postgres on either machine)*
@@ -20,7 +20,8 @@ P0 (must close):
 - [x] G2 graph dispatches through the active Surface          *(T5: source/query/classify/prompts/sink)*
 - [ ] G3 per-tenant credentials (secret ref) + API authN/Z    *(CredentialProvider port done)*
 - [x] G4 log-review detect→aggregate→sample pipeline  *(adapters/detectors.py + source_s3logs)*
-- [ ] G5 PII/secret redaction before any LLM call (InputGuard)
+- [x] G5 PII/secret redaction before any LLM call (InputGuard)  *(T12: adapters/input_guard.py;
+      12 adversarial gates. Prose injection is COUNTED, not rewritten -- see the module docstring)*
 P1 (before real use):
 - [x] G6 AuditSink: one immutable record per run              *(jsonl adapter; docs/DATA_STORAGE.md)*
 - [ ] G7 idempotency key -> no double-post on re-runs

@@ -133,9 +133,9 @@ Per node: name, duration, error. Per retrieval: query, ids, scores. Per LLM call
 model, token counts, **prompt hash**.
 
 **Full prompt text stays off by default**, behind `CRA_TRACE_PROMPTS=1`. T12
-(InputGuard) is open, so nothing redacts PII or secrets out of diffs and log lines
-— storing every prompt verbatim would create a durable copy of exactly the data
-the guard is supposed to remove. Hash always; text only while debugging.
+now redacts before the prompt is built, so a stored prompt is a sanitised one —
+but the guard is pattern-based, and a durable verbatim copy of every prompt is
+still a larger surface than a hash. Hash always; text only while debugging.
 
 ---
 
@@ -217,8 +217,17 @@ Two consequences worth taking:
 
 ## Trust boundary
 
-**The audit store inherits the unredacted trust boundary.** T12 is open, so a
-diagnosis quotes evidence, and evidence may contain PII or secrets. `var/` is
+**The audit store holds evidence-derived text.** T12 is now closed — the
+`InputGuard` redacts secrets and PII before any model call, so the diagnosis it
+quotes was produced from sanitised evidence, and `build_record` stores the
+guard's **counts only**, never a redacted value.
+
+**But the checkpoint is a different store, and it is NOT redacted.** The guard
+runs on the way into a prompt, not on the way into state, so `_raw` and
+`evidence` persist unredacted — Postgres on disk in production. That is TODO T25,
+and it is the precise limit of what T12 closed.
+
+Redaction is also pattern-based rather than exhaustive, so `var/` is
 therefore as sensitive as the source data and must not be committed, synced to a
 shared drive, or shipped to a log aggregator without redaction. `var/` is in
 `.gitignore` for exactly this reason.

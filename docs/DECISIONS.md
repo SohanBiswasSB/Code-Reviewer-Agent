@@ -1173,23 +1173,140 @@ file. It now prints `approve` for both codebases when grounded and
 Gates 36. Tests 144 → **146**. ruff clean. **Both suites green, strict included —
 CI should now pass.**
 
+### 2026-09-10 (fourth session, continued) — T12 closed, and the N2 landmine defused
+
+**T12 (`InputGuard`, G5) is closed — the last P0 gap.** Until now the project's own
+invariant, *evidence is untrusted DATA never instructions*, was enforced by prompt
+wording plus a delimiter, and `nodes/_render.py` said so in its own docstring:
+saying "treat this as data" is not a boundary.
+
+**The design turns on one honest split, and it is worth not re-litigating.**
+
+*Redaction is solvable by regex.* Secrets and PII are replaced before any model
+call, with stable per-category placeholders — `[REDACTED:email:1]`, numbered by
+first appearance so the same address is the same token twice and a reviewer can
+still see "these two lines are one user". Deliberately **not** a truncated hash
+of the value: a hash of something low-entropy like an email is brute-forceable
+from a candidate list, which would quietly reintroduce what redaction removed.
+
+*Fence forgery is solvable too, and it is the one injection regex genuinely
+defeats.* If the evidence contains `FENCE_CLOSE`, it can close its own fence and
+continue as operator text — so without escaping the markers, the whole
+spotlighting approach was decorative. Neutralised visibly
+(`[NEUTRALISED_FENCE_MARKER]`) rather than deleted, because a human reading a
+captured prompt should see that it was attempted.
+
+*Natural-language injection is NOT solvable this way, and the adapter does not
+pretend.* Instruction-like phrasing is **counted and reported**, never rewritten.
+Rewriting would alter the evidence a human is about to approve a comment about,
+and would still miss any paraphrase. So the residual risk is a persuasive
+injected instruction the diagnosis model obeys — and the answer to that is
+structural, not textual: four Python booleans and a human approval stand between
+any model output and an action. A rising `injection_suspected` count is a signal
+to watch; a regex claiming to have removed the problem would be a lie.
+
+**Wired at one choke point.** `nodes/_render.py::fence_guarded` — every untrusted
+block passes through it, so a future prompt cannot skip the guard by accident.
+Both the diagnosis turn and the judge turn are guarded, and so are the
+**retrieved snippets**: the index is built from a repo, so a secret committed once
+is one the retriever can hand back later. The diagnosis itself is guarded before
+it reaches the judge, because model output produced from untrusted evidence can
+carry an injected instruction forward to a second model.
+
+**The report is counts only, never a redacted value.** It reaches `state["_guard"]`
+(declared in `TriageState` — an undeclared key is silently dropped, the T14
+lesson) and the audit record. Putting the value in the report would move the leak
+into the audit store rather than stop it, and a test asserts the serialised record
+contains neither the secret nor the email.
+
+**Not tenant-overridable.** Thresholds and allowlists are values; redaction is a
+boundary, and `docs/MULTI_TENANT.md` is explicit that tenants tune values and
+never remove a boundary. `sanitize()` takes `tenant` only so a record can say
+whose evidence was cleaned.
+
+**Writing the wiring tests found a real defect,** which is the argument for having
+written them: the report merge carried the counting keys and silently dropped
+`tenant`, so the audit record could not say whose evidence was sanitised. Pinned
+now. The reason those tests exist separately from the gates is the T5 shape — a
+correct component nothing calls is the failure this repo keeps rediscovering.
+
+**The N2 landmine is defused.** `generate_diagnosis` called `complete()` without
+`json_schema` while `_parse_diagnosis` did a bare `json.loads`, so the first
+malformed reply from a real model would have **crashed the node** — and with no
+failure edges (G9) a crash kills the run and writes no audit record at all,
+breaking G6 at the moment a record matters most.
+
+Two changes, because either alone is insufficient. `schemas.diagnosis.
+diagnosis_request_schema()` is now passed for constrained decoding — hand-written
+rather than `Diagnosis.model_json_schema()`, and the difference is the point:
+**`citations[].score` is absent**, because the gate compares against exactly that
+number and the parser looks it up from the retriever's own hits. Generating the
+schema from the model would put `score` back into the request and invite the T17
+mistake in a new place. And `_parse_diagnosis` now fails safe: an unreadable
+reply becomes a diagnosis that **cannot** be approved by three independent
+routes — no citations, severity `high`, empty claim — so it does not depend on a
+tenant's policy values. A tenant that allowlisted `high` would otherwise have
+turned a parse failure into an approvable action. The six parse gates run under a
+policy allowlisting *every* severity, precisely to prove that.
+
+**And the gate suite was lying about its own size.** The total was recomputed as
+`len(A) + len(B) + ... + 6` — a parallel count of the same thing — and it drifted
+the first time a task list was added without updating the sum: it reported **36
+while running 42**. Now counted as checks actually run, with an assertion that no
+two task names collide (a duplicate would make two checks report as one and hide
+whichever ran first). `tests/test_docs_consistency.py` trusts that number to
+check `MODEL_CARD.md`'s claim, so a number that can disagree with reality was
+worse than no number — and the tripwire from T24 caught the drift twice while
+this work was in progress, which is exactly what it was built for.
+
+Gates 36 → **54** (12 adversarial guard + 6 parse). Tests 152 → **164**. ruff
+clean. Both suites green, strict included.
+
+**And proving T12 end to end found its exact limit, now filed as T25.** The
+guard runs on the way into a PROMPT, not on the way into STATE. Measured on a
+real graph run with a secret in the diff: absent from the prompt, absent from the
+audit record, **present in `state["evidence"]` and `state["_raw"]`** — which are
+declared channels, so they are written to the checkpoint every super-step, and
+that is Postgres on disk in production.
+
+The provider boundary T12's port docstring specifies is genuinely closed. The N6
+framing in §9 also asked for redaction before evidence reaches *disk*, and only
+half of that is true, so saying T12 closed the trust boundary would overstate it.
+Not fixed here on purpose: sanitising in `normalize_evidence` would cover state,
+checkpoint and prompt in one move, but it changes what a human sees at the
+approval gate — a policy question, not a refactor — and it interacts with Layer 0,
+since G4 already says log evidence should be a reference rather than a payload.
+`classify` routes on file PATHS, which redaction must not touch.
+
+Worth noting how this was found: the first end-to-end check "passed" — no secret
+in the audit record — and the result was **meaningless**, because the offline stub
+path builds no prompt, so nothing had been guarded. Re-running with a fake model
+was what actually exercised it. That is the recurring lesson yet again, this time
+in a verification rather than a test: ask what a passing check is standing in for.
+
+**P0 is now genuinely closed.** What remains is T10 (retrieval is still a
+four-document toy, and every tenant with a `codebase` binding still cannot
+retrieve at all), T13 (reranker), T25 (the checkpoint exposure above), G3 (no
+caller authN/Z), G9 (no failure edges), and T1 — no call has still ever reached a
+live model.
+
 ---
 
 ## 9. RESUME HERE (updated 2026-09-10, fourth session)
 
-Working tree: `CLAUDE.md`, `README.md`, `MODEL_CARD.md`, `TODO.md`,
-`requirements.txt`, `app/state.py`, `app/deps.py`, `eval/demo_multitenant.py`,
-`tests/test_graph_resume.py`, four files under `docs/`, plus the new
-`tests/test_docs_consistency.py`. Branch `ID_SB_Ongoing_Development_Branch`,
-origin at `fa6bcdc`.
+Branch `ID_SB_Ongoing_Development_Branch`. `2624ac1` (T15 + T24) is committed
+but **not pushed** — `gh auth status` shows only the `me-sohan` account, which
+cannot see this repo, so `git push` returns `Repository not found`. Re-add
+`SohanBiswasSB` with `gh auth login` to push. The T12 work on top of that is
+uncommitted.
 
 ### State — re-measured, not inherited
 
 ```
 ruff check .   clean
-pytest         146 passed
-pytest strict  146 passed   <-- LANGGRAPH_STRICT_MSGPACK=true. T15 CLOSED; CI green.
-eval.harness   36/36 gates pass (pass^k)
+pytest         164 passed
+pytest strict  164 passed   <-- LANGGRAPH_STRICT_MSGPACK=true. T15 CLOSED; CI green.
+eval.harness   54/54 gates pass (pass^k)
 demo_multitenant  runs; approve/approve grounded, escalate/escalate not
 app.doctor     2 FAIL: `openai` not installed here, LM Studio not running
 ```
@@ -1203,9 +1320,13 @@ project actually is.
 
 ### What is needed now — an ordered index
 
-The order is not preference; it is dependency. Items 4–8 need numbers that only
-**N2** can produce, so N2 is the one to do next. Numbers are kept stable as items
-close, so a reference to "N4" does not shift under anyone.
+**N1, N3, N6 and N9 are done** (fourth session). Remaining: **N2, N4, N5, N7,
+N8**.
+
+The order is not preference; it is dependency. N4 and N5 need numbers that only
+**N2** can produce, so N2 is the one to do next — and its one blocking code defect
+is now fixed, so what is left is genuinely just the hardware. Numbers are kept
+stable as items close, so a reference to "N4" does not shift under anyone.
 
 **N1. ~~Pin `requirements.txt`, then fix or re-close T15.~~ DONE** (fourth
 session). T15 is closed by registering the state types in
@@ -1219,12 +1340,12 @@ the tailnet, point `LMSTUDIO_BASE_URL` at it, `python -m app.doctor`, then one
 real `code_review` run. *Why:* every number in `adapters/platforms/studio.py` and
 `mac.py` is *reasoned, not measured*; the LM Studio request shape
 (schema-constrained decoding, evidence in the user turn) has never been checked
-against a real model; and `generate_diagnosis` still calls `complete()` **without**
-`json_schema` while `_parse_diagnosis` does a bare `json.loads` — so the first
-malformed response crashes the node rather than escalating. Wrap that parse, or
-pass the schema, before the first run. *Done when:* one grounded diagnosis from a
-real model is in `var/audit/`, and `doctor`'s memory arithmetic is confirmed or
-corrected against what actually loaded.
+against a real model. **The parse landmine that used to be listed here is fixed**
+— the schema is passed for constrained decoding and `_parse_diagnosis` fails safe,
+so a malformed reply escalates instead of killing the run. What remains genuinely
+needs the hardware. *Done when:* one grounded diagnosis from a real model is in
+`var/audit/`, and `doctor`'s memory arithmetic is confirmed or corrected against
+what actually loaded.
 
 **N3. ~~Fix `eval/demo_multitenant.py`.~~ DONE** (fourth session). It was broken
 three ways, not the one the symptom suggested — positional args, attribute-objects
@@ -1249,13 +1370,11 @@ metrics (hit@k / MRR / NDCG) proving it earns its cost. Its calibrated score
 should then **supersede dense relevance as the number the gate reads** — a
 cross-encoder score is a better instrument for `groundedness_ok` than a cosine.
 
-**N6. T12 — `InputGuard`.** Now urgent for two reasons, not one: nothing redacts
-PII or secrets before evidence reaches a provider **and** `var/` durably stores
-evidence-derived text on disk. Both surfaces' evidence is untrusted by the
-project's own invariant, and that invariant is currently enforced by prompt
-wording plus `_render.py`'s fencing — delimiting without redaction. *Done when:*
-redaction runs before any provider call and before any write to `var/`, with an
-adversarial eval class covering injected instructions.
+**N6. ~~T12 — `InputGuard`.~~ DONE** (fourth session). Redaction and fence
+defanging run at one choke point before every model call; prose injection is
+counted, not rewritten, and the honest limit is stated in the module docstring
+and `MODEL_CARD.md`. 12 adversarial gates, teeth verified. See §8.
+
 
 **N7. G3 — caller authN/Z and per-tenant credentials.** `POST /run/{surface}` has
 **no caller authentication and no caller→tenant authorization** — any caller may
@@ -1309,7 +1428,7 @@ thing that fails. Anything a doc tells a human to run should be run by CI, or th
 doc is a claim nobody is checking. Same argument as pinning the drifted numbers
 with a test (T24).
 
-The N-list above is where the original version bites next: 36 gates and 146 tests
+The N-list above is where the original version bites next: 54 gates and 164 tests
 all pass without a model, without an index, and without a network. That is by
 design and it is genuinely useful — and it means the suite currently proves the
 *guardrails* hold, not that the system *works*.

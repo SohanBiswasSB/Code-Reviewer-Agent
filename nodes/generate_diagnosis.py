@@ -17,7 +17,12 @@ from __future__ import annotations
 
 from nodes._render import render_evidence
 from nodes._surface import active_surface, evidence_as_dict, namespace_for
-from schemas.diagnosis import Citation, Diagnosis, Finding
+from schemas.diagnosis import (
+    Citation,
+    Diagnosis,
+    Finding,
+    diagnosis_request_schema,
+)
 
 
 def _fallback_query(ev) -> str:
@@ -45,6 +50,7 @@ def generate_diagnosis(state: dict, llm=None, retriever=None) -> dict:
     # codebases -- see adapters/retriever_hybrid.py.
     hits = retriever.retrieve(query, k=5, namespace=namespace_for(state))
 
+    guard_report = None
     if llm is None:
         # Offline stub so the pipeline runs end to end without a model server.
         #
@@ -77,9 +83,22 @@ def generate_diagnosis(state: dict, llm=None, retriever=None) -> dict:
                 "generate_diagnosis: no diagnosis prompt in state. resolve_tenant "
                 "should have pinned it before this node ran."
             )
-        diag = _parse_diagnosis(llm.complete(system, render_evidence(ev, hits)), hits)
+        # Constrained decoding, not just a prompt asking for JSON (T1). A prompt
+        # instruction is advisory; a schema restricts token choice so the response
+        # cannot leave the shape. The schema deliberately omits citation scores --
+        # see schemas.diagnosis.diagnosis_request_schema.
+        user_turn, guard_report = render_evidence(
+            ev, hits, tenant=state.get("tenant") or "_default")
+        raw = llm.complete(system, user_turn,
+                           json_schema=diagnosis_request_schema())
+        diag = _parse_diagnosis(raw, hits)
 
-    return {"diagnosis": diag, "_retrieved": hits}
+    out = {"diagnosis": diag, "_retrieved": hits}
+    if guard_report is not None:
+        # Into state so it reaches the audit record and the trace (G6/T23). A
+        # redaction nobody can see happened is indistinguishable from none.
+        out["_guard"] = guard_report
+    return out
 
 
 def _parse_diagnosis(raw: str, hits: list[dict]) -> Diagnosis:
@@ -107,7 +126,23 @@ def _parse_diagnosis(raw: str, hits: list[dict]) -> Diagnosis:
     """
     import json as _json
 
-    data = _json.loads(raw)
+    # A malformed response must ESCALATE, not crash the node. The graph has no
+    # failure edges (G9), so an exception here kills the run -- and a killed run
+    # writes no audit record at all, breaking the "every terminal path is
+    # recorded" invariant (G6) at exactly the moment a record matters most.
+    #
+    # Constrained decoding (see the call site) should make this unreachable. It
+    # is here because "should" is doing real work in that sentence: a provider
+    # that ignores `response_format`, a truncated response from CRA_MAX_TOKENS,
+    # or a model emitting a JSON preamble all produce this, and none of them
+    # should be able to take down a run.
+    try:
+        data = _json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError(f"expected a JSON object, got {type(data).__name__}")
+    except (ValueError, TypeError) as exc:
+        return _unparseable(raw, exc)
+
     by_id = {h["id"]: h.get("score", 0.0) for h in hits}
 
     citations = []
@@ -128,4 +163,42 @@ def _parse_diagnosis(raw: str, hits: list[dict]) -> Diagnosis:
         proposed_label=data.get("proposed_label"),
         citations=citations,
         findings=findings,
+    )
+
+
+# The model's raw text is UNTRUSTED and ends up in an audit record and in front
+# of a human, so only a short prefix is kept.
+_UNPARSEABLE_EXCERPT = 300
+
+
+def _unparseable(raw: str, exc: Exception) -> Diagnosis:
+    """A diagnosis that cannot be read becomes one that cannot be approved.
+
+    Every route to `approve` is closed deliberately, and by three independent
+    booleans rather than one:
+
+      · no citations      -> `groundedness_ok` False
+      · severity "high"   -> `risk_ok` False for every shipped policy
+      · empty comment     -> `entailment_ok` False (nothing to entail)
+
+    Relying on a single one would make this depend on a tenant's policy values;
+    a tenant that allowlisted `high` would otherwise turn a parse failure into an
+    approvable action. The gate's `failures` list then tells the human what
+    happened, and the audit record keeps it.
+
+    `summary` carries the reason and an excerpt, because a silent escalation
+    looks identical to a legitimate one -- and a systematically unparseable model
+    would otherwise show up only as a mysteriously rising escalation rate, which
+    MODEL_CARD.md already warns is the signal to watch.
+    """
+    excerpt = (raw or "")[:_UNPARSEABLE_EXCERPT].replace("\n", " ")
+    truncated = "..." if raw and len(raw) > _UNPARSEABLE_EXCERPT else ""
+    return Diagnosis(
+        summary=(f"[unparseable model response] {type(exc).__name__}: {exc}. "
+                 f"raw excerpt: {excerpt}{truncated}"),
+        severity="high",
+        proposed_comment="",
+        proposed_label=None,
+        citations=[],
+        findings=[],
     )

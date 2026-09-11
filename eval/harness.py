@@ -19,18 +19,29 @@ import sys
 from eval.tasks import (
     CLASSIFY_TASKS,
     GATE_TASKS,
+    GUARD_TASKS,
+    PARSE_GATE_TASKS,
     RETRIEVAL_GATE_TASKS,
     SURFACE_PIPELINE_TASKS,
 )
 from nodes.classify import classify
 from nodes.execute import execute
 from nodes.independent_review import independent_review
+from schemas.diagnosis import SEVERITIES
 
 
 def run() -> int:
     fails: list[str] = []
+    # Counted as checks RUN, not derived from the task lists. The total used to be
+    # recomputed as `len(A) + len(B) + ... + 6`, which is a parallel count of the
+    # same thing and drifted the first time a task list was added without updating
+    # the sum -- the suite reported 36 while running 42. A number that can
+    # disagree with reality is worse than no number, because
+    # tests/test_docs_consistency.py trusts this one to check MODEL_CARD's claim.
+    ran: list[str] = []
 
     def check(kind: str, name: str, expected: str, got: str) -> None:
+        ran.append(name)
         ok = got == expected
         print(f"[{kind:9}] {name:42} expect={expected:17} got={got:17} {'OK' if ok else 'FAIL'}")
         if not ok:
@@ -83,6 +94,45 @@ def run() -> int:
             "_retrieved": hits,
         }
         check("retrieval", name, expected, independent_review(state)["review"].decision)
+
+    # ── the InputGuard: secrets/PII out, structural injection defanged ───────
+    from adapters.input_guard import RegexInputGuard
+    from nodes._render import FENCE_MARKERS
+
+    guard = RegexInputGuard(fence_markers=FENCE_MARKERS)
+    for name, raw, expect in GUARD_TASKS:
+        clean, report = guard.sanitize(raw, tenant="_default")
+        problems = []
+        for needle in expect.get("absent", []):
+            if needle in clean:
+                problems.append(f"leaked:{needle[:18]}")
+        for needle in expect.get("present", []):
+            if needle not in clean:
+                problems.append(f"over-redacted:{needle[:18]}")
+        if (cat := expect.get("category")) and cat not in report["redacted"]:
+            problems.append(f"uncategorised:{cat}")
+        if (hint := expect.get("flagged")) and hint not in report["injection_suspected"]:
+            problems.append(f"unflagged:{hint}")
+        if report["fence_forgery"] < expect.get("fence", 0):
+            problems.append("fence-forgery-missed")
+        if expect.get("no_redactions") and report["total_redactions"]:
+            problems.append(f"spurious:{sorted(report['redacted'])}")
+        check("guard", name, "CLEAN", "CLEAN" if not problems else ",".join(problems))
+
+    # ── a malformed model response escalates rather than killing the run ─────
+    from nodes.generate_diagnosis import _parse_diagnosis
+
+    parse_hits = [{"id": "iss-1", "score": 0.9,
+                   "text": ("OAuth callback returns 500 when state param missing; "
+                            "fix in the auth middleware.")}]
+    # Allowlists EVERY severity on purpose -- see the note on PARSE_GATE_TASKS.
+    permissive = {"min_relevance_score": 0.3,
+                  "severity_allowlist": list(SEVERITIES),
+                  "allowed_actions": ["comment", "comment+label"]}
+    for name, raw, expected in PARSE_GATE_TASKS:
+        diag = _parse_diagnosis(raw, parse_hits)
+        state = {"diagnosis": diag, "_retrieved": parse_hits, "_policy": permissive}
+        check("parse", name, expected, independent_review(state)["review"].decision)
 
     # ── execute(): the permission guard and verbatim posting ─────────────────
     class FakeSink:
@@ -147,8 +197,14 @@ def run() -> int:
     check("execute", "label_failure_is_partial_success", "partial",
           "partial" if partial else "lost")
 
-    total = (len(CLASSIFY_TASKS) + len(GATE_TASKS) + len(RETRIEVAL_GATE_TASKS)
-             + len(SURFACE_PIPELINE_TASKS) + 6)   # 6 execute-guard checks
+    total = len(ran)
+    # A duplicated task name would make two different checks report as one and
+    # hide whichever ran first. Cheap to assert, and this suite is the one place
+    # where a silently-skipped check is unacceptable.
+    assert len(set(ran)) == total, (
+        f"duplicate gate task name(s): "
+        f"{sorted({n for n in ran if ran.count(n) > 1})}"
+    )
     print()
     if fails:
         print(f"CRITICAL: {len(fails)} of {total} gate(s) failed: {fails}")

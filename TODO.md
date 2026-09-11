@@ -522,7 +522,51 @@ It currently cannot. Malformed provider JSON propagates into the graph.
 raises at the boundary. Note `eval/harness.py` constructs these directly, so it
 must keep working without the API stack installed.
 
-### T12. `InputGuard` unimplemented (G5) `[ ]`
+### T12. `InputGuard` unimplemented (G5) `[x]`
+
+**CLOSED 2026-09-10 (fourth session).** `adapters/input_guard.py` provides
+`@adapter("guard","regex")` (the default; `CRA_GUARD=null` must be chosen
+deliberately, like `CRA_AUDIT=null`), resolved by `config.get_input_guard()` and
+run from `nodes/_render.py::fence_guarded` — the single choke point every
+untrusted block passes through on its way into a prompt. Both the diagnosis and
+the judge turns are guarded, and so are the **retrieved snippets**: they come out
+of an index built from a repo, so a secret committed once is one the retriever
+can hand back later.
+
+**The honest split, which is the whole design of this adapter.** Redaction is
+solvable by regex, so secrets and PII are replaced with stable per-category
+placeholders (`[REDACTED:email:1]`, numbered by first appearance so coreference
+survives — deliberately not a truncated hash, which is brute-forceable for a
+low-entropy value like an email). Fence forgery is solvable too, and is the one
+injection regex genuinely defeats: without escaping the delimiters, evidence can
+close its own fence and continue as operator text, which makes the whole
+spotlighting approach decorative. Natural-language injection is **not** solvable
+this way, so it is COUNTED and reported rather than rewritten — rewriting would
+alter the evidence a human is approving a comment about and would still miss any
+paraphrase.
+
+**The report is counts only, never a redacted value.** It travels to
+`state["_guard"]` (declared in `TriageState`, or it would be silently dropped —
+the T14 lesson) and into the audit record. Putting the value in the report would
+move the leak into the audit store rather than stop it, and a test asserts the
+serialised record contains neither the secret nor the email.
+
+**Not tenant-overridable**, on purpose: redaction is a boundary, not a value, and
+`docs/MULTI_TENANT.md` is explicit that tenants tune values and never remove a
+boundary. `sanitize()` still takes `tenant` so a record can say whose evidence
+was cleaned.
+
+12 adversarial gates in `eval/tasks.py::GUARD_TASKS` (secrets, PII, fence escape,
+four prose-injection classes, and a **no-over-redaction** task — without that
+last one the suite could not tell a working guard from one that mangles every
+review). Teeth verified: swapping in a pass-through guard fails 11 of the 12.
+`tests/test_input_guard.py` pins the WIRING separately, because a correct
+component nothing calls is the T5 shape. Writing those tests found a real defect
+— the report merge dropped `tenant`, so the audit record could not say whose
+evidence was cleaned.
+
+The original entry:
+
 
 Nothing redacts PII/secrets or neutralises injected instructions before evidence
 reaches a provider. The port exists.
@@ -533,6 +577,42 @@ prompt wording only — which the prompts themselves say is not a boundary.
 
 **Done when:** evidence passes through a redaction + delimiting stage before any
 LLM call, and an adversarial eval class covers injected instructions.
+
+### T25. The CHECKPOINT still holds unredacted evidence `[ ]`
+
+Found while proving T12 end to end, and it is the precise limit of what T12
+closed. The `InputGuard` runs in `nodes/_render.py`, on the way into a **prompt**.
+It does not run on the way into **state**. Measured on a real graph run with a
+secret in the diff:
+
+    SECRET in the prompt          False   <- T12 works
+    SECRET in the audit record    False   <- T12 works
+    SECRET in state["evidence"]   True    <- this gap
+    SECRET in state["_raw"]       True    <- this gap
+
+`_raw` and `evidence` are declared channels, so they are written to the
+checkpoint on every super-step. With `DATABASE_URL` set that is **Postgres on
+disk**, which means a secret in a diff is persisted unredacted even though no
+model ever saw it.
+
+**Why it matters:** the provider boundary is the one T12's port docstring
+specifies ("BEFORE the LLM sees evidence") and it is genuinely closed. But the
+N6 framing in `docs/DECISIONS.md` §9 asked for redaction "before it reaches disk
+as well as before it reaches a provider", and only half of that is true. Saying
+T12 closed the trust boundary would overstate it.
+
+**Why it was not just fixed here:** sanitising in `normalize_evidence` instead
+would cover state, the checkpoint and the prompt in one move — but it changes
+what a human sees at the approval gate, and it interacts with Layer 0 (G4 already
+says log evidence should be a *reference*, not a payload, which would make this
+moot for the log surface). Doing it properly means deciding whether the approver
+should ever see an unredacted diff, and that is a policy question, not a
+refactor. `classify` routes on file PATHS, which redaction must not touch.
+
+**Done when:** either evidence is sanitised before it enters state (and the
+approval-gate consequence is accepted deliberately), or `_raw` is dropped from
+the checkpoint after `normalize_evidence` and the residual `evidence` exposure is
+accepted and documented in `MODEL_CARD.md`.
 
 ### T13. `Reranker` unimplemented `[ ]`
 

@@ -94,8 +94,12 @@ already failed once; the node docstrings carry the incident.
    into `action`.
 5. **`approved` is written only by `await_approval`, only from the resume value.**
    Not inferred, not defaulted, not derived from the judge's opinion.
-6. **Evidence is untrusted data, never instructions.** Diffs and log lines are fenced
-   via `nodes/_render.py` before any model sees them.
+6. **Evidence is untrusted data, never instructions.** Diffs and log lines are
+   sanitised *and* fenced via `nodes/_render.py` before any model sees them —
+   `config.get_input_guard()` redacts secrets/PII and escapes the fence markers, and
+   its report lands in `state["_guard"]` and the audit record. Prose injection is
+   *counted, not rewritten*; the real defence against it is that no model output can
+   become an action without four booleans and a human.
 7. **Retrieval is always namespaced per codebase (G1).** A retriever that cannot
    honour a namespace must *refuse*, not silently retrieve across tenants.
 8. **Nothing mutates infra or the database.** The agent proposes, a human approves,
@@ -179,16 +183,23 @@ Config is env-driven; see `.env.example` for the full annotated set. Key vars:
 `LLM_PROVIDER` (`lmstudio`|`openai`), `RETRIEVER`, `TENANT_STORE`, `SURFACES`,
 `CRA_PLATFORM` (`auto`|`mac`|`cuda`|`cpu`|`studio`), `CRA_PROFILE`,
 `LMSTUDIO_BASE_URL`, `DATABASE_URL`, `ENTAILER` (`lexical`|`cross_encoder`),
-`CRA_AUDIT`, `CRA_TRACE`, `CRA_DATA_DIR`.
+`CRA_GUARD` (`regex`|`null`), `CRA_AUDIT`, `CRA_TRACE`, `CRA_DATA_DIR`.
+
+**The defaults that must stay real:** `CRA_AUDIT`, `CRA_TRACE` and `CRA_GUARD` all
+default to working implementations, and the `null` variants exist for tests only. A
+record, a trace or a redaction boundary you get by *remembering* is not one.
 
 Developed on an M4 Pro Mac and a CUDA desktop, with a remote LM Studio "studio"
 inference host — neither machine is the "real" one. `CRA_PLATFORM=studio` cannot be
 auto-detected and must be set explicitly. Reach the studio over a **tailnet, never a
 public IP**: LM Studio has no authentication.
 
-`CRA_DATA_DIR` (audit records, reports) inherits the **unredacted** trust boundary
-while T12 (`InputGuard`) is open. Treat it as sensitive as the source data: do not
-commit it, sync it, or ship it to a log aggregator. Same for `CRA_TRACE_PROMPTS=1`.
+`CRA_DATA_DIR` (audit records, reports) holds evidence-derived text. T12 is now
+closed, so secrets and PII are redacted before any model call **and** before anything
+reaches `var/` — but redaction is pattern-based, so treat `var/` as sensitive anyway:
+do not commit it, sync it, or ship it to a log aggregator. `CRA_TRACE_PROMPTS=1` stores
+prompt text and stays off by default. `CRA_GUARD=null` disables the guard and must never
+be set outside a test.
 
 ## Status — what runs vs. what is stubbed
 
@@ -219,8 +230,8 @@ this is a snapshot, not a guarantee.
 
 **Repo:** branch `ID_SB_Ongoing_Development_Branch` on
 `github.com/SohanBiswasSB/Code-Reviewer-Agent` (private). Re-run and confirmed on this Mac
-on 2026-09-10: **ruff clean · 152 tests pass (both normally and under
-`LANGGRAPH_STRICT_MSGPACK=true`) · 36/36 gates pass**, on Python 3.14.7 with langgraph
+on 2026-09-10: **ruff clean · 164 tests pass (both normally and under
+`LANGGRAPH_STRICT_MSGPACK=true`) · 54/54 gates pass**, on Python 3.14.7 with langgraph
 1.2.11, pydantic 2.13.5, fastapi 0.141.1. Core deps are now pinned in `requirements.txt`.
 
 **T15 is closed, and the fix was registration — not a version pin.** An earlier note in
@@ -261,8 +272,9 @@ weights, ~10 GB left for KV cache, everything resident at 32k context. Raise the
 budget with `sudo sysctl iogpu.wired_limit_mb=49152`. `lms get <name> --mlx`, then
 `lms server start`. The **reranker stays in-process on the laptop** — neither LM Studio nor
 MLX exposes a rerank endpoint. Reach the Studio over **Tailscale, never a public IP**: LM
-Studio has no auth, the adapter's API key is a placeholder the server ignores, and T12
-(InputGuard) is open so nothing redacts secrets from diffs before they cross the wire.
+Studio has no auth and the adapter's API key is a placeholder the server ignores.
+T12 now redacts secrets and PII before a prompt leaves the process, which reduces but
+does not remove the reason for the tailnet.
 
 **Layer 0 is measured, not estimated:** 200,000 log lines in → **2,041 bytes** of evidence
 in the checkpoint. The reduction happens in the *source*, while lines are still a stream —

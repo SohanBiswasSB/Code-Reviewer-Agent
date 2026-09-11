@@ -75,3 +75,68 @@ class ReviewResult(BaseModel):
         ok = (self.groundedness_ok and self.risk_ok
               and self.permission_ok and self.entailment_ok)
         return "approve" if ok else "escalate_to_human"
+
+
+def diagnosis_request_schema() -> dict:
+    """The JSON shape the diagnosis model is ASKED to emit (T1/T17).
+
+    Deliberately hand-written rather than `Diagnosis.model_json_schema()`, and
+    the difference is the point: **`citations[].score` is absent.** The model must
+    not be asked for a relevance score, because the gate compares against exactly
+    that number and `_parse_diagnosis` looks it up from the retriever's own hits.
+    Generating the schema from the model would put `score` back in the request and
+    invite the assumption that the model's value is used — the T17 mistake in a
+    new place.
+
+    Passed to `LLM.complete(..., json_schema=...)` for constrained decoding, which
+    is not the same as asking for JSON in the prompt: prompt instructions are
+    advisory and a model can still emit prose, whereas constrained decoding
+    restricts token choice so the output cannot leave the schema. That is what
+    makes the bare `json.loads` in `_parse_diagnosis` reasonable rather than
+    reckless — and the parse still fails safe, because a provider that ignores
+    `response_format` must not be able to crash the node.
+
+    `severity` is enum-constrained so the model cannot invent a level outside
+    `SEVERITIES`. An out-of-allowlist severity still escalates via `risk_ok`; this
+    just removes one way to produce a value nothing can interpret.
+    """
+    _sev = {"type": "string", "enum": list(SEVERITIES)}
+    return {
+        "title": "Diagnosis",
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["summary", "severity", "proposed_comment", "citations"],
+        "properties": {
+            "summary": {"type": "string"},
+            "severity": _sev,
+            "proposed_comment": {"type": "string"},
+            "proposed_label": {"type": ["string", "null"]},
+            "citations": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["snippet_id"],
+                    # No `score`. See the docstring -- this omission is load-bearing.
+                    "properties": {"snippet_id": {"type": "string"}},
+                },
+            },
+            "findings": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["file", "issue"],
+                    "properties": {
+                        "severity": _sev,
+                        "file": {"type": "string"},
+                        "line": {"type": "integer"},
+                        "issue": {"type": "string"},
+                        "suggestion": {"type": "string"},
+                        "grounded": {"type": "boolean"},
+                        "citation_ids": {"type": "array", "items": {"type": "string"}},
+                    },
+                },
+            },
+        },
+    }

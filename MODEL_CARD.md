@@ -23,8 +23,11 @@ real data** — never the LLM's own verdict. Anything actionable pauses for a hu
 | Writes are attributed to the approver | `execute()` uses the approving visitor's own OAuth token; a shared token is a fallback only |
 | No LLM ever emits the decision | `independent_review` uses the model's text as documentation; `ReviewResult.decision` is computed |
 
-The `execute` guard and the four booleans are covered by 36 regression tasks at
-a permanent 100% bar (`python -m eval.harness`).
+The `execute` guard and the four booleans are covered by 54 regression tasks at
+a permanent 100% bar (`python -m eval.harness`). Six of those are the
+**malformed-response** gates: a model reply that cannot be parsed must escalate,
+never crash the node — the graph has no failure edges, so an exception there
+kills the run and writes no audit record at all.
 
 The four booleans are `groundedness_ok` (the cited id was really retrieved, and
 its calibrated relevance clears the tenant's bar), `entailment_ok` (the claim
@@ -63,11 +66,27 @@ expensive work; the mis-routes land in `human_review`, which is the safe directi
 "grounded" claim from the system today is grounded against test fixtures. Not a
 production property yet (TODO T10).
 
-**Evidence is untrusted input.** Diffs and log lines can carry injected
-instructions. Prompt wording alone is not a boundary — and the prompts themselves
-say so. The `InputGuard` redaction and delimiting stage is **not yet built**
-(TODO T12), so today this invariant is enforced by convention, which is exactly
-the weakness the architecture was designed to avoid. Treat it as open.
+**Evidence is untrusted input, and only part of that is solvable.** Diffs and
+log lines can carry injected instructions. The `InputGuard` (T12) now runs over
+every fenced block before any model call: it replaces secrets and PII with stable
+placeholders, and it escapes the fence markers so evidence cannot close its own
+delimiter and continue as operator text.
+
+**The guard protects the prompt, not the checkpoint.** Redaction happens on the
+way into a model call, so a secret in a diff never reaches the provider and never
+reaches the audit record — but the raw evidence is still written to the
+checkpoint, which is Postgres on disk in production. Measured, not assumed
+(TODO T25). Treat checkpoint storage as holding source-grade data.
+
+What it does **not** do is neutralise natural-language injection, and it does not
+claim to. Instruction-like phrasing is **counted and reported** into the audit
+record, not rewritten — rewriting would alter the evidence a human is approving a
+comment about and would still miss any paraphrase. So the residual risk is a
+persuasive injected instruction that the diagnosis model obeys. The design's
+answer to that is structural rather than textual: the model's output cannot
+become an action on its own, because four Python booleans and a human approval
+stand between them. Treat the redaction as a real boundary and the prose
+detection as a **signal to monitor**, not a defence.
 
 ## Intended use
 

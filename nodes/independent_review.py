@@ -106,7 +106,9 @@ def independent_review(state: dict, judge_llm=None, entailer=None) -> dict:
         # diagnosis it could not perform that check, so its reasoning about
         # grounding was necessarily invented — and shown to a human approver as
         # though it were real.
-        reasoning = judge_llm.complete(system, render_for_judge(diag, retrieved_list))
+        judge_turn, _ = render_for_judge(
+            diag, retrieved_list, tenant=state.get("tenant") or "_default")
+        reasoning = judge_llm.complete(system, judge_turn)
 
     # 2) code DECIDES — booleans from real data, never parsed from the llm.
     failures: list[str] = []

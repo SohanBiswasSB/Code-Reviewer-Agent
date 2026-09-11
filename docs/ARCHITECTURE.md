@@ -86,8 +86,11 @@ query, classify, prompt keys and sink — and no file under `nodes/` imports `to
 that cannot honour one *refuses* rather than retrieving across codebases. The open half of
 G1 is ingest — which means every tenant that declares a `codebase` currently cannot
 retrieve at all, so only `_default` runs (T10). The biggest open structural items are now
-**G5/T12** (no redaction before evidence leaves the trust boundary) and **G9** (no failure
-edges, so a node error kills the run instead of routing to a human).
+**G9** (no failure edges, so a node error kills the run instead of routing to a
+human) and **G3** (no caller authN/Z on `/run`). **G5/T12 is closed**: an `InputGuard`
+redacts secrets and PII and escapes the fence markers before any model call, and its
+report reaches the audit record — with the honest limit that natural-language injection
+is counted rather than neutralised.
 
 ## Accuracy-first stance (cost is no object)
 Because this runs locally with no cost constraint, the design maximizes correctness (see

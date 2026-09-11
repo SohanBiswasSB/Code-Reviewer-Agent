@@ -97,6 +97,28 @@ def get_detector():
     return registry.get_adapter("detector", os.getenv("DETECTOR", "signals"))()
 
 
+def get_input_guard():
+    """The InputGuard every prompt's untrusted blocks pass through (G5/T12).
+
+    Defaults to a REAL guard, not a no-op. `CRA_GUARD=null` has to be set
+    deliberately, for the same reason the audit sink does: a data-governance
+    boundary you get by remembering is not a boundary. Regex-based and
+    model-free, so it also works with no provider reachable -- the same rule
+    that keeps the lexical Entailer the default.
+
+    The guard is wired with the fence markers so it can neutralise evidence that
+    tries to close its own fence. `nodes/_render.py` owns those markers; passing
+    them in keeps the adapter from importing the module it protects.
+    """
+    from nodes._render import FENCE_MARKERS
+    cls = registry.get_adapter("guard", os.getenv("CRA_GUARD", "regex"))
+    try:
+        return cls(fence_markers=FENCE_MARKERS)
+    except TypeError:
+        # A guard adapter that takes no markers (the null one) is still valid.
+        return cls()
+
+
 def get_tenant_store():
     return registry.get_adapter("tenant", os.getenv("TENANT_STORE", "fs"))()
 
@@ -179,6 +201,7 @@ def registered() -> dict:
         "retriever": os.getenv("RETRIEVER", "hybrid"),
         "tenant_store": os.getenv("TENANT_STORE", "fs"),
         "audit": os.getenv("CRA_AUDIT", "jsonl"),
+        "guard": os.getenv("CRA_GUARD", "regex"),
         "tracer": os.getenv("CRA_TRACE", "jsonl"),
         "surfaces": enabled_surfaces(),
         "platform": plat.name,

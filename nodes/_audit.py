@@ -46,6 +46,12 @@ def build_record(state: dict, outcome: str) -> dict:
         "route": state.get("route"),
         "policy_version": state.get("_policy_version"),
         "prompt_version": state.get("_prompt_version"),
+        # What the InputGuard removed before any model saw the evidence (G5/T12).
+        # Counts and category names only -- recording the redacted values here
+        # would move the leak into the audit store rather than stop it. A rising
+        # `injection_suspected` is the signal worth watching, since the guard
+        # deliberately reports injection phrasing instead of rewriting it.
+        "guard": state.get("_guard") or {},
         # The retriever's OWN scores. This is the field that earns the layer:
         # T21 -- the grounding gate inert against real retrieval -- would have
         # been one line of this, showing every score as 1.0 on every query.

@@ -39,6 +39,9 @@ class TriageState(TypedDict, total=False):
     evidence: Any               # IssueEvidence | CodeChange | LogWindow
     route: Literal["deterministic", "ai_investigation", "human_review"]
     _retrieved: Any             # snippets, WITH their calibrated relevance scores
+    _guard: dict                # what the InputGuard redacted/flagged (G5/T12).
+                                # COUNTS ONLY -- never a redacted value, or the
+                                # audit record becomes the leak it prevented.
     diagnosis: Any
     review: Any
 
