@@ -1290,6 +1290,45 @@ retrieve at all), T13 (reranker), T25 (the checkpoint exposure above), G3 (no
 caller authN/Z), G9 (no failure edges), and T1 — no call has still ever reached a
 live model.
 
+### 2026-09-10 — CI switched off; `check.py` is the gate now
+
+The project is being run **locally only**, so `.github/workflows/ci.yml` is
+commented out rather than deleted (the pipeline is preserved verbatim under the
+comments, and it was passing when it was switched off).
+
+`check.py` replaces it and runs the same steps in the same order. Written because
+the risk of turning CI off is not that the checks are gone -- it is that the two
+which actually catch things are the two easiest to skip:
+
+  · the **gate suite runs first, with no dependencies installed**, so a broken
+    requirements file cannot mask a weakened gate. It can run there because
+    `eval/harness.py` is deliberately dependency-free and model-free.
+  · **pytest runs twice**, the second time with `LANGGRAPH_STRICT_MSGPACK=true`.
+    That is the run that caught T15, where an unregistered state type does not
+    raise but comes back from a checkpoint as a plain `dict`.
+
+A bare `pytest` passes without either. So the value of `check.py` is that it is
+one command someone will actually type -- "ALL CHECKS PASS" or exit 1.
+
+**Python, not a shell script.** This is developed on a Mac *and* a Windows box
+(section 1); `check.sh` would work on exactly one of them. Output is ASCII for
+the same reason a tick character in `eval/harness.py` once crashed a passing run
+under Windows cp1252 (section 5) -- a cross-machine helper must not reintroduce
+the class of bug the project already hit.
+
+**`doctor` is included but never fails the check.** It reports FAIL whenever LM
+Studio is unreachable, which is the normal state on the laptop. Letting that fail
+the run would train everyone to ignore the result. It still prints the platform,
+profile and memory arithmetic, which is the context you want when a real step
+fails.
+
+Teeth verified: a deliberately wrong number in `MODEL_CARD.md` makes the docs
+tripwire fail, `check.py` stops at that step and exits 1; reverting it exits 0.
+
+**The trade accepted here:** nothing now verifies a push. The gates only hold if
+`python check.py` is run before committing. Re-enabling CI is stripping the
+comments off one file.
+
 ---
 
 ## 9. RESUME HERE (updated 2026-09-10, fourth session)

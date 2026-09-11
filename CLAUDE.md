@@ -19,6 +19,9 @@ things are the way they are) on a fresh clone.
 ```bash
 conda activate CodeReviewerAgent      # env name on both machines
 
+python check.py                       # RUN THIS. The local equivalent of CI, which is
+                                      # commented out -- this is the only gate now.
+                                      # --all to continue past a failure, --list to see steps
 python -m app.doctor                  # can this machine run the agent? (stdlib only)
 python -m app.doctor --json
 python -m eval.harness                # safety-gate suite — needs NO dependencies
@@ -170,6 +173,15 @@ trivially gameable, and the gate compares against exactly that number — T17).
 **Put a check where the work happens, not only at the boundary.** `app/main.py`
 validates the surface, but `resolve_tenant` enforces `enabled_surfaces` too, because
 the HTTP check is bypassed by the scheduled job and by any future caller.
+
+**CI is commented out; `python check.py` is the gate.** This project is run
+locally only (`.github/workflows/ci.yml` is disabled but preserved). `check.py`
+runs the same steps in the same order and exits non-zero on any real failure.
+Two of them are easy to skip and are the ones that have caught real defects: the
+gate suite runs **first, with no dependencies installed**, so a broken
+requirements file cannot mask a weakened gate; and pytest runs **twice**, the
+second time with `LANGGRAPH_STRICT_MSGPACK=true`. Never conclude "tests pass"
+from a bare `pytest`.
 
 **Two kinds of eval, kept separate.** `eval/harness.py` is a *regression* suite: one
 unambiguous right answer per task, bar is 100% forever, exit non-zero on any miss —
