@@ -45,11 +45,16 @@ proves nothing. Escalation rate must be monitored as a quality signal, not
 treated as success.
 
 **The relevance thresholds are currently uncalibrated.** `min_relevance_score`
-values of 0.35/0.40 in `tenants/*/policy.json` were measured against
-`text-embedding-3-small` truncated to 512 dimensions. The system now uses
-**`bge-m3` at 1024 dimensions**, whose cosine scores do not distribute the same
-way — and it has changed embedder twice since those numbers were set, so they are
-doubly meaningless. **Until re-measured (TODO T10), they do not mean what they
+values of 0.35/0.40 in `tenants/*/policy.json` were calibrated for an embedder
+this project no longer uses, and the embedder has changed **three times** since
+(`text-embedding-3-small` truncated, then nomic, then bge-m3, now
+EmbeddingGemma-300m). Each is a different vector space whose cosine scores do not
+distribute the same way, so those numbers are not merely stale — they never
+described the space the gate now measures in.
+
+This is not hypothetical. The first live run scored its one real citation at
+**0.2 against a 0.35 threshold**, and entailment at **0.24 against 0.25** — so the
+verdict turned on two uncalibrated constants, one of them by a hundredth. **Until re-measured (TODO T10), they do not mean what they
 say**, and `app.doctor` says so on every run.
 
 **The judge shares a training distribution even when it shares no weights.**

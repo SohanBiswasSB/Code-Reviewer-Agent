@@ -39,10 +39,24 @@ class MacPlatform:
     profiles = ("portable", "mac_resident", "mac_max")
 
     def _context_for(self, profile: str) -> tuple[int, float]:
-        """Large-weight profiles trade context for the memory the weights need."""
-        if profile == "mac_max":
-            return 16384, KV_RESERVE_GB_LARGE
-        return 32768, KV_RESERVE_GB
+        """Trade context for weights only when the weights actually need it.
+
+        COMPUTED from the profile's hot weights, not matched on its name. It used
+        to read `if profile == "mac_max": return 16384`, which is the same
+        "declared rather than computed" mistake `plan_residency` exists to avoid
+        (docs/DECISIONS.md section 3.3) -- and it broke the moment mac_max's
+        diagnosis model changed: at 11.87 GB hot the profile is now LIGHTER than
+        mac_resident, and was still being handed a halved context because of its
+        name.
+
+        A profile that fits the full KV reserve gets the full context; one that
+        does not trades context for weights. Rename a profile, or change a model
+        in it, and this stays correct on its own.
+        """
+        models = base.resolve(profile, self.profiles)
+        if models.hot_gb + KV_RESERVE_GB <= MEMORY_BUDGET_GB:
+            return 32768, KV_RESERVE_GB
+        return 16384, KV_RESERVE_GB_LARGE
 
     def runtime(self, profile: str = base.DEFAULT_PROFILE) -> dict:
         models = base.resolve(profile, self.profiles)

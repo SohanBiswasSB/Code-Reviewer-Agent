@@ -1329,6 +1329,135 @@ tripwire fail, `check.py` stops at that step and exits 1; reverting it exits 0.
 `python check.py` is run before committing. Re-enabling CI is stripping the
 comments off one file.
 
+### 2026-09-11 — THE FIRST LIVE MODEL RUN. Four defects, and a working gate.
+
+The sentence "nothing has ever called a real model" is no longer true. Models are
+installed on the M4 Pro, `doctor` is 0-FAILED for the first time, and a real
+diagnosis has been produced, judged, and correctly escalated.
+
+**What the first grounded run actually produced:**
+
+    severity         low
+    summary          "The change safely handles missing 'state' parameter in
+                      OAuth callback by returning a 400 instead of a 500..."
+    citations        [('iss-101', 0.2)]      <- the RETRIEVER's score, not the model's
+    findings         2                       <- T17's field, populated for the first time
+    groundedness_ok  False   "citations below relevance 0.35: ['iss-101']"
+    entailment_ok    False   score 0.24 < 0.25
+    risk_ok          True
+    permission_ok    True
+    DECISION         escalate_to_human
+
+**`groundedness_ok` rejected a real citation on real retrieval scores.** That has
+never happened before -- every previous run was the stub. The citation was
+genuine; its relevance simply did not clear the bar. That is precisely the
+capability T21 restored when it split calibrated relevance from rank fusion, and
+it is now demonstrated rather than argued.
+
+**The judge caught a real hallucination, unprompted:** the diagnosis cited
+`iss-101` for both the state-parameter fix AND a leaked AWS key, and the judge
+noted that the retrieved snippet says nothing about a leaked key, so that half of
+the claim was unsupported. It also observed that "rotation" implies an action that
+should not be auto-applied. A 4B model auditing a 14B model's grounding, usefully.
+
+**The InputGuard worked, and better than expected.** The diff carried an AWS key
+and an email; both were redacted before the prompt was built and neither appears
+in the diagnosis, the judge's reasoning, or the audit record. But note WHAT the
+model did with `[REDACTED:aws_access_key_id:1]`: it reasoned correctly *about* a
+leaked key without ever receiving one. Redaction preserved the semantics and
+removed the secret, which is the best case for a placeholder scheme and an
+argument for keeping them descriptive rather than opaque.
+
+---
+
+## Four defects, in the order they were found
+
+**1. `bge-m3` does not exist in LM Studio's catalog.** Not under `bge-m3`,
+`text-embedding-bge-m3`, `bge-m3-gguf`, `BAAI/bge-m3` or
+`lmstudio-community/bge-m3`. The comment in `base.py` had *guessed* the catalog's
+"probable text-embedding-bge-m3" would resolve through loose matching, and nobody
+could catch the guess because no call had ever reached a server. Repinned to
+`text-embedding-embeddinggemma-300m-qat`, and **the dims are now MEASURED** -- a
+POST to /v1/embeddings returns a 768-vector. The two previous values were both
+reasoned. `EMBEDDING_DIMS` 1024 -> 768, and the hardcoded literal in
+`test_registered_report_includes_hardware` caught it, exactly as designed.
+
+**2. T26 -- `resolves_to()` binds a role to the WRONG model.** `doctor` reported
+`qwen3-8b` present when what is installed is `deepseek/deepseek-r1-0528-qwen3-8b`,
+a DeepSeek-R1 distill. Cause is the unbounded `w in g` substring clause. Filed,
+not fixed: the naive tightening breaks the embedding role, so the fix needs an
+explicit affix allowlist.
+
+**3. The diagnosis model could not emit parseable JSON.** `gemma-4-26b-a4b-qat`
+enters a degenerate repetition loop INSIDE a JSON string and burns the whole
+2047-token budget without closing the quote. Against the real prompt: **0 of 6
+parses** at temperatures 0 through 0.3.
+
+Schema-constrained decoding does not prevent this, and understanding why matters:
+the schema governs STRUCTURE -- field names, ordering and the severity enum were
+all correct every time -- and says nothing about what goes inside a string.
+`frequency_penalty=0.3` did not break the loop, and a schema `maxLength` is
+ignored by LM Studio's decoder. Both measured.
+
+Fixed by changing the MODEL, not the sampling: `ministral-3-14b-reasoning` gives
+3 of 3 parses at temperature 0 with **byte-identical output across runs**.
+
+**4. Context was declared, not computed.** `mac.py::_context_for` read
+`if profile == "mac_max": return 16384`. The moment mac_max's diagnosis model got
+lighter, the profile became *lighter than mac_resident* and was still handed a
+halved context because of its name. Now computed from `hot_gb` against the
+budget, so it stays correct when models change -- the same lesson
+`plan_residency` already encodes for residency (section 3.3), applied one knob
+later than it should have been.
+
+mac_max is transformed by that change: 18.35 GB hot -> **11.87 GB**, `jit_swap`
+-> **resident**, 16k -> **32k context**.
+
+---
+
+## A mistake of mine worth recording, because it is the house lesson
+
+I reversed the documented `temperature=0` decision on evidence, and the evidence
+was bad. A sweep showed 0/3 parses at temperature 0 and 3/3 at 0.1, so the
+diagnosis default was moved to 0.1 -- **but the sweep used a synthetic two-line
+prompt**. Against the real 3757-char prompt the same model still failed at 0.1
+and 0.3. The convenient fixture produced a convenient answer.
+
+That is the project's recurring lesson for the **sixth** time (T21's hand-supplied
+scores, T5's hand-built evidence, T22's degenerate fixtures, log_review's three
+inert paths, demo_multitenant's unrun script) -- and the first time it bit inside
+this file rather than in the code. When a measurement vindicates you, check what
+it was measured against.
+
+The temperature default is restored to 0. The per-role plumbing
+(`CRA_TEMPERATURE_<ROLE>`) is kept: it is genuinely useful, and the roles do
+differ. Determinism there is not cosmetic -- `severity` and `citations` feed
+`risk_ok` and `groundedness_ok`, so a non-deterministic diagnosis means the same
+PR can be approved on one run and escalated on the next.
+
+---
+
+## Still not true, and now the top of the list
+
+**The GRAPH does not call a real model.** `config.get_llm()` has no caller
+outside tests. `generate_diagnosis(state, llm=None)` and
+`independent_review(state, judge_llm=None)` fall through to hardcoded stubs,
+while `retriever`, `entailer`, `source` and `sink` all resolve from config when
+their argument is None. The live run above injected the models BY HAND.
+
+So T1 is still `[~]`: the request shape is now verified against a real model, but
+no production path reaches one. This is the T5 shape a seventh time -- a correct
+component that nothing calls -- and it is the single next thing to do.
+
+**`min_relevance_score` is still uncalibrated, and now visibly so.** The run
+above scored `iss-101` at 0.2 against a 0.35 threshold, with everything else at
+0.0. Entailment came in at 0.24 against a 0.25 threshold -- one hundredth under.
+Both thresholds are pre-calibration numbers from a different embedder, and the
+verdict currently turns on them. T10.
+
+Gates 54. Tests 164. ruff clean. `doctor` 0 FAILED, 1 WARN (threshold
+calibration, correctly).
+
 ---
 
 ## 9. RESUME HERE (updated 2026-09-10, fourth session)

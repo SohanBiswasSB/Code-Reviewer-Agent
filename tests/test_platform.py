@@ -58,7 +58,11 @@ def test_embedding_and_reranker_are_identical_across_profiles():
         # needed = hot weights (diagnosis + judge + embedder) + kv reserve
         ("mac", "portable", "resident"),        # 11.9 GB of an 18 GB budget
         ("mac", "mac_resident", "resident"),    # 15.9 GB
-        ("mac", "mac_max", "jit_swap"),         # 21.3 GB -> cannot co-reside
+        # mac_max was jit_swap at 21.3 GB when its diagnosis model was the 15.6 GB
+        # gemma-4-26b-a4b-qat. That model could not emit parseable JSON against
+        # the real prompt at any temperature below 0.5, so it was replaced by
+        # ministral-3-14b-reasoning (9.1 GB) and the profile now fits.
+        ("mac", "mac_max", "resident"),         # 14.87 GB against an 18 GB budget
         ("cuda", "portable", "jit_swap"),       # 9.9 GB against 5 GB of VRAM
         # the 64 GB Studio holds its own profile with room for a 32k KV cache...
         ("studio", "studio", "resident"),       # 39.2 GB of a 48 GB budget
@@ -104,11 +108,30 @@ def test_unknown_profile_raises(monkeypatch):
         config.get_models()
 
 
-def test_large_profiles_reduce_context_to_pay_for_weights(monkeypatch):
-    """mac_max cannot afford a 32k KV cache on top of ~18 GB of weights."""
+def test_context_is_computed_from_weights_not_from_the_profile_name(monkeypatch):
+    """Context must be traded for weights only when the weights need it.
+
+    `_context_for` used to read `if profile == "mac_max": return 16384`. That is
+    the "declared rather than computed" mistake `plan_residency` exists to avoid,
+    and it broke silently the moment mac_max's diagnosis model changed: the
+    profile became LIGHTER than mac_resident and was still handed a halved
+    context because of its name.
+
+    So this asserts the RULE rather than a specific profile's number -- every
+    profile that fits the full KV reserve gets the full context, and any that
+    does not gets the reduced one. A future heavy profile is covered without
+    anyone remembering to add it here.
+    """
     monkeypatch.setenv("CRA_PLATFORM", "mac")
+    from adapters.platforms import base, mac
+
     plat = config.get_platform()
-    assert plat.runtime("mac_max")["context"] < plat.runtime("portable")["context"]
+    for profile in plat.profiles:
+        models = base.resolve(profile, plat.profiles)
+        fits = models.hot_gb + mac.KV_RESERVE_GB <= mac.MEMORY_BUDGET_GB
+        expected = 32768 if fits else 16384
+        assert plat.runtime(profile)["context"] == expected, (
+            f"{profile}: hot={models.hot_gb}GB fits={fits}")
 
 
 def test_detect_platform_returns_a_registered_name():

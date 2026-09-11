@@ -164,6 +164,14 @@ time with `LANGGRAPH_STRICT_MSGPACK=true`, and `tests/test_docs_consistency.py`
 plus the `schemas/` tripwire in `test_graph_resume.py` fail if a model is added
 without registering it.
 
+**Schema-constrained decoding governs structure, not content.** Passing
+`json_schema` to `LLM.complete` reliably fixes field names, ordering and enum values — and
+does **nothing** to stop a model looping inside a string until the token budget dies.
+Measured: `frequency_penalty` does not break such a loop, and a schema `maxLength` is
+ignored by LM Studio's decoder. This is why `_parse_diagnosis` must fail safe rather than
+trust the schema, and why a model that cannot terminate at temperature 0 is the wrong model
+rather than a tuning problem.
+
 **Thresholds are measured, not guessed.** `MIN_RELEVANCE_SCORE` and
 `MIN_ENTAILMENT_SCORE` are calibrated numbers; the shipped 0.35/0.40 were calibrated
 for a *different* embedder and are owed a re-measurement. Citation scores come from
@@ -257,18 +265,22 @@ Both suites are green, so CI should pass.
 
 **Known broken / unverified** (each re-checked on 2026-09-10):
 
-- **No call has ever reached a live model server.** T1 is `[~]`: the LM Studio adapter and
-  the doctor checks exist, but the request shape (schema-constrained decoding, evidence in
-  the user turn) is unverified against a real model. `doctor` currently reports 2 FAILs on
-  this Mac — the `openai` client is not installed (only `requirements.txt` was installed
-  here, not `requirements-local.txt`) and LM Studio is not running.
+- **The GRAPH still cannot reach a model, though the models now work.** As of
+  2026-09-11 a real diagnosis has been produced, judged and correctly escalated on this
+  Mac, and `doctor` is 0-FAILED. But `config.get_llm()` has **no caller outside tests**:
+  `generate_diagnosis(state, llm=None)` and `independent_review(state, judge_llm=None)`
+  fall through to hardcoded stubs, while `retriever`, `entailer`, `source` and `sink` all
+  resolve from config when their argument is `None`. The live run injected the models by
+  hand. T1 stays `[~]`, and wiring this is the next task — it is the T5 shape again.
 - The Postgres checkpointer path is unverified — there is no Postgres on this machine.
 - `.env.example` is **not in the repo**: `.gitignore:11`'s `.env.*` matches it, despite
   `TODO.md` marking it done. Decide which is wrong. (`.dockerignore` *is* tracked — an
   earlier session's note that it was also missing was wrong.)
-- `min_relevance_score` (0.35 / 0.40 in `tenants/*/policy.json`) is **uncalibrated** — those
-  numbers were measured for `text-embedding-3-small` at 512 dims and mean nothing in
-  bge-m3's 1024-dim space. `doctor` already warns. Re-measure once ingest (T10) exists.
+- `min_relevance_score` (0.35 / 0.40 in `tenants/*/policy.json`) is **uncalibrated**, and
+  the first live run showed why it matters: the one real citation scored **0.2 against the
+  0.35 bar**, and entailment landed at **0.24 against 0.25**. The verdict turned on two
+  constants calibrated for an embedder this project no longer uses — the embedder has
+  changed three times since. `doctor` warns. Re-measure once ingest (T10) exists.
 
 **The inference host is decided and implemented** (the `studio` platform + profile):
 
@@ -277,7 +289,18 @@ Both suites are green, so CI should pass.
 | `diagnosis` | Qwen3-Coder-30B-A3B-Instruct | `qwen3-coder-30b-a3b` | MLX 6-bit | ~25 GB |
 | `judge` | Gemma-4-12B | `gemma-4-12b` | MLX 4-bit | ~7 GB |
 | `utility` | Qwen3-1.7B | `qwen3-1.7b` | MLX 4-bit | ~1.1 GB |
-| `embedding` | BGE-M3 | `bge-m3` | — | ~1.2 GB |
+| `embedding` | EmbeddingGemma-300m | `text-embedding-embeddinggemma-300m-qat` | QAT | 229 MB |
+
+**`bge-m3` is gone from every profile.** It is not obtainable through LM Studio under any
+name, which nobody could discover until a call reached a live server. The embedder is now
+EmbeddingGemma-300m at **768 dims, measured** against `/v1/embeddings` rather than assumed.
+
+**The `mac_max` profile changed on 2026-09-11, on measurement:** its diagnosis model is now
+`mistralai/ministral-3-14b-reasoning` (9.1 GB), not `gemma-4-26b-a4b-qat`. The bigger model
+**cannot emit parseable JSON against this project's own prompt** — it enters a repetition
+loop inside a JSON string, 0 of 6 parses at temperatures 0–0.3. Ministral gives 3/3 at
+temperature 0 with byte-identical output. The profile is now `resident` at 11.87 GB with
+32k context, instead of `jit_swap` at 18.35 GB with 16k.
 
 A **64 GB Mac Studio**, LM Studio + the MLX runtime (not vLLM — no CUDA). ≈34 GB of
 weights, ~10 GB left for KV cache, everything resident at 32k context. Raise the GPU

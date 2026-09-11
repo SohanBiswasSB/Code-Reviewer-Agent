@@ -25,11 +25,26 @@ gated* has never been produced by a model. Until a real diagnosis flows through,
 returns text for the judge and schema-constrained JSON for the diagnosis, and a
 `doctor` check proves the configured model ids are actually loaded.
 
-**Status:** adapter written and registered; `doctor` verifies reachability and
-per-role model presence. Still `[~]` and not `[x]` because **no call has ever
-reached a live server** — LM Studio has not been started with these models. The
-request shape (schema-constrained decoding, evidence in the user turn) is
-unverified against a real model.
+**Status (2026-09-11): the request shape is VERIFIED; the graph still cannot
+reach a model.** A real diagnosis has been produced, judged and correctly
+escalated on the M4 Pro, and `doctor` is 0-FAILED. Schema-constrained decoding,
+evidence in the user turn, per-role model binding and judge independence all work
+against live models.
+
+Still `[~]` for one reason: **`config.get_llm()` has no caller outside tests.**
+`generate_diagnosis(state, llm=None)` and `independent_review(state,
+judge_llm=None)` fall through to hardcoded stubs, while `retriever`, `entailer`,
+`source` and `sink` all resolve from config when their argument is `None`. The
+live run injected the models by hand. That asymmetry is the T5 shape a seventh
+time — a correct component nothing calls.
+
+**Done when:** both LLM nodes resolve their model from `config.get_llm(role)` when
+no model is injected, AND `eval/harness.py` plus the unit suite stay offline and
+deterministic — which needs an explicit `@adapter("llm", "stub")` rather than
+`None` meaning "stub", since the gate suite must remain runnable with no server
+(the same argument that makes the lexical `Entailer` the default). Verified by a
+graph-level test that a run reaches a real adapter, and by the gate suite still
+passing with no server running.
 
 ### T2. `get_llm()` is singular, but the design needs two `[x]`
 
@@ -577,6 +592,49 @@ prompt wording only — which the prompts themselves say is not a boundary.
 
 **Done when:** evidence passes through a redaction + delimiting stage before any
 LLM call, and an adversarial eval class covers injected instructions.
+
+### T26. `resolves_to()` binds a role to the WRONG model `[ ]`
+
+Found on 2026-09-11, the first time `doctor` was run against a live LM Studio.
+It reported the `mac_resident` judge as present:
+
+    [OK  ] model: judge    qwen3-8b -> deepseek/deepseek-r1-0528-qwen3-8b
+
+That is **not Qwen3-8B.** It is a DeepSeek-R1 distill that happens to have been
+fine-tuned from it, and it is a different model with different behaviour. The
+cause is the last clause of `adapters/llm_lmstudio.py::resolves_to()`:
+
+    if g == w or g.endswith("/" + w) or g.startswith(w + "@") or w in g:
+
+The first three are principled — exact, a publisher prefix (`qwen/qwen3-8b`), a
+quantisation suffix (`qwen3-8b@q4_k_m`). The fourth, `w in g`, is an unbounded
+substring match, so any model whose name merely *contains* the wanted id
+anywhere satisfies it.
+
+**Why it matters, and it is not cosmetic.** `docs/DECISIONS.md` §3.2 is explicit
+that a profile must mean the same models on every machine, and §3.3 that "an
+oversized or unknown profile raises" rather than silently downgrading, because
+"a silent downgrade would label eval results with a profile that never ran".
+This is that failure through a different door: the profile resolves, `doctor`
+goes green, and every number produced is attributed to `qwen3-8b` while a
+DeepSeek distill did the work. It also weakens the judge-independence check —
+`assert_judge_is_independent()` compares the *configured* ids, not the ones that
+actually resolve, so a loose match could in principle bind diagnosis and judge to
+the same underlying weights while the structural check still passed.
+
+**Why the obvious tightening is wrong.** Deleting `w in g` breaks the embedding
+role on purpose-built ids: DECISIONS §3.2 notes `bge-m3` is expected to resolve
+against the catalog's `text-embedding-bge-m3`, and that only works today
+*because* the match is loose. So the fix is not "be strict", it is "be explicit
+about which affixes are allowed".
+
+**Done when:** matching strips only a known publisher prefix, a known
+quantisation suffix, and an explicit allowlist of role prefixes (`text-embedding-`
+is the only one so far), then compares the remainder exactly. A negative test
+pins `qwen3-8b` NOT resolving to `deepseek/deepseek-r1-0528-qwen3-8b`, and a
+positive test pins the affixes that must keep working. `doctor` should also print
+the resolved id whenever it differs from the configured one, rather than only on
+a miss — a match that had to be massaged is exactly the one worth seeing.
 
 ### T25. The CHECKPOINT still holds unredacted evidence `[ ]`
 

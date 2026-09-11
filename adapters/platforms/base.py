@@ -24,19 +24,31 @@ from dataclasses import asdict, dataclass, field
 # Pinned across every profile and every platform. Changing either invalidates
 # the vector index and de-calibrates every tenant threshold. See docs/ROADMAP.md.
 #
-# BGE-M3 replaces nomic-embed-text-v1.5 (768 dims), and is changed NOW on purpose:
-# T10 is still open, so there is no index to re-embed and the corpus is four
-# documents. This is the cheapest moment the change will ever have. Once ingest
-# exists it costs a full re-index PLUS a re-measurement of every tenant's
-# min_relevance_score -- which is owed anyway, since the shipped 0.35/0.40 were
-# calibrated for text-embedding-3-small@512 and mean nothing in any other space.
+# EmbeddingGemma-300m (QAT) replaces bge-m3, 2026-09-11, for a blunt reason:
+# **bge-m3 is not obtainable through LM Studio.** `lms get` finds no such
+# artifact under `bge-m3`, `text-embedding-bge-m3`, `bge-m3-gguf`, `BAAI/bge-m3`
+# or `lmstudio-community/bge-m3`. The previous comment here guessed that the
+# catalog's "probable text-embedding-bge-m3" would resolve via loose matching;
+# the guess was wrong, and it was never verified because no call had ever reached
+# a live server. An unobtainable pin is not a pin.
 #
-# NOT yet verified against `lms ls` on the Studio; the other ids here were.
-# `llm_lmstudio.resolves_to()` matches loosely, so the catalog's probable
-# "text-embedding-bge-m3" still resolves from this shorter id.
-EMBEDDING_MODEL = "bge-m3"
-EMBEDDING_DIMS = 1024        # a DIFFERENT vector space from the 768-dim nomic model
-EMBEDDING_GB = 1.2           # 568M params at f16; nomic was ~0.1 GB
+# The DIMS ARE MEASURED, not assumed -- POST /v1/embeddings against the running
+# server returned a 768-vector for this exact id. That matters because the number
+# below is what `config.registered()` advertises and what a future index is built
+# against; the last two values here were both reasoned rather than measured.
+#
+# Changed now for the same reason bge-m3 was: T10 is open, so there is no index to
+# re-embed and the corpus is four documents. This is the cheapest moment such a
+# change will ever have. Every tenant's min_relevance_score still needs
+# re-measuring -- owed since the shipped 0.35/0.40 were calibrated for
+# text-embedding-3-small@512 and mean nothing in any other space.
+#
+# The id is FULLY QUALIFIED on purpose. `llm_lmstudio.resolves_to()` would match
+# the short form loosely, but T26 is exactly a case of loose matching binding a
+# role to the wrong model -- so do not depend on it for a pinned constant.
+EMBEDDING_MODEL = "text-embedding-embeddinggemma-300m-qat"
+EMBEDDING_DIMS = 768         # MEASURED against the live server, not assumed
+EMBEDDING_GB = 0.25          # 300M at QAT 4-bit, 229 MB on disk; bge-m3 assumed 1.2
 RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"    # in-process cross-encoder, never an LM Studio call
 
 
@@ -108,19 +120,46 @@ MAC_RESIDENT = ModelSet(
     weights_gb={"diagnosis": 7.0, "judge": 4.7, "utility": 2.5},
 )
 
-# Maximum quality the 24 GB Mac can reach. 26B-A4B is MoE with ~3.8B active, so
-# it decodes far faster than its size suggests, and the QAT build holds up at
-# 4-bit better than a post-hoc quantisation. Too large to co-reside with a judge,
-# so this profile computes to jit_swap — accepted knowingly for quality.
+# The best diagnosis model this 24 GB Mac can actually USE, which is not the same
+# thing as the largest one it can hold. Changed 2026-09-11 on measurement.
 #
-# Alternative if code specialisation matters more than raw size:
-# qwen3-coder-30b-a3b (~17 GB) as diagnosis with gemma-4-e4b as judge, but it
-# needs the context dropped to ~16k to stay inside the memory budget.
+# This profile used google/gemma-4-26b-a4b-qat (15.6 GB, MoE, ~3.8B active),
+# chosen for "maximum quality" on reasoning alone. The first live run showed it
+# **cannot produce parseable output against this project's own prompt**: with the
+# real 3757-char diagnosis prompt it enters a degenerate repetition loop INSIDE a
+# JSON string ("client-side side-effect of client-side side-effect of ...") and
+# burns the entire 2047-token budget without closing the quote.
+#
+#   gemma-4-26b-a4b-qat  temp 0 / 0.1 / 0.2 / 0.3 -> 0 of 6 parse (finish=length)
+#                        temp 0.5 / 0.7           -> parses, but needs sampling
+#                                                    noise to stop babbling
+#   ministral-3-14b-reas temp 0                   -> 3 of 3 parse, BYTE-IDENTICAL
+#                                                    across runs, 308 tokens each
+#
+# Constrained decoding does not save the bigger model: the schema governs
+# structure (field names, ordering, the severity enum were all correct) and says
+# nothing about what goes inside a string. `frequency_penalty` and a schema
+# `maxLength` were both measured and both failed.
+#
+# Ministral wins on every axis that matters here, not just parseability:
+#   · 9.1 GB, so diagnosis+judge+embedder = 11.65 GB -> RESIDENT, not jit_swap
+#   · therefore 32k context instead of the 16k a swapping profile has to accept
+#   · "mistral" is a genuinely different family from the qwen3-4b judge, rather
+#     than a string-comparison coincidence (see the note on qwen3.8-27b below)
+#   · it populates findings[], which no live model had ever done before
+#
+# The cost is 26B -> 14B on the diagnosis role. A model that cannot emit valid
+# JSON at temperature 0 is not delivering 26B of quality to this pipeline.
+#
+# NOT qwen/qwen3.8-27b, which is also on disk: `families_are_independent()` splits
+# on the first "-", so it reads as family "qwen3.8" against the judge's "qwen3"
+# and PASSES the independence check while both are Qwen. That is the same weakness
+# as T26 and must be fixed before that model is safe to select here.
 MAC_MAX = ModelSet(
-    diagnosis="google/gemma-4-26b-a4b-qat",
+    diagnosis="mistralai/ministral-3-14b-reasoning",
     judge="qwen3-4b",                         # small on purpose: it only writes reasoning text
     utility="qwen3-1.7b",
-    weights_gb={"diagnosis": 15.6, "judge": 2.5, "utility": 1.1},
+    weights_gb={"diagnosis": 9.12, "judge": 2.5, "utility": 1.1},
 )
 
 # The 64 GB Mac Studio used as a REMOTE inference host (adapters/platforms/studio.py).

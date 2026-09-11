@@ -39,12 +39,18 @@ def test_registered_report_includes_hardware():
     never fail; the literal is a tripwire, because changing the embedder silently
     re-scales every min_relevance_score in tenants/*/policy.json. Updating this
     number is meant to be part of the cost of changing the pin — which is exactly
-    what it caught when nomic (768) was replaced by bge-m3.
+    what it caught when nomic (768) was replaced by bge-m3, and again when bge-m3
+    turned out to be unobtainable through LM Studio and was replaced by
+    EmbeddingGemma-300m (2026-09-11, back to 768).
+
+    This value is now MEASURED rather than reasoned: POST /v1/embeddings against a
+    running server returns a 768-vector for the pinned id. Both previous values
+    here were assumed.
     """
     out = config.registered()
     assert out["selected"]["platform"] in ("cuda", "mac", "cpu", "studio")
     assert out["hardware"]["models"]["diagnosis"]
-    assert out["hardware"]["embedding_dims"] == 1024
+    assert out["hardware"]["embedding_dims"] == 768
 
 
 def test_retriever_refuses_a_namespace_it_cannot_honour():

@@ -44,7 +44,15 @@ def get_llm(role: str = "diagnosis"):
     if not model_id:
         raise KeyError(f"profile '{get_profile()}' defines no model for role '{role}'")
     cls = registry.get_adapter("llm", os.getenv("LLM_PROVIDER", "lmstudio"))
-    return cls(model=model_id, runtime=get_platform().runtime(get_profile()))
+    # The role is passed so the adapter can apply per-role decoding settings --
+    # the diagnosis model needs a non-zero temperature to terminate, the judge
+    # does not (adapters/llm_lmstudio.py::DEFAULT_TEMPERATURE). Kept optional so
+    # an adapter that does not care can ignore it.
+    try:
+        return cls(model=model_id, runtime=get_platform().runtime(get_profile()),
+                   role=role)
+    except TypeError:
+        return cls(model=model_id, runtime=get_platform().runtime(get_profile()))
 
 
 def assert_judge_is_independent() -> None:

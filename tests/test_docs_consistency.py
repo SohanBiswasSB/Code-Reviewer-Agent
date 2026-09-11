@@ -99,23 +99,39 @@ def test_the_gate_has_four_booleans_and_the_docs_say_so():
 
 
 @pytest.mark.parametrize("rel", CURRENT_STATE_DOCS)
-def test_no_current_state_doc_claims_the_old_embedding_dimensionality(rel):
-    """768 was nomic's; the pin is bge-m3 at 1024.
+def test_no_current_state_doc_claims_a_stale_embedding_dimensionality(rel):
+    """A current-state doc must not state a dimensionality other than the pin.
 
-    This one matters more than it looks: a stated dimensionality is a claim about
+    This matters more than it looks: a stated dimensionality is a claim about
     which vector space every `min_relevance_score` in `tenants/*/policy.json`
-    lives in. Getting it wrong in prose invites someone to trust a threshold that
-    was calibrated for a different space.
+    lives in. Getting it wrong in prose invites someone to trust a threshold
+    calibrated for a different space.
+
+    DERIVED from `base.EMBEDDING_DIMS` rather than hardcoding the stale value.
+    The first version hardcoded "768 is wrong, the pin is 1024" -- and inverted
+    the moment the pin moved back to 768, asserting the opposite of the truth
+    while still passing against the old docs. A tripwire that must be rewritten
+    every time the thing it guards changes will eventually be rewritten wrongly.
+
+    Deliberately the opposite choice from the literal in
+    `test_registered_report_includes_hardware`: that one asserts the VALUE and is
+    meant to be updated by hand as the cost of changing the pin. This one asserts
+    CONSISTENCY between the pin and the prose, which should maintain itself.
     """
     if not (ROOT / rel).exists():
         pytest.skip(f"{rel} not present")
+
+    from adapters.platforms import base
+
+    pinned = base.EMBEDDING_DIMS
     text = _read(rel)
     bad = [
-        text[:m.start()].count("\n") + 1
-        for m in re.finditer(r"768[- ]dimension|768\s*dims|\b768\b", text)
+        (text[:m.start()].count("\n") + 1, m.group(0))
+        for m in re.finditer(r"\b(\d{3,4})[- ]?dim(?:ension|ensions|s)?\b", text)
+        if int(m.group(1)) != pinned
     ]
     assert not bad, (
-        f"{rel} still refers to 768 dimensions at line(s) {bad}; the pinned "
-        f"embedder is bge-m3 at 1024. (Historical mentions belong in "
-        f"DECISIONS.md / TODO.md, which this test excludes.)"
+        f"{rel} states a dimensionality that is not the pinned {pinned}: {bad}. "
+        f"Historical mentions belong in DECISIONS.md / TODO.md, which this test "
+        f"excludes."
     )

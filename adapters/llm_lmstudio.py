@@ -72,22 +72,67 @@ def resolves_to(wanted: str, loaded: list[str]) -> str | None:
     return None
 
 
+DEFAULT_TEMPERATURE = {
+    # Temperature 0 everywhere, which RESTORES the original decision after briefly
+    # reversing it. The story is worth keeping, because the reversal looked
+    # justified and was not.
+    #
+    # The first live run produced unparseable JSON from the diagnosis model, and a
+    # temperature sweep "fixed" it -- 0 of 3 parsed at temperature 0, 3 of 3 at
+    # 0.1. On that basis the diagnosis default was moved to 0.1.
+    #
+    # That measurement was taken against a SYNTHETIC two-line prompt rather than
+    # the real one. Against the actual 3757-char diagnosis prompt the same model
+    # still failed at 0.1 and 0.3, and needed 0.5 before it would terminate. The
+    # convenient fixture had produced a convenient answer -- the same mistake this
+    # project has now hit six times (T21, T5, T22, log_review, demo_multitenant).
+    #
+    # The real cause was the MODEL, not the sampling. Swapping the diagnosis model
+    # to ministral-3-14b-reasoning gives 3 of 3 parses at temperature 0 with
+    # BYTE-IDENTICAL output across runs -- so the original reasoning stands
+    # exactly as written: the diagnosis output feeds a schema and then a citation
+    # check, and sampling noise there buys nothing.
+    #
+    # Determinism is worth more here than it looks. `severity` and `citations`
+    # feed `risk_ok` and `groundedness_ok`, so a non-deterministic diagnosis means
+    # the same PR can be approved on one run and escalated on the next.
+    "diagnosis": 0.0,
+    "judge": 0.0,
+    "utility": 0.0,
+}
+
+
+def _temperature_for(role: str | None) -> float:
+    """Per-role temperature: CRA_TEMPERATURE_<ROLE>, else CRA_TEMPERATURE, else the default.
+
+    Per role rather than one global knob because the roles genuinely differ: the
+    diagnosis model needs a nudge off greedy decoding to terminate, and the judge
+    does not. A single `CRA_TEMPERATURE` would have forced one compromise on both.
+    """
+    if role:
+        specific = os.getenv(f"CRA_TEMPERATURE_{role.upper()}")
+        if specific is not None:
+            return float(specific)
+    shared = os.getenv("CRA_TEMPERATURE")
+    if shared is not None:
+        return float(shared)
+    return DEFAULT_TEMPERATURE.get(role or "", 0.0)
+
+
 @adapter("llm", "lmstudio")
 class LMStudioLLM:
     """One bound local model.
 
-    Temperature defaults to 0. For the diagnosis role that is not a preference:
-    its output feeds a schema and then a citation check, and sampling noise there
-    buys nothing while risking a malformed or ungrounded field. Override per role
-    with CRA_TEMPERATURE only when you actually want variance (self-consistency
-    sampling, on the roadmap).
+    Temperature is PER ROLE, and the diagnosis default is non-zero. See
+    `_temperature_for` -- that default reverses an earlier decision, on evidence.
     """
 
-    def __init__(self, model: str, runtime: dict | None = None):
+    def __init__(self, model: str, runtime: dict | None = None, role: str | None = None):
         self.model = model
         self.runtime = runtime or {}
+        self.role = role
         self.base_url = base_url()
-        self.temperature = float(os.getenv("CRA_TEMPERATURE", "0"))
+        self.temperature = _temperature_for(role)
         # Leave room for the response inside the platform's context budget.
         self.max_tokens = int(os.getenv("CRA_MAX_TOKENS", "2048"))
         self._client = None

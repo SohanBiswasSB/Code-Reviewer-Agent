@@ -52,8 +52,45 @@ def test_independence_assertion_catches_a_collapsed_profile(monkeypatch):
 
 def test_diagnosis_runs_deterministic_by_default():
     """Its output feeds a schema and then a citation check; sampling noise there
-    buys nothing and risks a malformed field."""
+    buys nothing and risks a malformed field.
+
+    This assertion was briefly REVERSED and is now restored, which is the useful
+    part of its history. The first live run produced unparseable JSON, a
+    temperature sweep appeared to fix it (0/3 parsed at 0, 3/3 at 0.1), and the
+    default was moved to 0.1 on that evidence.
+
+    The sweep had been run against a SYNTHETIC two-line prompt. Against the real
+    3757-char diagnosis prompt the same model still failed at 0.1 and 0.3. The
+    cause was never the sampling -- it was the model. Swapping mac_max's
+    diagnosis model to ministral-3-14b-reasoning gives 3/3 parses at temperature
+    0 with byte-identical output across runs, so the original reasoning holds
+    unchanged.
+
+    Determinism matters more than it first appears: `severity` and `citations`
+    feed `risk_ok` and `groundedness_ok`, so a non-deterministic diagnosis means
+    the same PR can be approved on one run and escalated on the next.
+    """
     assert config.get_llm("diagnosis").temperature == 0
+
+
+def test_judge_stays_deterministic():
+    """The judge keeps temperature 0, which is why temperature is per-role.
+
+    Its output is free-text `reasoning` a human reads and which CANNOT affect the
+    decision, so there is nothing for sampling to corrupt -- and it showed no
+    repetition loop at 0. Flipping one global knob would have changed it for no
+    reason.
+    """
+    assert config.get_llm("judge").temperature == 0
+
+
+def test_temperature_is_overridable_per_role(monkeypatch):
+    monkeypatch.setenv("CRA_TEMPERATURE_DIAGNOSIS", "0.7")
+    assert config.get_llm("diagnosis").temperature == 0.7
+    # The shared knob still works for anything without a role-specific override.
+    monkeypatch.delenv("CRA_TEMPERATURE_DIAGNOSIS")
+    monkeypatch.setenv("CRA_TEMPERATURE", "0.4")
+    assert config.get_llm("judge").temperature == 0.4
 
 
 def test_reachability_error_is_actionable():
