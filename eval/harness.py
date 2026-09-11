@@ -14,6 +14,7 @@ It must therefore give byte-identical results on the Mac and the CUDA box.
 """
 from __future__ import annotations
 
+import os
 import sys
 
 from eval.tasks import (
@@ -28,6 +29,35 @@ from nodes.classify import classify
 from nodes.execute import execute
 from nodes.independent_review import independent_review
 from schemas.diagnosis import SEVERITIES
+
+# MODEL-FREE, DECLARED rather than inherited. The LLM nodes now resolve their
+# model from config like every other provider, so "no llm argument" no longer
+# silently means "use a stub" -- without this line the gate suite would try to
+# reach LM Studio and stop being runnable on a bare machine.
+#
+# `setdefault`, not assignment: an operator who deliberately exports
+# LLM_PROVIDER=lmstudio to see how a real model fares against the gates can still
+# do so. The DEFAULT is offline because that is what makes this suite a
+# regression suite -- byte-identical on the Mac and the CUDA box, 100% bar, no
+# GPU required.
+#
+# Safe below the imports because `config.get_llm` reads LLM_PROVIDER when it is
+# CALLED, not when config is imported.
+os.environ.setdefault("LLM_PROVIDER", "stub")
+
+
+# The gate tasks build synthetic states to exercise the FOUR BOOLEANS in
+# isolation. They now also need a pinned judge prompt, because the judge call is
+# no longer skipped when no llm is injected -- `independent_review` resolves the
+# stub from config and then (correctly) refuses to run without the prompt
+# `resolve_tenant` is supposed to have pinned (T6).
+#
+# That is a small improvement to what this suite covers: these tasks now drive the
+# real judge call path, not just the boolean arithmetic after it. The prompt text
+# is irrelevant -- the stub judge ignores it, and by design no judge output can
+# affect the decision.
+_STUB_PROMPTS = {"diagnosis": "[gate-suite] diagnosis prompt",
+                 "judge": "[gate-suite] judge prompt"}
 
 
 def run() -> int:
@@ -53,7 +83,8 @@ def run() -> int:
 
     # ── independent_review(): the three booleans, under real policies ────────
     for name, diagnosis, retrieved, policy, expected in GATE_TASKS:
-        state = {"diagnosis": diagnosis, "_retrieved": retrieved}
+        state = {"diagnosis": diagnosis, "_retrieved": retrieved,
+                 "_prompts": _STUB_PROMPTS}
         if policy is not None:
             state["_policy"] = policy
         check("gate", name, expected, independent_review(state)["review"].decision)
@@ -92,6 +123,7 @@ def run() -> int:
                                   "param is missing; fix in the auth middleware."),
                 proposed_label=None, citations=cited),
             "_retrieved": hits,
+            "_prompts": _STUB_PROMPTS,
         }
         check("retrieval", name, expected, independent_review(state)["review"].decision)
 
@@ -131,7 +163,8 @@ def run() -> int:
                   "allowed_actions": ["comment", "comment+label"]}
     for name, raw, expected in PARSE_GATE_TASKS:
         diag = _parse_diagnosis(raw, parse_hits)
-        state = {"diagnosis": diag, "_retrieved": parse_hits, "_policy": permissive}
+        state = {"diagnosis": diag, "_retrieved": parse_hits,
+                 "_policy": permissive, "_prompts": _STUB_PROMPTS}
         check("parse", name, expected, independent_review(state)["review"].decision)
 
     # ── execute(): the permission guard and verbatim posting ─────────────────

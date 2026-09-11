@@ -23,11 +23,25 @@ That third one is the recurring lesson in `docs/DECISIONS.md` for the fifth
 time: a fixture convenient enough to construct by hand stopped resembling the
 real input, and nothing was red because nothing ran this file.
 """
-import config
-from nodes.independent_review import independent_review
-from schemas.diagnosis import Citation, Diagnosis
+import os
+
+# Offline, like eval/harness.py. This script exists to show that POLICY decides,
+# so it must not need a model server. Since 2026-09-11 `independent_review`
+# resolves a judge from config rather than skipping the call when none is
+# injected -- and the judge's text cannot affect the outcome anyway, because four
+# Python booleans do. `setdefault`, so it can still be pointed at a real provider
+# deliberately.
+os.environ.setdefault("LLM_PROVIDER", "stub")
+
+import config  # noqa: E402  -- must follow the env default above
+from nodes.independent_review import independent_review  # noqa: E402
+from schemas.diagnosis import Citation, Diagnosis  # noqa: E402
 
 store = config.get_tenant_store()
+
+# The judge prompt the node now requires (T6). Content is irrelevant here: the
+# stub ignores it, and no judge output may influence the decision.
+PROMPTS = {"diagnosis": "[demo] diagnosis prompt", "judge": "[demo] judge prompt"}
 
 # The passage a real retrieval would return, and a claim that actually FOLLOWS
 # from it. Both are needed: `entailment_ok` scores the claim against the text of
@@ -50,6 +64,7 @@ def run(tenant: str, cited_score: float):
     policy = store.policy(tenant, "code_review")
     review = independent_review({
         "diagnosis": diag, "_retrieved": retrieved, "_policy": policy,
+        "_prompts": PROMPTS,
     })["review"]
     cb = policy["codebase"]
     return cb["name"], cb["vcs"], cb["repo"], review

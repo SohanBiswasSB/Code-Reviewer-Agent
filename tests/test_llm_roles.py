@@ -115,8 +115,16 @@ def test_model_id_matching_tolerates_lm_studio_naming(wanted, loaded, expected):
 
 
 def test_calling_a_model_without_the_client_says_so_clearly(monkeypatch):
-    """The failure must name requirements-local.txt, not just ImportError."""
+    """The failure must name requirements-local.txt, not just ImportError.
+
+    Forces the real adapter: `conftest._offline_llm` points LLM_PROVIDER at the
+    stub so no test reaches a live server, and the stub has no openai import to
+    fail on. This test is specifically ABOUT the LM Studio adapter's error
+    message, so it asks for it by name.
+    """
     import builtins
+
+    monkeypatch.setenv("LLM_PROVIDER", "lmstudio")
 
     real_import = builtins.__import__
 
@@ -129,3 +137,80 @@ def test_calling_a_model_without_the_client_says_so_clearly(monkeypatch):
     llm = config.get_llm("judge")
     with pytest.raises(ModuleNotFoundError, match="requirements-local.txt"):
         llm.complete("sys", "user")
+
+
+# ── the wiring itself (T1) ───────────────────────────────────────────────────
+def test_diagnosis_node_resolves_its_model_from_config(monkeypatch):
+    """The node must ASK config for a model when none is injected.
+
+    This is the regression test for the defect that made T1 drag: every provider
+    -- retriever, entailer, source, sink -- resolved from config when its argument
+    was None, but the two LLM arguments fell through to a hardcoded stub built
+    inside the node. So `config.get_llm()` had no caller in the entire codebase
+    and the graph could not reach a real model however many were installed.
+
+    It asserts the CALL, not the output. Checking the text would pass just as well
+    against a stub hardcoded back inside the node, which is precisely the thing
+    that was wrong.
+    """
+    import config as config_mod
+    from nodes.generate_diagnosis import generate_diagnosis
+
+    asked: list[str] = []
+    real = config_mod.get_llm
+    monkeypatch.setattr(config_mod, "get_llm",
+                        lambda role="diagnosis": (asked.append(role), real(role))[1])
+
+    class FixedRetriever:
+        def retrieve(self, query, k=5, namespace=None):
+            return [{"id": "iss-1", "score": 0.9, "text": "auth regression"}]
+
+    generate_diagnosis(
+        {"evidence": {"title": "t", "diff": "d"}, "tenant": "_default",
+         "_prompts": {"diagnosis": "sys"}},
+        retriever=FixedRetriever())
+
+    assert asked == ["diagnosis"], "generate_diagnosis must resolve its own model"
+
+
+def test_judge_node_resolves_its_model_from_config(monkeypatch):
+    """Same for the judge, and the role must be 'judge' -- not 'diagnosis'.
+
+    Asserting the ROLE matters: `get_llm` is role-bound precisely so a caller
+    cannot reuse one model for both and quietly lose the independence property
+    `independent_review` exists for. Passing the wrong role here would compile,
+    run, and silently destroy that guarantee.
+    """
+    import config as config_mod
+    from nodes.independent_review import independent_review
+    from schemas.diagnosis import Citation, Diagnosis
+
+    asked: list[str] = []
+    real = config_mod.get_llm
+    monkeypatch.setattr(config_mod, "get_llm",
+                        lambda role="diagnosis": (asked.append(role), real(role))[1])
+
+    passage = "OAuth callback returns 500 when state param missing"
+    independent_review({
+        "diagnosis": Diagnosis(summary="s", severity="low", proposed_comment=passage,
+                               citations=[Citation(snippet_id="iss-1", score=0.9)]),
+        "_retrieved": [{"id": "iss-1", "score": 0.9, "text": passage}],
+        "_prompts": {"judge": "sys"},
+    })
+
+    assert asked == ["judge"], "independent_review must resolve the JUDGE role"
+
+
+def test_the_gate_suite_is_offline_by_default():
+    """`eval/harness.py` must not need a model server, on any machine.
+
+    The suite is a safety regression suite at a permanent 100% bar and has to give
+    byte-identical results on the Mac and the CUDA box. Now that the nodes resolve
+    from config, that property is only true because the harness DECLARES itself
+    model-free -- so assert the declaration, since losing it would be silent until
+    someone ran the gates on a machine with no GPU.
+    """
+    import eval.harness as harness
+
+    source = __import__("pathlib").Path(harness.__file__).read_text()
+    assert 'os.environ.setdefault("LLM_PROVIDER", "stub")' in source

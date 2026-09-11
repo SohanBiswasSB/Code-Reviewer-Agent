@@ -11,7 +11,7 @@ Status: `[ ]` open · `[~]` partially done · `[x]` done (kept briefly, with the
 
 ## P0 — nothing runs end to end without these
 
-### T1. No working LLM adapter `[~]`
+### T1. No working LLM adapter `[x]`
 
 `adapters/llm_openai.py::complete()` raises. Every LLM path in the graph is a
 stub, so `generate_diagnosis` returns a hardcoded diagnosis and
@@ -38,9 +38,32 @@ judge_llm=None)` fall through to hardcoded stubs, while `retriever`, `entailer`,
 live run injected the models by hand. That asymmetry is the T5 shape a seventh
 time — a correct component nothing calls.
 
-**Done when:** both LLM nodes resolve their model from `config.get_llm(role)` when
-no model is injected, AND `eval/harness.py` plus the unit suite stay offline and
-deterministic — which needs an explicit `@adapter("llm", "stub")` rather than
+**CLOSED 2026-09-11.** Both LLM nodes now resolve from `config.get_llm(role)`
+when nothing is injected, exactly like `retriever`, `entailer`, `source` and
+`sink`. Proven on the real graph with **no LLM injected anywhere**: 29.1s, a
+grounded diagnosis citing `iss-101` at the retriever's own 0.2917, the guard
+redacting an AWS key and an email, and `escalate_to_human` because 0.2917 is
+below the 0.35 bar. The secret reached neither model nor audit record.
+
+`@adapter("llm", "stub")` carries the offline path, and it is a better stub than
+the one it replaced: it returns TEXT and goes through `_parse_diagnosis`, so the
+offline path now exercises the parser -- which the old in-node stub bypassed
+entirely, and which is exactly where the first live model failed.
+
+`eval/harness.py` and `eval/demo_multitenant.py` now DECLARE themselves
+model-free (`os.environ.setdefault("LLM_PROVIDER", "stub")`) rather than relying
+on "no argument means stub", and `tests/conftest.py` does the same for the unit
+suite -- without which the graph tests silently began making live calls. Verified
+with the server deliberately unreachable: 54/54 gates pass.
+
+Three tests pin it, and were checked for teeth (putting a stub back inside the
+node fails them): each node must ASK config for a model, `independent_review`
+must ask for the **judge** role specifically, and the harness must keep its
+offline declaration.
+
+**Original done-when:** both LLM nodes resolve their model from
+`config.get_llm(role)` when no model is injected, AND `eval/harness.py` plus the
+unit suite stay offline and deterministic — which needs an explicit `@adapter("llm", "stub")` rather than
 `None` meaning "stub", since the gate suite must remain runnable with no server
 (the same argument that makes the lexical `Entailer` the default). Verified by a
 graph-level test that a run reaches a real adapter, and by the gate suite still

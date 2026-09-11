@@ -224,6 +224,10 @@ def test_log_review_can_finally_be_approved():
         "diagnosis": diag,
         "_retrieved": [{"id": "iss-101", "score": 0.9, "text": passage}],
         "_policy": config.get_tenant_store().policy("_default", "log_review"),
+        # The judge call is no longer skipped when no llm is injected -- the node
+        # resolves one from config (the stub, per conftest) and then correctly
+        # refuses to run without the prompt resolve_tenant should have pinned (T6).
+        "_prompts": {"diagnosis": "[test] diagnosis", "judge": "[test] judge"},
     }
     out = independent_review(state)
     assert out["review"].permission_ok is True, out["review"].failures

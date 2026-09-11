@@ -91,24 +91,28 @@ def independent_review(state: dict, judge_llm=None, entailer=None) -> dict:
     allowed_actions = set(pol.get("allowed_actions", ALLOWED_ACTIONS))
 
     # 1) judge EXPLAINS (free text only). Fresh call, never saw the 1st model's CoT.
+    # Resolved from config like every other provider (see generate_diagnosis for
+    # why this was not the case until 2026-09-11). Offline callers set
+    # LLM_PROVIDER=stub -- `eval/harness.py` does, because the gate suite must be
+    # model-free to stay byte-identical across machines.
     if judge_llm is None:
-        reasoning = "[stub] citations checked against retrieved set and threshold."
-    else:
-        # The TENANT's judge prompt, pinned by resolve_tenant (T6).
-        system = (state.get("_prompts") or {}).get("judge")
-        if not system:
-            raise ValueError(
-                "independent_review: no judge prompt in state. resolve_tenant "
-                "should have pinned it before this node ran."
-            )
-        # T18: the judge receives the SAME retrieved evidence, because its prompt
-        # instructs it to verify citation ids against RETRIEVED. Given only the
-        # diagnosis it could not perform that check, so its reasoning about
-        # grounding was necessarily invented — and shown to a human approver as
-        # though it were real.
-        judge_turn, _ = render_for_judge(
-            diag, retrieved_list, tenant=state.get("tenant") or "_default")
-        reasoning = judge_llm.complete(system, judge_turn)
+        import config
+        judge_llm = config.get_llm("judge")
+    # The TENANT's judge prompt, pinned by resolve_tenant (T6).
+    system = (state.get("_prompts") or {}).get("judge")
+    if not system:
+        raise ValueError(
+            "independent_review: no judge prompt in state. resolve_tenant "
+            "should have pinned it before this node ran."
+        )
+    # T18: the judge receives the SAME retrieved evidence, because its prompt
+    # instructs it to verify citation ids against RETRIEVED. Given only the
+    # diagnosis it could not perform that check, so its reasoning about
+    # grounding was necessarily invented — and shown to a human approver as
+    # though it were real.
+    judge_turn, _ = render_for_judge(
+        diag, retrieved_list, tenant=state.get("tenant") or "_default")
+    reasoning = judge_llm.complete(system, judge_turn)
 
     # 2) code DECIDES — booleans from real data, never parsed from the llm.
     failures: list[str] = []

@@ -50,48 +50,39 @@ def generate_diagnosis(state: dict, llm=None, retriever=None) -> dict:
     # codebases -- see adapters/retriever_hybrid.py.
     hits = retriever.retrieve(query, k=5, namespace=namespace_for(state))
 
-    guard_report = None
+    # Resolved from config exactly like `retriever` above, and like `entailer`,
+    # `source` and `sink` elsewhere. This used to fall through to a hardcoded stub
+    # DIAGNOSIS object built right here, which meant `config.get_llm()` had no
+    # caller in the whole codebase and the graph could never reach a real model --
+    # the T5 shape (a correct component nothing calls), found the first time real
+    # models were installed.
+    #
+    # Offline callers set LLM_PROVIDER=stub (eval/harness.py does) or inject an
+    # llm directly. The stub returns TEXT and is parsed by `_parse_diagnosis`
+    # below, so the offline path now exercises the parser too -- which the old
+    # in-node stub bypassed entirely, and which is exactly where the first live
+    # model failed.
     if llm is None:
-        # Offline stub so the pipeline runs end to end without a model server.
-        #
-        # Two things it does deliberately:
-        #   · cites the top hit with the retriever's OWN relevance score, never a
-        #     model-supplied one, which would be gameable (T17);
-        #   · DERIVES its claim from the cited passage's text, so the claim
-        #     actually follows from its citation. The stub previously asserted
-        #     "possible duplicate of a known auth regression", which entails
-        #     nothing about whatever was retrieved — so once the entailment check
-        #     existed (T22) every offline run escalated. A stub that models an
-        #     *ungrounded* diagnosis is not a useful stand-in for a grounded one.
-        top = hits[0] if hits else None
-        claim = (f"Related to a known issue: {top['text']}." if top
-                 else "No related prior issue was retrieved.")
-        diag = Diagnosis(
-            summary="[stub] likely regression in the area described by the cited issue",
-            severity="medium",
-            proposed_comment=claim,
-            proposed_label="needs-triage",
-            citations=[Citation(snippet_id=top["id"], score=top["score"])] if top else [],
+        import config
+        llm = config.get_llm("diagnosis")
+
+    # The TENANT's prompt, resolved and pinned by resolve_tenant (T6). Read from
+    # state rather than the store, so a resumed run uses the prompt it STARTED
+    # with even if the tenant edited the file meanwhile.
+    system = (state.get("_prompts") or {}).get("diagnosis")
+    if not system:
+        raise ValueError(
+            "generate_diagnosis: no diagnosis prompt in state. resolve_tenant "
+            "should have pinned it before this node ran."
         )
-    else:
-        # The TENANT's prompt, resolved and pinned by resolve_tenant (T6). Read
-        # from state rather than the store, so a resumed run uses the prompt it
-        # STARTED with even if the tenant edited the file meanwhile.
-        system = (state.get("_prompts") or {}).get("diagnosis")
-        if not system:
-            raise ValueError(
-                "generate_diagnosis: no diagnosis prompt in state. resolve_tenant "
-                "should have pinned it before this node ran."
-            )
-        # Constrained decoding, not just a prompt asking for JSON (T1). A prompt
-        # instruction is advisory; a schema restricts token choice so the response
-        # cannot leave the shape. The schema deliberately omits citation scores --
-        # see schemas.diagnosis.diagnosis_request_schema.
-        user_turn, guard_report = render_evidence(
-            ev, hits, tenant=state.get("tenant") or "_default")
-        raw = llm.complete(system, user_turn,
-                           json_schema=diagnosis_request_schema())
-        diag = _parse_diagnosis(raw, hits)
+    # Constrained decoding, not just a prompt asking for JSON (T1). A prompt
+    # instruction is advisory; a schema restricts token choice so the response
+    # cannot leave the shape. The schema deliberately omits citation scores --
+    # see schemas.diagnosis.diagnosis_request_schema.
+    user_turn, guard_report = render_evidence(
+        ev, hits, tenant=state.get("tenant") or "_default")
+    raw = llm.complete(system, user_turn, json_schema=diagnosis_request_schema())
+    diag = _parse_diagnosis(raw, hits)
 
     out = {"diagnosis": diag, "_retrieved": hits}
     if guard_report is not None:
