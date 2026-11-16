@@ -1460,7 +1460,83 @@ calibration, correctly).
 
 ---
 
-## 9. RESUME HERE (updated 2026-09-10, fourth session)
+### 2026-11-14 — T10 built: a real namespaced index, and the default retriever is now it
+
+The multi-tenant path was inert: `HybridRetriever` (four hardcoded strings) refused
+every namespaced request, so every tenant with a codebase could not retrieve at all.
+`RETRIEVER=indexed` is now the default and serves them. Built and tested offline;
+**nothing has been embedded yet** -- LM Studio was not running, and the user chose to
+stop before ingest.
+
+**What it does.** Dense cosine from `<CRA_DATA_DIR>/index/<namespace>/` plus Okapi BM25
+over the same namespace's chunks (path and qualified name included, so a query naming a
+module reaches it), fused with RRF **for order only**. The gate's `score` is always the
+cosine -- for a chunk BM25 alone surfaced too, looked up explicitly -- so T21's
+two-number contract survives the move to a real backend.
+
+**Decisions, each with its reason:**
+
+- **The index records which embedder built it** (`manifest.json`), and the retriever
+  refuses a query from a different one. Cosines across two embedding spaces look normal
+  and are noise; without the manifest the next embedder change would have silently
+  re-meant every `min_relevance_score` again.
+- **No namespace is a refusal, not an empty answer.** The demo served un-namespaced
+  calls; the real index cannot, and there must never be a global one (G1). A tenant
+  without `codebase.repo` fails loudly rather than escalating forever for a reason
+  nobody sees.
+- **An unbuilt namespace returns `[]`** (truthful, escalates via `groundedness_ok`) --
+  and because that is the "fails safe, goes inert" shape this project keeps finding,
+  `doctor` now WARNs per unbuilt tenant and FAILs an index from the wrong embedder.
+- **Offline is declared, not defaulted** -- conftest, the gate suite and the demo set
+  `RETRIEVER=hybrid`, exactly as T1 made them set `LLM_PROVIDER=stub`.
+- **Only the embedding sees the path/name prefix**; the stored text a citation shows
+  and entailment reads stays verbatim source.
+- **Tenants can exclude paths** (`codebase.index_exclude`, globs matching a file or any
+  parent dir).
+
+**MilesOne's first dry run** (no network): 1,242 files -> 15,296 chunks in ~5 s,
+2,610 values redacted (1,458 emails, 1,031 phones, 114 secret assignments, 7 bearer
+tokens). Two findings were put to the user:
+
+  · `Miscellaneous/` holds user-migration reports and a person-specific doc. Redaction
+    is pattern-based -- it removes an email, not a name.
+  · One API reference (`MF External API.md`) is 1,401 chunks, ~9% of the corpus, and
+    will compete with code for retrieval slots.
+
+**The user chose to index the whole repo, redacted** -- no `index_exclude` for MilesOne.
+Recorded here because it is a deliberate trade, not an oversight: `var/index/` will hold
+names and user details from those reports, so it is as sensitive as `var/` already is
+(do not commit, sync or ship it), and the API doc's crowding effect should be checked
+when thresholds are calibrated.
+
+**Also fixed:** the chunker never split a single block already over `MAX_CHARS`, so a
+long function with no blank line went out whole -- and the embedding server truncates
+silently. Now cut on line breaks.
+
+Tests 208 (39 new; five deliberate breaks -- fusion as score, no embedder check, no
+keyword-hit cosine, namespaces collapsed to the org, ingest without redaction -- each
+caught). Gates 54/54. ruff clean.
+
+---
+
+## 9. RESUME HERE (updated 2026-11-14)
+
+**Read this paragraph first; the rest of §9 below it is from 2026-09-10 and partly
+superseded.** Since then: the first live model run happened (2026-09-11, §8), **T1 is
+closed** (`390f1b0` -- committed, not pushed), and **T10 is built but not embedded**
+(2026-11-14, §8). So N2 is done and N4 is half done. 208 tests, 54/54 gates, ruff clean.
+
+**Do next, in order:** (1) serve the embedder (LM Studio locally, or the Studio over
+Tailscale); (2) `python -m tools.ingest --tenant milesone --root
+~/Dev/Miles-USP-Backend-PROD` -- whole repo, by the user's choice; (3) calibrate
+`min_relevance_score` from on-topic vs off-topic score distributions on that index and
+write the method down -- that closes T10 and unblocks T13; (4) push `390f1b0` (needs
+`gh auth login` with an account that can see the repo); (5) commit the T10 work.
+
+---
+
+*(2026-09-10 handoff, kept for its reasoning:)*
+
 
 Branch `ID_SB_Ongoing_Development_Branch`. `2624ac1` (T15 + T24) is committed
 but **not pushed** — `gh auth status` shows only the `me-sohan` account, which

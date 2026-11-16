@@ -5,7 +5,8 @@
     "repo": "org/repo-name",
     "language": "python",
     "root": "/repos/repo-name",
-    "extra": "anything worth knowing, e.g. workers live in the same repo"
+    "extra": "anything worth knowing, e.g. workers live in the same repo",
+    "index_exclude": ["path/or/dir/glob that must never be indexed, e.g. data exports"]
   },
 
   "enabled_surfaces": ["code_review"],

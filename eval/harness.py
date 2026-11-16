@@ -9,7 +9,8 @@ kinds of eval separate is deliberate — a gate that only mostly holds is not a
 gate. Capability evaluation (is the diagnosis any *good*?) is tracked separately
 as T10/G17 and is expected to improve over time rather than sit at 100%.
 
-Deliberately dependency-free and model-free: no provider, no server, no network.
+Deliberately model-free: no provider, no server, no network. (It does need
+`requirements.txt`: it imports `config`, which imports every adapter.)
 It must therefore give byte-identical results on the Mac and the CUDA box.
 """
 from __future__ import annotations
@@ -44,6 +45,10 @@ from schemas.diagnosis import SEVERITIES
 # Safe below the imports because `config.get_llm` reads LLM_PROVIDER when it is
 # CALLED, not when config is imported.
 os.environ.setdefault("LLM_PROVIDER", "stub")
+# Same reasoning for retrieval (T10): the default retriever is now the real
+# namespaced index, which needs an embedder server. The gates run on the demo
+# corpus, whose scores are known, so every gate stays byte-identical.
+os.environ.setdefault("RETRIEVER", "hybrid")
 
 
 # The gate tasks build synthetic states to exercise the FOUR BOOLEANS in

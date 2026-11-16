@@ -24,7 +24,7 @@ python check.py                       # RUN THIS. The local equivalent of CI, wh
                                       # --all to continue past a failure, --list to see steps
 python -m app.doctor                  # can this machine run the agent? (stdlib only)
 python -m app.doctor --json
-python -m eval.harness                # safety-gate suite — needs NO dependencies
+python -m eval.harness                # safety-gate suite — no model, no server
 python -m eval.demo_multitenant       # same diagnosis, two codebases, different policies
 python -c "import json, config; print(json.dumps(config.registered(), indent=2))"
 
@@ -41,8 +41,14 @@ python -m jobs.prune_checkpoints --keep-days 30           # dry run by default; 
 
 Requirements files are layered: `requirements.txt` (graph + API) ⊂
 `requirements-local.txt` (adds LM Studio client + in-process reranker, pulls torch)
-⊂ `requirements-dev.txt` (adds pytest + ruff). `eval/harness.py` deliberately needs
-none of them.
+⊂ `requirements-dev.txt` (adds pytest + ruff). `eval/harness.py` needs only
+`requirements.txt` — no model and no server.
+
+**Imports go at the top of the module** (user's rule, 2026-11-16). A function-level
+import is allowed only where module level would be genuinely circular — e.g. an
+adapter importing `config`, since `config` imports `adapters`; say so in a comment.
+Libraries an adapter imports are therefore required by everything that imports
+`config`, so they belong in `requirements.txt`, not `-local`.
 
 ## Architecture
 
@@ -71,7 +77,7 @@ Layered so the core never imports a provider:
 | `tenants/<name>/` | One directory per codebase: `policy.json` + `prompts/<surface>/<node>.md`. |
 | `registry.py` / `config.py` | The plug: decorators register, env resolves. |
 | `schemas/` | `Diagnosis`, `ReviewResult`, evidence models (Pydantic). |
-| `eval/` | Safety-gate regression suite, 100% bar, `pass^k`. Dependency-free. |
+| `eval/` | Safety-gate regression suite, 100% bar, `pass^k`. Model-free. |
 | `tests/` | Unit tests. Deliberately separate from the gate suite. |
 | `adapters/platforms/` | The **only** code that knows about hardware. |
 | `app/doctor.py` | Environment check. Stdlib only, so it runs before setup does. |
@@ -186,8 +192,8 @@ the HTTP check is bypassed by the scheduled job and by any future caller.
 locally only (`.github/workflows/ci.yml` is disabled but preserved). `check.py`
 runs the same steps in the same order and exits non-zero on any real failure.
 Two of them are easy to skip and are the ones that have caught real defects: the
-gate suite runs **first, with no dependencies installed**, so a broken
-requirements file cannot mask a weakened gate; and pytest runs **twice**, the
+gate suite runs **first**, model-free, so no later step can mask a weakened
+gate; and pytest runs **twice**, the
 second time with `LANGGRAPH_STRICT_MSGPACK=true`. Never conclude "tests pass"
 from a bare `pytest`.
 
@@ -225,14 +231,16 @@ be set outside a test.
 
 **Runs today:** rule-based `classify` routing, the four-boolean gate incl. tenant
 policy resolution, `execute`'s permission guard, `interrupt()`/resume, the plugin
-registry, the filesystem tenant store, JSONL audit + trace, and hybrid retrieval
-(dense + BM25, RRF-fused) over a small in-memory corpus.
+registry, the filesystem tenant store, JSONL audit + trace, and namespaced hybrid
+retrieval (`RETRIEVER=indexed`, the default: dense cosine + BM25, RRF-ordered) over an
+on-disk index that `tools/ingest.py` builds. `RETRIEVER=hybrid` is the 4-document
+offline demo; tests, the gate suite and the demo declare it.
 
 **Stubbed deliberately and visibly** (`NotImplementedError`, never fake success): the
 four network calls in `tools/github_client.py` (the `EvidenceSource` / `ActionSink`
 adapters around it are real), the S3 read in `adapters/source_s3logs.py` (inject
 `reader=` and the rest of the pipeline runs — that is how the 200k-line figure was
-measured), `adapters/llm_openai.py`, `tools/ingest.py`, and `jobs/daily_log_review.py`.
+measured), `adapters/llm_openai.py`, and `jobs/daily_log_review.py`.
 **There is no GitLab adapter at all** — it is named in the docs as what the port exists
 to make swappable, not as a stub. `generate_diagnosis` and `independent_review` have
 offline stub paths that model a *grounded* diagnosis so the pipeline runs end to end
@@ -242,7 +250,7 @@ Scope cuts are owned explicitly, not hidden: `docs/ARCHITECTURE_GAPS.md` (G1–G
 prioritized P0–P2), `TODO.md` (T1–T24, each with a "done when"), and the node
 docstrings. When closing one, update the tracker in the same change.
 
-## Current state — carried over from the 2026-09-10 sessions
+## Current state — last updated 2026-11-14
 
 Distilled from the session transcripts (`../chat-archive/`); `docs/DECISIONS.md` §8/§9 is
 the fuller narrative and the designated handoff. **Verify before relying on any of it** —
@@ -250,7 +258,7 @@ this is a snapshot, not a guarantee.
 
 **Repo:** branch `ID_SB_Ongoing_Development_Branch` on
 `github.com/SohanBiswasSB/Code-Reviewer-Agent` (private). Re-run and confirmed on this Mac
-on 2026-09-10: **ruff clean · 164 tests pass (both normally and under
+on 2026-11-14: **ruff clean · 208 tests pass (both normally and under
 `LANGGRAPH_STRICT_MSGPACK=true`) · 54/54 gates pass**, on Python 3.14.7 with langgraph
 1.2.11, pydantic 2.13.5, fastapi 0.141.1. Core deps are now pinned in `requirements.txt`.
 
@@ -265,13 +273,15 @@ Both suites are green, so CI should pass.
 
 **Known broken / unverified** (each re-checked on 2026-09-10):
 
-- **The GRAPH still cannot reach a model, though the models now work.** As of
-  2026-09-11 a real diagnosis has been produced, judged and correctly escalated on this
-  Mac, and `doctor` is 0-FAILED. But `config.get_llm()` has **no caller outside tests**:
-  `generate_diagnosis(state, llm=None)` and `independent_review(state, judge_llm=None)`
-  fall through to hardcoded stubs, while `retriever`, `entailer`, `source` and `sink` all
-  resolve from config when their argument is `None`. The live run injected the models by
-  hand. T1 stays `[~]`, and wiring this is the next task — it is the T5 shape again.
+- **T1 is closed** (`390f1b0`, 2026-09-11): both LLM nodes resolve from
+  `config.get_llm(role)`, proven on the real graph with nothing injected. Offline
+  callers declare `LLM_PROVIDER=stub`. That commit is **not pushed** yet.
+- **T10 is `[~]` — built, not embedded** (2026-11-14). The indexed retriever, index,
+  ingest and `doctor` checks exist and are tested offline; no tenant's index has been
+  built, so `doctor` WARNs for all three and every real run escalates on empty
+  retrieval. **Next:** serve the embedder, `python -m tools.ingest --tenant milesone
+  --root ~/Dev/Miles-USP-Backend-PROD`, then calibrate thresholds. The user chose to
+  index MilesOne **whole** (redacted), `Miscellaneous/` included — see DECISIONS §8.
 - The Postgres checkpointer path is unverified — there is no Postgres on this machine.
 - `.env.example` is **not in the repo**: `.gitignore:11`'s `.env.*` matches it, despite
   `TODO.md` marking it done. Decide which is wrong. (`.dockerignore` *is* tracked — an

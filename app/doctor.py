@@ -33,27 +33,38 @@ OK, WARN, FAIL = "OK  ", "WARN", "FAIL"
 
 
 class Report:
+    """Accumulated (status, check, detail) lines; the exit code is derived from them.
+
+    Checks ADD lines rather than raising, so one broken check cannot hide the
+    others -- a doctor that stops at the first problem makes you run it N times.
+    """
+
     def __init__(self) -> None:
         self.lines: list[tuple[str, str, str]] = []
 
     def add(self, status: str, check: str, detail: str = "") -> None:
+        """Record one result. `status` is OK, WARN or FAIL."""
         self.lines.append((status, check, detail))
 
     @property
     def failed(self) -> int:
+        """FAIL count -- any FAIL means the agent cannot run, and exits non-zero."""
         return sum(1 for s, _, _ in self.lines if s == FAIL)
 
     @property
     def warned(self) -> int:
+        """WARN count -- degraded but usable; never changes the exit code."""
         return sum(1 for s, _, _ in self.lines if s == WARN)
 
     def render(self) -> str:
+        """Aligned human-readable lines, ASCII only (Windows cp1252 consoles)."""
         out = []
         for status, check, detail in self.lines:
             out.append(f"[{status}] {check:38} {detail}")
         return "\n".join(out)
 
     def as_dict(self) -> dict:
+        """The same results for `--json`, with the status padding stripped."""
         return {
             "checks": [{"status": s.strip(), "check": c, "detail": d} for s, c, d in self.lines],
             "failed": self.failed,
@@ -184,6 +195,55 @@ def _check_tenants(r: Report) -> None:
           f"({base.EMBEDDING_DIMS} dims) -- re-measure before trusting the gate (T10)")
 
 
+def _check_indexes(r: Report) -> None:
+    """Is each tenant's retrieval index built, and by the embedder that will query it?
+
+    The indexed retriever returns `[]` for an unbuilt namespace, which is honest
+    and escalates via `groundedness_ok` -- and is also exactly the "fails safe,
+    goes inert, nobody notices" shape this project keeps finding. A tenant whose
+    every run escalates because nobody ran ingest should show up HERE, not be
+    discovered from a month of escalations.
+
+    Stdlib only: reads `manifest.json`, never the `.npy`. An index built by a
+    different embedder is a FAIL, because the retriever refuses it and every
+    run for that tenant would raise.
+    """
+    import config
+    from adapters.platforms import base
+    from adapters.vector_index_local import MANIFEST, _root, namespace_dirname
+
+    retriever = os.getenv("RETRIEVER", "indexed")
+    if retriever != "indexed":
+        r.add(OK, "retrieval index", f"RETRIEVER={retriever} -- no index needed")
+        return
+    try:
+        store = config.get_tenant_store()
+        tenants = store.tenants()
+    except Exception:
+        return                      # _check_tenants already reported it
+    root = _root()
+    for t in tenants:
+        try:
+            repo = (store.policy(t, "code_review").get("codebase") or {}).get("repo")
+        except Exception:
+            continue
+        if not repo:
+            continue
+        path = root / namespace_dirname(repo) / MANIFEST
+        if not path.exists():
+            r.add(WARN, f"index: {t}",
+                  f"not built -- every run escalates. python -m tools.ingest --tenant {t}")
+            continue
+        m = json.loads(path.read_text(encoding="utf-8"))
+        if m.get("model") != base.EMBEDDING_MODEL:
+            r.add(FAIL, f"index: {t}",
+                  f"built by {m.get('model')!r}, but EMBEDDING_MODEL is "
+                  f"{base.EMBEDDING_MODEL!r}: the retriever will refuse it. Re-ingest.")
+            continue
+        r.add(OK, f"index: {t}",
+              f"{m.get('chunks')} chunks / {m.get('files')} files, built {m.get('built_at')}")
+
+
 def _check_gates(r: Report) -> None:
     """The safety gates must pass on every machine, with no model server."""
     try:
@@ -203,6 +263,7 @@ def _check_gates(r: Report) -> None:
 
 
 def main() -> int:
+    """Run every check, print the report, and return 1 if anything FAILED."""
     ap = argparse.ArgumentParser(description="check this machine can run the agent")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     args = ap.parse_args()
@@ -214,6 +275,7 @@ def main() -> int:
     if models:
         _check_lmstudio(r, models)
     _check_tenants(r)
+    _check_indexes(r)
     _check_gates(r)
 
     if args.json:

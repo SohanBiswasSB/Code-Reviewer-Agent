@@ -1,6 +1,6 @@
 """Resolve plugins from env -> the only place providers are chosen.
 
-    LLM_PROVIDER=openai  RETRIEVER=hybrid  CHECKPOINTER=postgres
+    LLM_PROVIDER=openai  RETRIEVER=indexed  CHECKPOINTER=postgres
     SURFACES=code_review,log_review
     TENANT_STORE=fs
     CRA_PLATFORM=auto    # auto | cuda | mac | cpu   -> HOW to run
@@ -15,10 +15,11 @@ import os
 import platform as _platform
 import shutil
 
-import adapters  # noqa: F401  -- import side effect: adapters self-register
+import adapters  # noqa: F401 -- side effect: adapters self-register  # pylint: disable=unused-import
 import registry
-import surfaces  # noqa: F401  -- import side effect: surfaces self-register
+import surfaces  # noqa: F401 -- side effect: surfaces self-register  # pylint: disable=unused-import
 from adapters.platforms import base as _profiles
+from nodes._render import FENCE_MARKERS
 
 DEFAULT_SURFACES = "code_review,log_review"
 
@@ -71,7 +72,16 @@ def assert_judge_is_independent() -> None:
 
 
 def get_retriever():
-    return registry.get_adapter("retriever", os.getenv("RETRIEVER", "hybrid"))()
+    """The Retriever. Defaults to the REAL namespaced index (T10).
+
+    The default used to be `hybrid` -- the four-document demo corpus -- which
+    refuses any namespaced request, so every tenant that declares a codebase
+    could not retrieve at all under the default configuration. Offline callers
+    (the gate suite, the demo, the unit tests) now declare RETRIEVER=hybrid
+    themselves, the same way they declare LLM_PROVIDER=stub: offline is a choice
+    a caller makes, not a state the system defaults into.
+    """
+    return registry.get_adapter("retriever", os.getenv("RETRIEVER", "indexed"))()
 
 
 def get_source(name: str):
@@ -118,7 +128,6 @@ def get_input_guard():
     tries to close its own fence. `nodes/_render.py` owns those markers; passing
     them in keeps the adapter from importing the module it protects.
     """
-    from nodes._render import FENCE_MARKERS
     cls = registry.get_adapter("guard", os.getenv("CRA_GUARD", "regex"))
     try:
         return cls(fence_markers=FENCE_MARKERS)
@@ -127,7 +136,27 @@ def get_input_guard():
         return cls()
 
 
+def get_embedder():
+    """The Embedder (T10). Defaults to the same LM Studio server the LLMs use.
+
+    There is no stub default here, unlike the LLM and the entailer, and that is
+    deliberate: an embedder that silently returned fake vectors would rebuild
+    exactly the defect T10 exists to fix -- a retrieval score that looks like a
+    similarity and is not. Code that needs to run offline uses the demo retriever
+    instead of a fake embedder.
+    """
+    cls = registry.get_adapter("embedder", os.getenv("EMBEDDER", "lmstudio"))
+    return cls()
+
+
+def get_index():
+    """The VectorIndex (T10). Local on-disk by default; no service required."""
+    cls = registry.get_adapter("index", os.getenv("VECTOR_INDEX", "local"))
+    return cls()
+
+
 def get_tenant_store():
+    """The TenantStore (policy + prompts per codebase). Filesystem by default."""
     return registry.get_adapter("tenant", os.getenv("TENANT_STORE", "fs"))()
 
 
@@ -153,6 +182,7 @@ def get_tracer():
 
 
 def get_surface(name: str):
+    """An instance of the named Surface. Raises for one that is not registered."""
     return registry.get_surface(name)()
 
 
@@ -188,6 +218,7 @@ def get_platform():
 
 
 def get_profile() -> str:
+    """WHICH models (CRA_PROFILE) -- orthogonal to CRA_PLATFORM, which is HOW they run."""
     return os.getenv("CRA_PROFILE", _profiles.DEFAULT_PROFILE)
 
 
@@ -206,7 +237,7 @@ def registered() -> dict:
     plat = get_platform()
     out["selected"] = {
         "llm": os.getenv("LLM_PROVIDER", "lmstudio"),
-        "retriever": os.getenv("RETRIEVER", "hybrid"),
+        "retriever": os.getenv("RETRIEVER", "indexed"),
         "tenant_store": os.getenv("TENANT_STORE", "fs"),
         "audit": os.getenv("CRA_AUDIT", "jsonl"),
         "guard": os.getenv("CRA_GUARD", "regex"),

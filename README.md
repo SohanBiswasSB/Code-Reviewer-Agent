@@ -57,7 +57,7 @@ conda activate CodeReviewerAgent
 # can this machine run the agent? platform, models, memory arithmetic, gates
 python -m app.doctor
 
-# safety-gate regression suite — needs NO dependencies at all
+# safety-gate regression suite — needs requirements.txt, but no model or server
 python -m eval.harness
 
 # same diagnosis, two codebases, different policies
@@ -92,7 +92,7 @@ python -m app.doctor          # tells you what this machine is missing
 | `surfaces/` | Capabilities (`code_review`, `log_review`) via `@surface(name)`. |
 | `tenants/` | One directory per codebase: policy + prompt overrides. |
 | `registry.py`, `config.py` | The plug: decorators register, env resolves. |
-| `eval/` | Safety-gate suite, 100% bar, `pass^k` semantics. Dependency-free. |
+| `eval/` | Safety-gate suite, 100% bar, `pass^k` semantics. Model-free. |
 | `tests/` | Unit tests. Deliberately separate from the gate suite. |
 | `app/doctor.py` | Environment check. Stdlib only, so it runs before setup does. |
 | `adapters/platforms/` | The only code that knows about hardware. |
@@ -104,13 +104,14 @@ python -m app.doctor          # tells you what this machine is missing
 tenant-policy resolution), the `execute` permission guard, `interrupt()`/resume on a real
 checkpointer with `POST /run` + `POST /approve` driving it, one immutable audit record per
 run, per-node tracing, checkpoint retention, the plugin registry, the filesystem tenant
-store, and hybrid retrieval (dense + BM25 fused with RRF) over a small in-memory corpus.
+store, and namespaced hybrid retrieval (dense cosine + BM25, RRF-ordered) over an
+on-disk index built by `python -m tools.ingest --tenant <name>` -- built and tested, but
+no tenant's index has been embedded yet, so thresholds are still uncalibrated (T10).
 
 **Stubbed, deliberately and visibly** (`NotImplementedError`, not fake success): the GitHub
 client's network calls in `tools/github_client.py` (the `EvidenceSource` and `ActionSink`
 adapters around it are real), the S3 read in the log source (inject `reader=` and the rest
-of the pipeline runs), the OpenAI client, the vector index and `tools/ingest.py`, and
-`jobs/daily_log_review.py`. There is **no GitLab adapter at all** — it is named in the
+of the pipeline runs), the OpenAI client, and `jobs/daily_log_review.py`. There is **no GitLab adapter at all** — it is named in the
 architecture docs as the thing the port exists to make swappable, not as a stub.
 
 Scope cuts are represented in the schema and documented in the node docstrings, in

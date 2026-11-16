@@ -29,7 +29,7 @@ Adapters/surfaces self-register with `@adapter(kind, name)` / `@surface(name)`.
 
 ```
 LLM_PROVIDER=openai      # -> adapters/llm_openai.py
-RETRIEVER=hybrid         # -> adapters/retriever_hybrid.py  (swap: pinecone | pgvector)
+RETRIEVER=indexed        # -> adapters/retriever_indexed.py (offline demo: hybrid)
 SURFACES=code_review,log_review
 CHECKPOINTER=postgres
 ```

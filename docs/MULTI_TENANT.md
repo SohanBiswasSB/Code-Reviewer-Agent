@@ -54,6 +54,12 @@ Project B = repo B, MilesOne = the backend repo). Each tenant's `policy.json` ca
 repo to pull the diff/files from. Onboarding a new codebase = add `tenants/<codebase>/`
 with its `codebase` binding, prompts, and rules.
 
+The same binding names the tenant's **retrieval namespace** (`repo`) — build it with
+`python -m tools.ingest --tenant <codebase>`. `codebase.index_exclude` lists path globs
+(a pattern also matches every parent directory) that must never enter the index — data
+exports and user-record reports that live beside the code. Redaction is pattern-based and
+an index is a durable copy, so excluding such files is the only complete fix.
+
 **Escalate-to-human is shared, not per-project.** Every codebase routes to human review
 on the same conditions — an ungroundable diagnosis, a risk/permission miss, or an explicit
 `escalate_to_human: true` safety default. It's the org-wide safety net; a codebase tunes

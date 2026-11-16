@@ -32,6 +32,7 @@ import os
 # Python booleans do. `setdefault`, so it can still be pointed at a real provider
 # deliberately.
 os.environ.setdefault("LLM_PROVIDER", "stub")
+os.environ.setdefault("RETRIEVER", "hybrid")   # the demo corpus, not a live index
 
 import config  # noqa: E402  -- must follow the env default above
 from nodes.independent_review import independent_review  # noqa: E402

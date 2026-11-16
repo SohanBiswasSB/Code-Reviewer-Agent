@@ -35,3 +35,14 @@ def _offline_llm(monkeypatch):
     per-role temperature) sets LLM_PROVIDER itself; monkeypatch makes that win.
     """
     monkeypatch.setenv("LLM_PROVIDER", "stub")
+
+
+@pytest.fixture(autouse=True)
+def _offline_retriever(monkeypatch):
+    """The demo retriever, declared -- for the same reason as `_offline_llm`.
+
+    Since T10 the default retriever is the real namespaced index, which embeds
+    every query through LM Studio. A test that wants the indexed retriever builds
+    one with a fake embedder and a temporary index (tests/test_index.py).
+    """
+    monkeypatch.setenv("RETRIEVER", "hybrid")

@@ -531,7 +531,7 @@ compliance artefact, this is the debugging one.
 (OpenTelemetry `gen_ai.*` or Langfuse), and the exact prompt sent is captured —
 not the template, since caching and context assembly can alter it.
 
-### T10. Retrieval is a toy `[ ]`
+### T10. Retrieval is a toy `[~]`
 
 `tools/retrieval.py` runs on a 4-document in-memory corpus. RRF is real; the
 backends are stubs. `tools/ingest.py` raises. No namespace support.
@@ -547,6 +547,30 @@ originally chosen.
 
 **Done when:** a real index exists, ingest is idempotent and namespaced per
 codebase, and the thresholds are re-measured with the method written down.
+
+**PARTLY DONE 2026-11-14.** Built and tested offline; nothing embedded yet.
+
+- `adapters/retriever_indexed.py` (`RETRIEVER=indexed`, now the DEFAULT): dense
+  cosine from the namespaced index + Okapi BM25 over the same namespace, RRF for
+  order only, and the **cosine** as the gate's `score` -- including for chunks BM25
+  alone surfaced (looked up via `VectorIndex.similarities`). Refuses a missing
+  namespace (G1) and an index built by a different embedder; returns `[]` for an
+  unbuilt one.
+- `adapters/vector_index_local.py`: per-namespace `vectors.npy` + `chunks.jsonl` +
+  `manifest.json` (embedder model/dims, fingerprint), atomic whole-namespace
+  replace, mtime-keyed cache, misalignment refused.
+- `tools/ingest.py`: AST chunking, tests/fixtures skipped, InputGuard BEFORE
+  embedding, path+name prefixed to the embedded text only, tenant
+  `codebase.index_exclude` globs. Dry run on MilesOne: 1,242 files -> 15,296
+  chunks in ~5 s, 2,610 values redacted.
+- `doctor` reports every tenant's index: unbuilt = WARN, wrong embedder = FAIL.
+- Offline callers now DECLARE `RETRIEVER=hybrid` (conftest, harness, demo).
+- `tests/test_index.py`, 39 tests; five deliberate breaks each caught.
+
+**Still open:** (1) embed + build MilesOne's index -- needs the embedder served;
+(2) re-measure every `min_relevance_score` from on-topic vs off-topic score
+distributions on that index, and write the method down; (3) project_a/project_b
+are placeholders with no repo to ingest.
 
 ### T11. Schemas are dataclasses; `normalize_evidence` does not validate `[x]`
 

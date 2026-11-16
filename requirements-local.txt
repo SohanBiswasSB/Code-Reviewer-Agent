@@ -6,9 +6,8 @@
 
 -r requirements.txt
 
-# LM Studio speaks the OpenAI wire format, so the same client drives both a
-# hosted provider and http://localhost:1234/v1 — only base_url changes.
-openai
+# `openai` and `numpy` moved to requirements.txt: adapters import them at module
+# level, so everything that imports `config` needs them.
 
 # In-process cross-encoder for ports.Reranker (BAAI/bge-reranker-v2-m3, ~2.3 GB
 # on first use). NOT an LM Studio call — LM Studio exposes no rerank endpoint.

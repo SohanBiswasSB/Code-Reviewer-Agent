@@ -155,6 +155,60 @@ class Entailer(Protocol):
 
 
 @runtime_checkable
+class Embedder(Protocol):
+    """Text -> vectors. The port that did not exist while the embedder was pinned.
+
+    `EMBEDDING_MODEL` has been pinned across every profile since the project
+    began, `doctor` verifies it is loaded, and its dimensionality is asserted by
+    a test -- yet nothing ever called it. Retrieval's "dense" half was Jaccard
+    word overlap. That is the same shape as the LLM wiring gap (T1): a configured,
+    verified component with no caller.
+
+    Separate from `LLM` on purpose. An embedding endpoint takes a batch and
+    returns vectors; `LLM.complete` takes one system/user pair and returns text.
+    Forcing one port to cover both would make every implementation of it lie
+    about half its surface.
+
+    `dims` is declared rather than inferred so an index can be validated against
+    the embedder that is about to query it. A vector store silently queried with
+    the wrong dimensionality returns nonsense rather than an error, and every
+    `min_relevance_score` in `tenants/*/policy.json` would quietly change meaning.
+    """
+    model: str
+    dims: int
+    def embed(self, texts: list[str], *, kind: str = "passage") -> list[list[float]]: ...
+
+
+@runtime_checkable
+class VectorIndex(Protocol):
+    """A namespaced store of embedded chunks.
+
+    `namespace` is not optional anywhere in this port. G1 says retrieval must
+    never cross codebases, and an index whose isolation is a caller-supplied
+    nicety is an index that will eventually be queried without one.
+
+    `manifest` records WHICH embedder built the namespace (model, dims). A vector
+    is only meaningful in the space that produced it, so the retriever compares
+    the manifest against the embedder about to query and refuses on a mismatch.
+    Without it, swapping the embedder would leave every old index answering with
+    cosines that look normal and mean nothing.
+
+    `documents` and `similarities` exist for HYBRID retrieval: BM25 needs every
+    chunk's text, and a chunk surfaced by BM25 alone still needs a real cosine
+    for the gate to read -- otherwise a keyword-only hit would arrive with no
+    gateable score (the same reason `tools/retrieval.py::relevance_of` exists).
+    """
+    def upsert(self, namespace: str, chunks: list[dict],
+               manifest: dict | None = None) -> int: ...
+    def search(self, namespace: str, vector: list[float], k: int) -> list[dict]: ...
+    def similarities(self, namespace: str, vector: list[float],
+                     ids: list[str]) -> dict[str, float]: ...
+    def documents(self, namespace: str) -> list[dict]: ...
+    def namespaces(self) -> list[str]: ...
+    def stats(self, namespace: str) -> dict: ...
+
+
+@runtime_checkable
 class Reranker(Protocol):
     """Cross-encoder rerank of a wide candidate set → precise top-n. Ensemble-able."""
     def rerank(self, query: str, candidates: list[dict], top_n: int = 8) -> list[dict]: ...

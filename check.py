@@ -10,10 +10,13 @@ be the thing you actually type rather than four commands you have to remember.
 
 Three properties inherited from the CI it replaces, each for a reason:
 
-**The safety gates run FIRST and with no dependencies installed.** A broken
-requirements file must never be able to mask a weakened gate -- so the gate suite
-runs before `pip install` is even a consideration, which it can, because
-`eval/harness.py` is deliberately dependency-free and model-free.
+**The safety gates run FIRST, and need no model and no server.** A broken test
+or lint step must never be able to mask a weakened gate, so the gates go before
+anything else. They need `requirements.txt` -- `eval/harness.py` imports
+`config`, which imports every adapter, and adapters import their libraries at
+module level (the project rule: top-level imports unless genuinely circular).
+An earlier claim that the suite was "dependency-free" was already untrue -- it
+loaded pydantic -- and was corrected on 2026-11-16.
 
 **pytest runs TWICE, the second time with LANGGRAPH_STRICT_MSGPACK=true.** That
 is the check that caught T15: an unregistered state type does not raise, it comes
@@ -45,7 +48,7 @@ import time
 # interpreter that invoked it instead of whatever is first on PATH -- the conda
 # env here is easy to shadow.
 STEPS: tuple[tuple[str, list[str], dict[str, str], bool], ...] = (
-    ("safety gates (no deps, 100% bar)",
+    ("safety gates (no model, 100% bar)",
      [sys.executable, "-m", "eval.harness"], {"CRA_PLATFORM": "cpu"}, True),
     ("lint (ruff)",
      [sys.executable, "-m", "ruff", "check", "."], {}, True),
@@ -63,10 +66,22 @@ STEPS: tuple[tuple[str, list[str], dict[str, str], bool], ...] = (
 OK, FAIL, SKIP = "OK  ", "FAIL", "NOTE"
 
 
-def run_step(label, argv, env_overrides, quiet):
+def run_step(argv, env_overrides, quiet):
+    """Run one step as a subprocess. Returns (exit code, seconds).
+
+    A subprocess rather than an in-process call, so each step sees exactly the
+    environment its overrides describe -- `LANGGRAPH_STRICT_MSGPACK` is read when
+    langgraph is imported, so setting it inside an already-running interpreter
+    would test nothing.
+
+    Output is shown only on failure unless `quiet` is off: a passing step's
+    output is noise, a failing one's is the only thing worth reading.
+    """
     env = {**os.environ, **env_overrides}
     started = time.monotonic()
-    proc = subprocess.run(argv, env=env, capture_output=True, text=True)
+    # check=False explicitly: a failing step is a RESULT to report, not an error
+    # to raise -- `--all` has to carry on past it and summarise.
+    proc = subprocess.run(argv, env=env, capture_output=True, text=True, check=False)
     elapsed = time.monotonic() - started
     if proc.returncode != 0 or not quiet:
         tail = (proc.stdout or "") + (proc.stderr or "")
@@ -76,6 +91,12 @@ def run_step(label, argv, env_overrides, quiet):
 
 
 def main() -> int:
+    """Run STEPS in order; exit 1 if any blocking step fails, else 0.
+
+    Stops at the first blocking failure unless --all, because later steps run
+    against a tree already known to be broken. Non-blocking steps (doctor) are
+    reported as NOTE and never change the exit code -- see STEPS for why.
+    """
     ap = argparse.ArgumentParser(description="Run the local equivalent of CI.")
     ap.add_argument("--all", action="store_true",
                     help="run every step even after one fails, then summarise")
@@ -94,7 +115,7 @@ def main() -> int:
     results = []
     for label, argv, env_overrides, blocking in STEPS:
         print(f"\n=== {label} ===")
-        code, elapsed = run_step(label, argv, env_overrides, quiet=not args.verbose)
+        code, elapsed = run_step(argv, env_overrides, quiet=not args.verbose)
         if code == 0:
             status = OK
         elif blocking:
