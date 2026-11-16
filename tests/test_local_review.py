@@ -211,6 +211,12 @@ def test_cli_without_a_terminal_refuses_to_decide(cli, tmp_path, capsys):
     assert code == 2 and asked == []
     assert "refusing to decide" in capsys.readouterr().out
     assert _reviews(tmp_path) == []
+    # ...but the run is RECORDED as abandoned, findings and booleans included:
+    # it is real model output over a real change, and calibration needs it.
+    from adapters.audit_jsonl import iter_records
+    abandoned = [r for r in iter_records() if r.get("outcome") == "abandoned"]
+    assert len(abandoned) == 1 and abandoned[0].get("decision") == "approve"
+    assert abandoned[0].get("approved") is None, "abandoned is not a denial"
 
 
 # ── the diff budget ──────────────────────────────────────────────────────────
@@ -315,7 +321,68 @@ def test_the_gate_judges_and_the_action_posts_the_same_text():
     posted = out["proposed_action"]["comment"]
     assert posted == render_review(state["diagnosis"])
     assert "unique constraint fails" in posted
-    assert ent.claims and all(c == posted for c in ent.claims)
+    # Every piece of MODEL text on the page was judged -- now claim by claim
+    # (2026-11-17), so each finding is judged on its own rather than as part of
+    # one blended review.
+    assert ent.claims[0] == "Some areas need attention:"
+    assert ent.claims[1] == f"{FINDING.issue} {FINDING.suggestion}"
+    assert len(ent.claims) == 1 + len(state["diagnosis"].findings)
+
+
+# ── entailment, claim by claim ───────────────────────────────────────────────
+from adapters.entail_lexical import LexicalEntailer  # noqa: E402
+from nodes.independent_review import _entailment, entailment_claims  # noqa: E402
+
+DIFF = ("diff --git a/Masterclass/models.py b/Masterclass/models.py\n"
+        "--- a/Masterclass/models.py\n+++ b/Masterclass/models.py\n"
+        "@@ -1 +1 @@\n+    unique_together = ('course', 'slot')  # one question bank per slot\n"
+        "diff --git a/billing/views.py b/billing/views.py\n"
+        "--- a/billing/views.py\n+++ b/billing/views.py\n"
+        "@@ -1 +1 @@\n+    refund = invoice.total * rate\n")
+RETRIEVED = [{"id": "c1", "text": "class QuestionBank(models.Model): course slot"},
+             {"id": "c2", "text": "def refund(invoice): currency rounding totals"}]
+
+
+def _finding(file, issue, cites):
+    return Finding(severity="medium", file=file, issue=issue, suggestion="",
+                   citation_ids=cites)
+
+
+def test_a_finding_is_judged_against_its_own_file_and_citations_only():
+    diag = Diagnosis(summary="s", severity="low", proposed_comment="",
+                     citations=[Citation(snippet_id="c1", score=0.9)],
+                     findings=[_finding("Masterclass/models.py", "x", ["c1"])])
+    (label, _, premise), = entailment_claims(diag, {"diff": DIFF}, RETRIEVED)
+    assert "unique_together" in premise and "QuestionBank" in premise
+    assert "refund" not in premise, "another file's diff and passages are never borrowed"
+
+
+def test_one_unsupported_finding_fails_the_whole_review():
+    good = _finding("Masterclass/models.py",
+                    "unique_together course slot enforces one question bank per slot", ["c1"])
+    bad = _finding("Masterclass/models.py",
+                   "deleting a student wipes stripe payouts and kafka offsets", ["c1"])
+    diag = Diagnosis(summary="s", severity="low", proposed_comment="",
+                     citations=[Citation(snippet_id="c1", score=0.9)], findings=[good, bad])
+    ok, lowest, failures = _entailment(diag, {"diff": DIFF}, RETRIEVED, LexicalEntailer(), 0.25)
+    assert not ok and lowest < 0.25
+    assert len(failures) == 1 and failures[0].startswith("finding 2")
+
+
+def test_a_finding_about_new_code_is_entailed_by_the_diff():
+    """The new line is not in any retrieved passage -- in normal use it is not in
+    the index yet -- and the finding is still checkable against the change."""
+    f = _finding("Masterclass/models.py", "unique_together now enforces one question bank "
+                 "per slot", [])
+    diag = Diagnosis(summary="s", severity="low", proposed_comment="", findings=[f])
+    ok, _, _ = _entailment(diag, {"diff": DIFF}, [], LexicalEntailer(), 0.25)
+    assert ok
+
+
+def test_an_empty_review_still_fails_closed():
+    diag = Diagnosis(summary="s", severity="low", proposed_comment="")
+    ok, lowest, _ = _entailment(diag, {"diff": DIFF}, RETRIEVED, LexicalEntailer(), 0.25)
+    assert not ok and lowest == 0.0
 
 
 # ── live status and the monitor ──────────────────────────────────────────────

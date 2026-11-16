@@ -25,10 +25,26 @@ TRIVIAL_SUFFIXES = (".md", ".rst", ".txt")
 TRIVIAL_DIRS = ("docs/", "doc/", ".github/")
 
 
-def _touched_areas(files: list[str]) -> list[str]:
+def risky_areas_for(policy: dict | None) -> tuple[str, ...]:
+    """The surface's defaults UNION the tenant's `risky_areas` (T27).
+
+    A UNION, never a replacement: a tenant ADDS what is risky in its codebase
+    (`subscription` in Masterclass, `zoom` in MilesOne) but cannot make
+    `migrations` or `auth` routine. Tenants tune values, never remove a boundary.
+
+    Until 2026-11-17 the tenant list was decorative -- every policy.json declared
+    it and no code read it, so a Masterclass change touching only Subscriptions/
+    went to human_review. That failed safe, which is why nobody saw it (the T5
+    shape).
+    """
+    extra = [str(a).lower() for a in ((policy or {}).get("risky_areas") or [])]
+    return tuple(dict.fromkeys([*RISKY_AREAS, *extra]))
+
+
+def _touched_areas(files: list[str], areas: tuple[str, ...] = RISKY_AREAS) -> list[str]:
     """Which risky areas this change touches, by path substring."""
     joined = " ".join(files).lower()
-    return [area for area in RISKY_AREAS if area in joined]
+    return [area for area in areas if area in joined]
 
 
 def _is_trivial(files: list[str]) -> bool:
@@ -59,8 +75,11 @@ class CodeReviewSurface:
     diagnosis_prompt = "diagnosis"
     judge_prompt = "judge"
 
-    def normalize(self, raw: dict) -> dict:
+    def normalize(self, raw: dict, policy: dict | None = None) -> dict:
         """Provider payload -> code-review evidence.
+
+        `policy` is the tenant's, pinned in state by resolve_tenant; its
+        `risky_areas` widen what counts as risky (T27, `risky_areas_for`).
 
         A dict rather than a dataclass, for now, precisely because it must survive
         the checkpoint without adding another unregistered msgpack type (T15).
@@ -74,7 +93,7 @@ class CodeReviewSurface:
             "body": raw.get("body", "") or "",
             "diff": raw.get("diff", ""),
             "files": files,
-            "touched_areas": _touched_areas(files),
+            "touched_areas": _touched_areas(files, risky_areas_for(policy)),
             "has_failing_ci": any(c.get("conclusion") == "failure"
                                   for c in checks if isinstance(c, dict)),
             "is_trivial": _is_trivial(files),

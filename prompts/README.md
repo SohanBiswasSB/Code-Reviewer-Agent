@@ -8,10 +8,10 @@ only shape the LLM's *free-text* work inside those rails.
 Prompt → node map:
 | Prompt file                     | Node / step                         | Surface |
 |---------------------------------|-------------------------------------|---------|
-| code_review_diagnosis.md        | generate_diagnosis                  | code    |
-| code_review_judge.md            | independent_review (reasoning only) | code    |
-| log_review_analysis.md          | generate_diagnosis                  | logs    |
-| log_review_judge.md             | independent_review (reasoning only) | logs    |
+| (tenant) code_review/diagnosis  | generate_diagnosis                  | code    |
+| (tenant) code_review/judge      | independent_review (reasoning only) | code    |
+| (tenant) log_review/diagnosis   | generate_diagnosis                  | logs    |
+| (tenant) log_review/judge       | independent_review (reasoning only) | logs    |
 | query_reformulation.md          | corrective-RAG re-retrieve (#7)     | both    |
 | daily_report_synthesis.md       | final report render                 | logs    |
 | classify_assist.md              | FALLBACK only (rules still decide)  | both    |
@@ -29,3 +29,10 @@ Shared invariants every prompt enforces:
 `tenants/<codebase>/prompts/<surface>/<node>.md`, resolved per request by the TenantStore
 (falling back to `tenants/_default/`). The files in THIS folder are kept as reference
 skeletons; edit the tenant copies to change behavior for a specific codebase.
+
+**T19, closed 2026-11-17:** the four node prompts (diagnosis + judge, for both
+surfaces) no longer have copies here. Two of the four had already drifted from
+the canonical `tenants/_default/prompts/**` versions -- the risk T19 named -- so
+the copies were deleted rather than synced. What remains here has no tenant copy
+and no caller yet (classify_assist, query_reformulation, daily_report_synthesis).
+`tests/test_prompts.py` fails if a node prompt reappears in this folder.

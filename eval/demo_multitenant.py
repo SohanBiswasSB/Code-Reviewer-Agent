@@ -34,6 +34,7 @@ import sys
 # deliberately.
 os.environ.setdefault("LLM_PROVIDER", "stub")
 os.environ.setdefault("RETRIEVER", "hybrid")   # the demo corpus, not a live index
+os.environ.setdefault("RERANKER", "none")
 
 import config  # noqa: E402  -- must follow the env default above
 from nodes.independent_review import independent_review  # noqa: E402

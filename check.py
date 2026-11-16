@@ -62,7 +62,8 @@ from concurrent.futures import ThreadPoolExecutor
 # CRA_PROFILE is pinned WITH the platform: a shell exporting CRA_PROFILE=mac_max
 # against the pinned `cpu` platform is an unsupported pair, and the platform
 # layer rightly raises rather than silently downgrading.
-OFFLINE = {"LLM_PROVIDER": "stub", "RETRIEVER": "hybrid", "CRA_ACTIVITY": "null",
+OFFLINE = {"LLM_PROVIDER": "stub", "RETRIEVER": "hybrid", "RERANKER": "none",
+           "CRA_ACTIVITY": "null",
            "CRA_PLATFORM": "cpu", "CRA_PROFILE": "portable"}
 
 STEPS: tuple[tuple[str, list[str], dict[str, str], bool], ...] = (

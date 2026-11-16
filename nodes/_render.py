@@ -69,6 +69,74 @@ def _merge(into: dict, report: dict) -> dict:
     return into
 
 
+# Keys whose values IDENTIFY the change rather than describe it: paths, refs,
+# commit ids, URLs, digests. Left untouched by `guard_payload`, because
+# `classify` routes on file paths and the pre-push checks read git through the
+# revision -- and none of these is where a secret or a customer's email lives.
+# Everything else that is a string is redacted.
+IDENTIFIER_KEYS = frozenset({
+    "filename", "previous_filename", "path", "html_url", "url", "ref", "revision",
+    "digest", "date", "sha", "status", "service", "services", "signal", "severity",
+    "conclusion", "line_no", "start", "name",
+})
+
+
+def guard_payload(raw, guard=None, tenant: str = "_default"):
+    """Redact a whole evidence payload BEFORE it enters state (T25).
+
+    Returns `(cleaned_payload, report)`. Called by `fetch_evidence`, so the first
+    thing written to the `_raw` channel is already clean.
+
+    Why at fetch and not later: LangGraph checkpoints every channel after every
+    super-step, and a Postgres checkpointer keeps that HISTORY. Redacting in
+    `normalize_evidence`, or dropping `_raw` afterwards, would still leave the
+    fetch step's checkpoint holding the secret on disk. T12 closed the prompt
+    boundary only; this closes the storage one.
+
+    The consequence, accepted deliberately (2026-11-16): the approver sees the
+    redacted diff, with `[REDACTED:<kind>:<n>]` where a secret was. That still
+    tells them a secret was committed, which is the finding that matters, and an
+    approver never needs the value itself.
+    """
+    g = _guard_for(guard)
+    report: dict = {}
+
+    def walk(value, key=None):
+        if key in IDENTIFIER_KEYS:
+            return value
+        if isinstance(value, str):
+            cleaned, r = g.sanitize(value, tenant=tenant)
+            _merge(report, r)
+            return cleaned
+        if isinstance(value, dict):
+            return {k: walk(v, k) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return type(value)(walk(v) for v in value)
+        return value
+
+    cleaned = walk(raw)
+    report.setdefault("tenant", tenant)
+    return cleaned, report
+
+
+def combine_guard_reports(evidence: dict | None, prompt: dict | None) -> dict:
+    """The run's guard report: what was redacted on the way into STATE plus what
+    was redacted on the way into the PROMPT, with the evidence breakdown kept.
+
+    Redactions and fence forgeries add up, because each pass replaces what it
+    finds and the second pass cannot see it again. Injection hints are only
+    COUNTED, never removed, so the prompt pass re-counts the same text: the
+    prompt's count is the total, and summing would double it.
+    """
+    evidence = evidence or {}
+    prompt = prompt or {}
+    out = _merge({}, {k: v for k, v in evidence.items() if k != "injection_suspected"})
+    out = _merge(out, prompt)
+    if evidence:
+        out["evidence"] = evidence
+    return out
+
+
 def fence(label: str, body: str) -> str:
     """Delimit a block. Does NOT sanitise -- callers use `fence_guarded`.
 

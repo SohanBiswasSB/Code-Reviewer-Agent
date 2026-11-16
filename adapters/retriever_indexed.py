@@ -29,11 +29,23 @@ defect this contract exists to prevent.
     against vectors from model B yields cosines that look normal and are noise.
     The gate would threshold the noise without complaint.
 
+## The reranker (T13): when on, IT supplies the gate score
+
+With a reranker (`config.get_reranker()`, OFF by default -- measured), the top
+`RERANK_CANDIDATES` fused candidates (100) are rescored by a cross-encoder and
+the best k kept. Each hit's `score` is then the RERANK score and
+`score_kind = "rerank"`; the cosine stays beside it as `cosine`. The gate picks
+its bar by kind -- `min_rerank_score` for one, `min_relevance_score` for the
+other -- so a score from one model is never compared with a bar measured for
+another. Why the cosine alone is not enough: adapters/rerank_cross_encoder.py.
+
 An index that is simply NOT BUILT returns `[]`: that is the truthful answer to
 "what does this codebase contain", it escalates via `groundedness_ok`, and
 `doctor` reports the unbuilt namespace so the state is visible.
 """
 from __future__ import annotations
+
+import os
 
 from registry import adapter
 from tools.bm25 import BM25
@@ -45,19 +57,25 @@ from tools.fusion import reciprocal_rank_fusion
 # fusing. Also the candidate pool a reranker (T13) will narrow.
 WIDE_MIN = 20
 WIDE_FACTOR = 4
+# How many fused candidates the reranker rescores. Wide enough that a passage
+# both backends ranked mediocre can still win on a real reading of the pair.
+RERANK_CANDIDATES = int(os.getenv("RERANK_CANDIDATES", "100"))
+_UNSET = object()
 
 
 @adapter("retriever", "indexed")
 class IndexedRetriever:
     """The default Retriever: dense + BM25 over one namespace, cosine as the gate score."""
 
-    def __init__(self, embedder=None, index=None):
+    def __init__(self, embedder=None, index=None, reranker=_UNSET):
         # Lazy, and injectable for tests -- the same shape as the nodes' provider
         # arguments. Resolving at construction would make `config.get_retriever()`
         # fail on a machine without the openai client even for callers that never
         # retrieve.
         self._embedder = embedder
         self._index = index
+        # `None` is a real value here (no reranking), so "not given" is _UNSET.
+        self._reranker = reranker
         # namespace -> (fingerprint, BM25, metas). BM25 builds IDF over the whole
         # corpus, which is O(corpus); doing it per query would dominate latency.
         self._bm25: dict[str, tuple] = {}
@@ -81,6 +99,14 @@ class IndexedRetriever:
             import config
             self._index = config.get_index()
         return self._index
+
+    @property
+    def reranker(self):
+        """The injected reranker (None = off), else `config.get_reranker()`."""
+        if self._reranker is _UNSET:
+            import config
+            self._reranker = config.get_reranker()
+        return self._reranker
 
     def _check_space(self, namespace: str, stats: dict) -> None:
         built_by, dims = stats.get("model"), stats.get("dims")
@@ -133,7 +159,9 @@ class IndexedRetriever:
             return []
         self._check_space(namespace, stats)
 
-        wide = max(WIDE_MIN, k * WIDE_FACTOR)
+        reranker = self.reranker
+        pool = max(k, RERANK_CANDIDATES) if reranker is not None else k
+        wide = max(WIDE_MIN, k * WIDE_FACTOR, pool)
         qvec = self.embedder.embed([query], kind="query")[0]
 
         dense_hits = self.index.search(namespace, qvec, wide)
@@ -144,7 +172,7 @@ class IndexedRetriever:
         sparse_ids = [metas[i]["id"] for i, _ in bm25.top(query, wide)]
 
         fused = reciprocal_rank_fusion([[h["id"] for h in dense_hits], sparse_ids])
-        ordered = sorted(fused.items(), key=lambda p: p[1], reverse=True)[:k]
+        ordered = sorted(fused.items(), key=lambda p: p[1], reverse=True)[:pool]
 
         # Keyword-only winners need a real cosine too, or they would reach the
         # gate with no number at all (T21's sibling).
@@ -164,6 +192,8 @@ class IndexedRetriever:
                 # A chunk the index cannot score gets 0.0 -- fail closed: it can
                 # be read, but it cannot ground anything.
                 "score": relevance.get(cid, 0.0),
+                "score_kind": "cosine",
+                "cosine": relevance.get(cid, 0.0),
                 "fusion": round(fusion, 6),
                 "rank": position,
                 "path": meta.get("path"),
@@ -171,4 +201,9 @@ class IndexedRetriever:
                 "start_line": meta.get("start_line"),
                 "end_line": meta.get("end_line"),
             })
-        return out
+        if reranker is None:
+            return out[:k]
+        reranked = reranker.rerank(query, out, top_n=k)
+        for position, hit in enumerate(reranked, start=1):
+            hit.update(score=hit.pop("rerank"), score_kind="rerank", rank=position)
+        return reranked

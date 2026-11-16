@@ -282,3 +282,14 @@ def test_prompt_files_on_disk_are_reachable_for_every_enabled_surface(store):
         for surface in store.policy(tenant, "code_review").get("enabled_surfaces", []):
             for node in ("diagnosis", "judge"):
                 assert store.prompt(tenant, surface, node)
+
+
+def test_node_prompts_live_only_in_the_tenant_store():
+    """T19: one source of truth. A flat copy under prompts/ drifted from the
+    canonical tenant prompt twice before it was deleted."""
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    flat = {p.name for p in (root / "prompts").glob("*.md")}
+    for surface in ("code_review", "log_review"):
+        for node in ("diagnosis", "judge", "analysis"):
+            assert f"{surface}_{node}.md" not in flat, f"prompts/{surface}_{node}.md is back"

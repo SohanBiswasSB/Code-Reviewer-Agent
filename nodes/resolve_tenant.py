@@ -35,6 +35,8 @@ import json
 import uuid
 
 import config
+from errors import ConfigError
+from schemas.policy import policy_errors
 
 DEFAULT_TENANT = "_default"
 
@@ -71,6 +73,13 @@ def resolve_tenant(state: dict, store=None, surface=None) -> dict:
         store = config.get_tenant_store()
 
     policy = store.policy(tenant, surface_name)
+    # G11: a malformed bar or allowlist fails HERE, before any evidence is
+    # fetched -- not as a TypeError in the gate, and not (worse) as a string
+    # allowlist that matches by substring. See schemas/policy.py.
+    problems = policy_errors(policy)
+    if problems:
+        raise ConfigError(f"tenant '{tenant}' policy for '{surface_name}' is invalid: "
+                          + "; ".join(problems))
 
     enabled = policy.get("enabled_surfaces", [])
     if surface_name not in enabled:

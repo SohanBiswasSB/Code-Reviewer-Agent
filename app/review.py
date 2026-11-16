@@ -39,6 +39,7 @@ from langgraph.types import Command
 from app import activity, live
 from app.graph import build_graph
 from app.state import checkpoint_serde
+from nodes import _audit
 from nodes._render import render_checklist
 
 RULE = "-" * 72
@@ -140,6 +141,11 @@ def _run(tenant: str, target: str, thread_id: str, ask, interactive: bool | None
         interactive = sys.stdin.isatty()
     if not interactive:
         print("no terminal attached: refusing to decide. Nothing was approved or written.")
+        # The checkpoint is in-process memory, so this run ends with the process.
+        # Recorded as ABANDONED: until now a run that reached the gate and was
+        # left there wrote no audit record, and its findings, citations and
+        # booleans -- the data `tools.calibrate` learns from -- were lost.
+        _audit.write(graph.get_state(cfg).values, "abandoned")
         live.finish(thread_id, "abandoned")
         activity.log_event("approval", "approval.abandoned", severity=activity.WARNING,
                            tenant=tenant, message="no terminal attached to answer")

@@ -325,3 +325,49 @@ def test_every_schema_model_is_registered_for_the_checkpoint():
         f"not in app.state.CHECKPOINT_TYPES: {missing}. An unregistered model "
         f"comes back from a checkpoint as a plain dict, silently."
     )
+
+
+# ── T25: nothing unredacted reaches the checkpoint ──────────────────────────
+def test_a_secret_in_the_evidence_never_reaches_any_checkpoint(posted, issue_surface,
+                                                              monkeypatch):
+    """The CHECKPOINT, not just the prompt. A Postgres saver keeps every
+    super-step, so a secret written to `_raw` by fetch_evidence would stay on
+    disk even if a later node dropped it. Checked over the whole HISTORY."""
+    secret, email = "AKIA" + "ABCDEFGHIJKLMNOP", "student" + "@example.com"
+    monkeypatch.setattr(github_client, "fetch_issue", lambda url, token=None: {
+        "html_url": url, "title": f"OAuth 500 for {email} with key {secret}",
+        "body": "help", "labels": [{"name": "bug"}]})
+    g, cfg = _graph(), _cfg("t-t25")
+    _start(g, cfg)
+    snapshots = list(g.get_state_history(cfg))
+    assert len(snapshots) > 3, "the run must have checkpointed several super-steps"
+    for snap in snapshots:
+        dumped = repr(snap.values)
+        assert secret not in dumped and email not in dumped, \
+            f"unredacted evidence in the checkpoint after {snap.next}"
+    final = g.get_state(cfg).values
+    assert "[REDACTED:aws_access_key_id:1]" in final["_raw"]["title"]
+    assert final["_raw"]["html_url"] == "https://x/issues/1", "identifiers are never redacted"
+    # Counted once, in the run's report, even though the prompt pass saw only
+    # the placeholder.
+    assert final["_guard"]["redacted"]["aws_access_key_id"] == 1
+    assert final["_guard"]["evidence"]["redacted"]["email"] == 1
+
+
+# ── G9: a crashed run still writes its audit record ─────────────────────────
+def test_a_node_that_crashes_still_leaves_an_audit_record(posted, issue_surface, monkeypatch):
+    """No failure edges exist, so the record is written from the one wrapper every
+    node runs in -- and the exception still propagates unchanged."""
+    from adapters.audit_jsonl import iter_records
+
+    def broken(url, token=None):
+        raise ConnectionError("github down for token ghp_" + "A" * 36)
+    monkeypatch.setattr(github_client, "fetch_issue", broken)
+    with pytest.raises(ConnectionError):
+        _start(_graph(), _cfg("t-g9"))
+    records = [r for r in iter_records() if r.get("outcome") == "failed"]
+    assert len(records) == 1, "exactly one record for the crashed run"
+    err = records[0]["error"]
+    assert err["node"] == "fetch_evidence"
+    assert "ConnectionError" in err["error"] and "ghp_" not in err["error"], \
+        "the message is recorded through the guard"

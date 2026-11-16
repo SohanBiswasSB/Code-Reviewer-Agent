@@ -17,7 +17,8 @@
     "code_review"
   ],
   "code_review": {
-    "min_relevance_score": 0.4,
+    "min_relevance_score": 0.75,
+    "_min_relevance_score": "INTERIM 2026-11-16. EmbeddingGemma cosines sit in ~0.7-0.9, so 0.40 could never fail. Measured on this index: same-file p10 0.780, other-file median 0.770. 0.75 sits below the lowest citation of a known-good review (0.774). Superseded by min_rerank_score once RERANKER is on (T13).",
     "severity_allowlist": [
       "low",
       "medium"

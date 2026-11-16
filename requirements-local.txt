@@ -1,5 +1,6 @@
-# The local-model stack. Kept OUT of requirements.txt because sentence-transformers
-# pulls torch (~2.5 GB) and nothing in the graph or the API needs it.
+# The local-model stack. Now notes only: every library an adapter imports moved to
+# requirements.txt under the imports-at-top rule. Kept as a layer so the install
+# instructions (and requirements-dev.txt's -r) stay stable.
 #
 #   conda activate CodeReviewerAgent
 #   pip install -r requirements-local.txt
@@ -9,9 +10,9 @@
 # `openai` and `numpy` moved to requirements.txt: adapters import them at module
 # level, so everything that imports `config` needs them.
 
-# In-process cross-encoder for ports.Reranker (BAAI/bge-reranker-v2-m3, ~2.3 GB
-# on first use). NOT an LM Studio call — LM Studio exposes no rerank endpoint.
-sentence-transformers
+# sentence-transformers (the in-process reranker, T13) moved to requirements.txt:
+# the adapter imports it at module level. Its model, BAAI/bge-reranker-v2-m3
+# (~2.3 GB), is fetched once into the Hugging Face cache, never by a review.
 
 # --- torch, and which build you actually want -------------------------------
 # Installed transitively by sentence-transformers. The default PyPI wheel is

@@ -114,6 +114,8 @@ already failed once; the node docstrings carry the incident.
 5. **`approved` is written only by `await_approval`, only from the resume value.**
    Not inferred, not defaulted, not derived from the judge's opinion.
 6. **Evidence is untrusted data, never instructions.** Diffs and log lines are
+   redacted in `fetch_evidence` before anything is written to state (T25: the
+   checkpoint keeps every super-step, so later is too late), then
    sanitised *and* fenced via `nodes/_render.py` before any model sees them —
    `config.get_input_guard()` redacts secrets/PII and escapes the fence markers, and
    its report lands in `state["_guard"]` and the audit record. Prose injection is
@@ -221,7 +223,8 @@ Never soften the gate suite to make it pass.
 Config is env-driven; see `.env.example` for the full annotated set. Key vars:
 `LLM_PROVIDER` (`lmstudio`|`openai`), `RETRIEVER`, `TENANT_STORE`, `SURFACES`,
 `CRA_PLATFORM` (`auto`|`mac`|`cuda`|`cpu`|`studio`), `CRA_PROFILE`,
-`LMSTUDIO_BASE_URL`, `DATABASE_URL`, `ENTAILER` (`lexical`|`cross_encoder`),
+`LMSTUDIO_BASE_URL`, `DATABASE_URL`, `RERANKER` (`cross_encoder`|`none`; offline
+callers declare `none`), `ENTAILER` (`lexical`|`cross_encoder`),
 `CRA_GUARD` (`regex`|`null`), `CRA_AUDIT`, `CRA_TRACE`, `CRA_DATA_DIR`,
 `CRA_LLM_RETRIES` (default 2) and `CRA_LLM_RETRY_BACKOFF` (default `5,15` seconds).
 
@@ -256,6 +259,31 @@ registry, the filesystem tenant store, JSONL audit + trace, and namespaced hybri
 retrieval (`RETRIEVER=indexed`, the default: dense cosine + BM25, RRF-ordered) over an
 on-disk index that `tools/ingest.py` builds. `RETRIEVER=hybrid` is the 4-document
 offline demo; tests, the gate suite and the demo declare it.
+
+**The reranker is built and OFF by default (T13, 2026-11-17, on measurement).**
+`RERANKER=cross_encoder` makes `IndexedRetriever` rescore the top 100 fused candidates
+with `BAAI/bge-reranker-v2-m3` (in-process, `runtime()["reranker_device"]`, loaded from
+the HF cache only -- a review never downloads it). The hit's `score` is then the RERANK
+score with `score_kind="rerank"`, the cosine beside it; the gate picks `min_rerank_score`
+or `min_relevance_score` by kind (`independent_review._bar_for`), so no number is held to
+a bar measured for another model. **Why off:** `tools.calibrate rerank` (176 Masterclass
+queries, same pools) gave same/other-file separation J 0.31 vs the cosine's 0.68, same-file
+in top 3 81.8% vs 98.9%, at 13.5 s/query. The proxy favours the cosine; a human-labelled
+relevance set is the test that would settle it.
+`sentence-transformers` + torch are in `requirements.txt` now (imports-at-top rule):
+`import config` costs ~3 s more and `check.py` takes ~40 s instead of ~18 s.
+
+**Entailment is per claim** (2026-11-17, `independent_review.entailment_claims`): the
+comment and each finding are scored separately; a finding's premise is its OWN citations
+plus the diff of its OWN file (the change is the claim's subject, and new code is not in
+the index yet); the lowest claim decides. `tools.calibrate ... entailment` scores recorded
+reviews with the same function.
+
+**Every run leaves an audit record, crashes included** (G9, 2026-11-17): `_traced` writes
+outcome `failed`/`interrupted` with the node and guarded error, then re-raises; a CLI
+review left at the gate without a terminal is `abandoned`. Policies are validated at run
+start (G11, `schemas/policy.py`). `risky_areas` in a tenant policy now routes (T27,
+union with the surface defaults).
 
 **Retrieval is per changed file** (2026-11-16). `CodeReviewSurface.build_queries`
 makes one query per changed file (path + that file's diff; code, then config, then
@@ -342,12 +370,10 @@ Both suites are green, so CI should pass.
 - **2026-11-16: first real review of another codebase (Masterclass)** -- see
   DECISIONS §8 for what it exposed (diff budget, findings not posted, T26, forced
   offline gates, Metal OOM) and §9 for the next steps (calibration first).
-- **T10 is `[~]` — built, not embedded** (2026-11-14). The indexed retriever, index,
-  ingest and `doctor` checks exist and are tested offline; no tenant's index has been
-  built, so `doctor` WARNs for all three and every real run escalates on empty
-  retrieval. **Next:** serve the embedder, `python -m tools.ingest --tenant milesone
-  --root ~/Dev/Miles-USP-Backend-PROD`, then calibrate thresholds. The user chose to
-  index MilesOne **whole** (redacted), `Miscellaneous/` included — see DECISIONS §8.
+- **T10: both real tenants are embedded.** Masterclass (17.6k chunks, 2026-11-16) and
+  MilesOne (2026-11-17: 1,196 files, 15,306 chunks, 2,610 values redacted, 698 s --
+  indexed **whole**, `Miscellaneous/` included, as the user chose; DECISIONS §8).
+  `project_a`/`project_b` remain placeholders with no repo.
 - The Postgres checkpointer path is unverified — there is no Postgres on this machine.
 - `.env.example` was ignored by `.gitignore`'s `.env.*` while `TODO.md` called it done.
   Decided 2026-11-16: the ignore was wrong -- it holds names and defaults, no values --

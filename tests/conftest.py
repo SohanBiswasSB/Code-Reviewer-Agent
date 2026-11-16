@@ -1,5 +1,8 @@
 """Put the project root on sys.path so `import config` works from tests/."""
+import json
+import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -46,3 +49,49 @@ def _offline_retriever(monkeypatch):
     one with a fake embedder and a temporary index (tests/test_index.py).
     """
     monkeypatch.setenv("RETRIEVER", "hybrid")
+    # And no cross-encoder: an IndexedRetriever built in a test without an
+    # explicit `reranker=` would otherwise load a 2.3 GB model (T13).
+    monkeypatch.setenv("RERANKER", "none")
+
+
+LIVE_MARKERS = ("needs_server", "needs_model")
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip live-model tests unless `-m` asks for them by name.
+
+    pytest.ini has always said needs_server tests are "deselected by default",
+    and nothing did the deselecting -- an unchecked claim. Now it is checked:
+    `pytest -m needs_model` runs them, a bare `pytest` skips them with a reason.
+    """
+    selected = config.getoption("-m") or ""
+    for item in items:
+        for marker in LIVE_MARKERS:
+            if marker in item.keywords and marker not in selected:
+                item.add_marker(pytest.mark.skip(
+                    reason=f"{marker}: run with  pytest -m {marker}"))
+
+
+# ── T28: an intermittent failure must leave its NAME behind ─────────────────
+FAILURE_LOG = ROOT / "var" / "test_failures.jsonl"
+
+
+def pytest_runtest_logreport(report):
+    """Append every failed test to var/test_failures.jsonl, with the load average.
+
+    T28 is a test that failed twice under load and passed on rerun -- and both
+    times its name scrolled away. A terminal is not a record. `var/` is never
+    committed, and this writes test ids and assertion text only.
+    """
+    if not report.failed:
+        return
+    try:
+        FAILURE_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with FAILURE_LOG.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "at": time.strftime("%Y-%m-%dT%H:%M:%S"), "test": report.nodeid,
+                "phase": report.when, "load": os.getloadavg(),
+                "strict_msgpack": os.environ.get("LANGGRAPH_STRICT_MSGPACK"),
+                "error": str(report.longrepr)[-2000:]}) + "\n")
+    except OSError:
+        pass    # the failure itself is still reported by pytest; this is a copy

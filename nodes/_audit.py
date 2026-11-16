@@ -106,10 +106,17 @@ def build_record(state: dict, outcome: str) -> dict:
         # T21 -- the grounding gate inert against real retrieval -- would have
         # been one line of this, showing every score as 1.0 on every query.
         "retrieved": [
-            {"id": s.get("id"), "score": s.get("score")}
+            {"id": s.get("id"), "score": s.get("score"),
+             # Which instrument produced `score` (T13), and the cosine beside a
+             # rerank score -- so calibration can compare both on real runs.
+             "score_kind": s.get("score_kind"), "cosine": s.get("cosine")}
             for s in (state.get("_retrieved") or [])
             if isinstance(s, dict)
         ],
+        # Which node failed and why, for a run that CRASHED (G9). Absent on
+        # every other outcome. The message passed through the InputGuard first:
+        # an exception can quote the evidence it choked on.
+        "error": state.get("_error"),
         "approved": state.get("approved"),
         # Whether the write was attributable to a human, NEVER the token itself.
         "approver_identity_present": bool(state.get("github_token")),
@@ -178,3 +185,19 @@ def write(state: dict, outcome: str, sink=None) -> dict:
                            "error": f"{type(e).__name__}: {e}"}}
     return {"_audit": {"written": True, "run_id": record["run_id"],
                        "outcome": outcome}}
+
+
+def write_failure(state: dict, node: str, exc: BaseException, outcome: str = "failed",
+                  sink=None) -> dict:
+    """The record for a run that CRASHED in `node` (G9).
+
+    The graph has no failure edges, so an exception in any node used to end the
+    run with no audit record at all -- invariant 9 ("every terminal path writes
+    one") held only for the paths that did not fail, and the runs most worth
+    reading were the ones missing. `app/graph.py::_traced` calls this from its
+    one insertion point, then re-raises: recording a failure never handles it.
+    """
+    text = f"{type(exc).__name__}: {exc}"[:500]
+    tenant = state.get("tenant") or "_default"
+    cleaned, _ = config.get_input_guard().sanitize(text, tenant=tenant)
+    return write({**state, "_error": {"node": node, "error": cleaned}}, outcome, sink=sink)

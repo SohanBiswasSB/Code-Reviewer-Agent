@@ -99,8 +99,9 @@ class Surface(Protocol):
     # to normalise it -- issue evidence and a code diff are not interchangeable,
     # and a surface routing on `touched_areas` gets nothing useful from an
     # IssueEvidence. Surfaces without one fall back to the built-in issue
-    # normaliser.
-    def normalize(self, raw: dict) -> object: ...
+    # normaliser. `policy` is the tenant's resolved policy, for VALUES the
+    # surface applies while normalising (e.g. extra risky_areas, T27).
+    def normalize(self, raw: dict, policy: dict | None = None) -> object: ...
 
 
 @runtime_checkable

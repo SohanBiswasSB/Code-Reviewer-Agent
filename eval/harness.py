@@ -61,6 +61,7 @@ os.environ.setdefault("RETRIEVER", "hybrid")
 # activity records would read as REAL errors in the admin panel, so the suite
 # records none unless an operator deliberately points it somewhere.
 os.environ.setdefault("CRA_ACTIVITY", "null")
+os.environ.setdefault("RERANKER", "none")      # model-free: no cross-encoder load
 
 
 # The gate tasks build synthetic states to exercise the FOUR BOOLEANS in

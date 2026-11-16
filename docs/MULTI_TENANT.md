@@ -31,8 +31,14 @@ allowlist — zero code change.
 
 ## Levels of guardrail (all per-tenant)
 1. **Prompt** (per surface/node) — the tenant's own instructions & emphasis.
-2. **Policy** (per surface) — `min_relevance_score`, `severity_allowlist`, `allowed_actions`,
-   `risky_areas`, `anomaly_threshold`, `enabled_surfaces`.
+2. **Policy** (per surface) — `min_relevance_score` (the bar for a COSINE),
+   `min_rerank_score` (the bar for a RERANKER score, T13 -- each retrieved passage says
+   which kind it carries, and the gate picks the matching bar), `min_entailment_score`,
+   `severity_allowlist`, `allowed_actions`, `risky_areas`, `anomaly_threshold`,
+   `enabled_surfaces`. `risky_areas` is ADDED to the surface's defaults (T27, 2026-11-17)
+   -- a tenant can make `subscription` risky but cannot make `migrations` routine. These
+   keys are validated when a run starts (G11, `schemas/policy.py`): a bad value fails the
+   run with the key named, instead of quietly changing what the gate does.
 3. **Code invariants** (org-wide, NOT tenant-overridable) — judge-explains/code-decides,
    the `execute` PermissionError guard, untrusted-input handling. Tenants tune *values*,
    never remove the *boundary*.

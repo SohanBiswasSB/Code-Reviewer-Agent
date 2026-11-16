@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import os
 
+import numpy as np
+from sentence_transformers import CrossEncoder
+
 from registry import adapter
 
 DEFAULT_MODEL = "cross-encoder/nli-deberta-v3-base"
@@ -24,14 +27,6 @@ class CrossEncoderEntailer:
 
     def _load(self):
         if self._model is None:
-            try:
-                from sentence_transformers import CrossEncoder
-            except ModuleNotFoundError:
-                raise ModuleNotFoundError(
-                    "cross-encoder entailment needs sentence-transformers "
-                    "(pip install -r requirements-local.txt). The lexical "
-                    "entailer is the offline default."
-                ) from None
             self._model = CrossEncoder(self.model_name)
         return self._model
 
@@ -44,8 +39,6 @@ class CrossEncoderEntailer:
         """
         if not claim or not passage:
             return 0.0
-        import numpy as np
-
         logits = self._load().predict([(passage, claim)])[0]
         exp = np.exp(logits - np.max(logits))
         probs = exp / exp.sum()

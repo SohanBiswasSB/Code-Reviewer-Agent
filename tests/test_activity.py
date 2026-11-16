@@ -288,3 +288,24 @@ def test_the_service_itself_never_uses_stdlib_logging():
         if "import logging" in text or "getLogger(" in text:
             offenders.append(str(p.relative_to(root)))
     assert offenders == []
+
+
+# ── retention ────────────────────────────────────────────────────────────────
+def test_retention_deletes_only_expired_day_files_and_only_when_asked(tmp_path, monkeypatch):
+    from datetime import date
+
+    from jobs import prune_activity
+    monkeypatch.setenv("CRA_DATA_DIR", str(tmp_path / "var"))
+    monkeypatch.setenv("CRA_ACTIVITY", "null")
+    d = tmp_path / "var" / "activity"
+    d.mkdir(parents=True)
+    for name in ("2026-01-01.jsonl", "2026-11-01.jsonl", "notes.jsonl"):
+        (d / name).write_text("{}\n")
+    today = date(2026, 11, 17)
+    dry = prune_activity.prune(30, apply=False, today=today)
+    assert [p.name for p in dry] == ["2026-01-01.jsonl"]
+    assert (d / "2026-01-01.jsonl").exists(), "a dry run deletes nothing"
+    prune_activity.prune(30, apply=True, today=today)
+    assert sorted(p.name for p in d.iterdir()) == ["2026-11-01.jsonl", "notes.jsonl"]
+    with pytest.raises(ValueError):
+        prune_activity.prune(0, apply=True, today=today)

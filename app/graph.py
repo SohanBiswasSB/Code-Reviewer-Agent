@@ -51,6 +51,7 @@ import config
 from app import activity, live
 from app.state import TriageState
 from errors import WRITE_ERRORS, ConfigError, EvidenceError, ProviderError, StorageError
+from nodes import _audit
 from nodes.audit import audit
 from nodes.await_approval import await_approval
 from nodes.classify import classify
@@ -101,6 +102,7 @@ def _traced(name, fn, tracer):
                   error="interrupted (Ctrl-C)")
             alog.record_error(e, "interrupted (Ctrl-C)")
             alog.complete()
+            _record_failure(state, name, e, "interrupted")
             raise
         except Exception as e:
             # Recorded -- with its traceback, in the activity log -- then re-raised
@@ -110,6 +112,7 @@ def _traced(name, fn, tracer):
             _live(state, name, "error", duration_ms=ms, error=f"{type(e).__name__}: {e}")
             alog.record_error(e, failure_source=_failure_source(e))
             alog.complete()
+            _record_failure(state, name, e, "failed")
             raise
         ms = (time.perf_counter() - started) * 1000
         detail = live.summarize(name, out)
@@ -121,6 +124,20 @@ def _traced(name, fn, tracer):
         return out
     wrapped.__name__ = name
     return wrapped
+
+
+def _record_failure(state: dict, name: str, exc: BaseException, outcome: str) -> None:
+    """Write the crashed run's audit record (G9).
+
+    Skipped when the run ALREADY has its terminal record: a denial is recorded
+    by await_approval and then stopped by execute's PermissionError on purpose
+    (invariant 9's note), and that raise is the mechanism, not a crash. Also
+    skipped when the AUDIT node is what failed -- writing again from there would
+    fail the same way.
+    """
+    if name == "audit" or (state.get("_audit") or {}).get("written"):
+        return
+    _audit.write_failure(state, name, exc, outcome)
 
 
 def _failure_source(exc: BaseException) -> str:

@@ -269,10 +269,19 @@ DIAGNOSIS_UNDER_REVIEW block -- model output built from untrusted evidence, wher
 injection phrasing the model carried forward shows up. It was discarded until
 2026-11-16.
 
-**But the checkpoint is a different store, and it is NOT redacted.** The guard
-runs on the way into a prompt, not on the way into state, so `_raw` and
-`evidence` persist unredacted — Postgres on disk in production. That is TODO T25,
-and it is the precise limit of what T12 closed.
+**The checkpoint is redacted too (T25, closed 2026-11-17).** The guard used to run
+only on the way into a prompt, so `_raw` and `evidence` persisted unredacted --
+Postgres on disk in production. `fetch_evidence` now passes the whole payload
+through the guard (`nodes/_render.py::guard_payload`) BEFORE the first channel
+write. It has to be there and not later: a checkpointer keeps every super-step,
+so redacting in `normalize_evidence`, or dropping `_raw` afterwards, would still
+leave the fetch step's checkpoint holding the secret. Identifier fields (paths,
+refs, URLs, commit ids) are left untouched -- routing reads paths.
+`tests/test_graph_resume.py` checks the whole checkpoint HISTORY.
+
+The accepted consequence: the approver sees `[REDACTED:<kind>:<n>]` where a
+secret was in the diff. That still says a secret was committed, which is the
+finding; nobody approving a review needs the value.
 
 Redaction is also pattern-based rather than exhaustive, so `var/` is
 therefore as sensitive as the source data and must not be committed, synced to a

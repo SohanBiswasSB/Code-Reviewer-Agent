@@ -18,7 +18,7 @@ from __future__ import annotations
 import json as _json
 
 import config
-from nodes._render import render_evidence
+from nodes._render import combine_guard_reports, render_evidence
 from nodes._surface import active_surface, evidence_as_dict, namespace_for
 from schemas.diagnosis import (
     Citation,
@@ -124,7 +124,12 @@ def generate_diagnosis(state: dict, llm=None, retriever=None) -> dict:
     if guard_report is not None:
         # Into state so it reaches the audit record and the trace (G6/T23). A
         # redaction nobody can see happened is indistinguishable from none.
-        out["_guard"] = guard_report
+        # Combined with what fetch_evidence redacted (T25): the diff's secrets
+        # are already placeholders by now, so the prompt pass alone would report
+        # them as zero. Built from the EVIDENCE breakdown rather than the running
+        # total, so a node that runs twice cannot double-count.
+        prior = (state.get("_guard") or {}).get("evidence")
+        out["_guard"] = combine_guard_reports(prior, guard_report)
     return out
 
 

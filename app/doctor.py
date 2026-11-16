@@ -30,6 +30,7 @@ import platform as _platform
 import sys
 
 from errors import CONFIG_ERRORS
+from schemas.policy import policy_errors  # stdlib-only, like errors
 
 OK, WARN, FAIL = "OK  ", "WARN", "FAIL"
 
@@ -184,6 +185,8 @@ def _check_tenants(r: Report) -> None:
                 continue
             if surface not in pol.get("enabled_surfaces", []):
                 continue          # tenant legitimately does not run this surface
+            for problem in policy_errors(pol):      # G11, the same check resolve_tenant runs
+                r.add(FAIL, f"policy: {t}/{surface}", problem)
             missing = [k for k in ("min_relevance_score", "severity_allowlist", "allowed_actions")
                        if k not in pol]
             if missing:
@@ -255,7 +258,8 @@ def _check_indexes(r: Report) -> None:
 # once someone exports LLM_PROVIDER=lmstudio to use the agent, the "model-free"
 # gate check started calling the real judge (and crashed doctor when the id did
 # not resolve). Found 2026-11-16, the first time doctor ran in a configured shell.
-OFFLINE_GATE_ENV = {"LLM_PROVIDER": "stub", "RETRIEVER": "hybrid", "CRA_ACTIVITY": "null"}
+OFFLINE_GATE_ENV = {"LLM_PROVIDER": "stub", "RETRIEVER": "hybrid", "RERANKER": "none",
+                    "CRA_ACTIVITY": "null"}
 
 
 def _check_gates(r: Report) -> None:

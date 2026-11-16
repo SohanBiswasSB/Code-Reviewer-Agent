@@ -35,8 +35,12 @@ from app.activity import ActivityLogger, capture_library_logs, log_event
 from app.deps import open_checkpointer
 from app.graph import build_graph
 
-# Outcomes that mean the run is over. A denial counts: the human answered.
-TERMINAL_OUTCOMES = frozenset({"executed", "denied", "escalated", "human_review", "ended"})
+# Outcomes that mean the run is over. A denial counts: the human answered. A
+# crash or an interrupt (G9) counts too -- nothing will resume that thread -- and
+# "abandoned" is a CLI run whose in-memory checkpoint died with its process. The
+# live-state re-check below still refuses to evict anything paused at the gate.
+TERMINAL_OUTCOMES = frozenset({"executed", "denied", "escalated", "human_review", "ended",
+                               "failed", "interrupted", "abandoned"})
 
 
 def _parse_ts(value: str | None) -> datetime | None:

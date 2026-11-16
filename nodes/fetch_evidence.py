@@ -8,6 +8,7 @@ surface names and config resolves, so GitHub -> GitLab is a config change.
 from __future__ import annotations
 
 import config
+from nodes._render import guard_payload
 from nodes._surface import active_surface
 
 
@@ -29,4 +30,7 @@ def fetch_evidence(state: dict, source=None) -> dict:
     # knows WHICH repo without a second, competing configuration of its own.
     raw = source.gather(target, token=state.get("github_token"),
                         codebase=(state.get("_policy") or {}).get("codebase") or {})
-    return {"_raw": raw}
+    # T25: redacted HERE, before the first channel write, because the checkpoint
+    # keeps every super-step -- see nodes/_render.py::guard_payload.
+    clean, report = guard_payload(raw, tenant=state.get("tenant") or "_default")
+    return {"_raw": clean, "_guard": {**(state.get("_guard") or {}), "evidence": report}}

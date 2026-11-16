@@ -36,4 +36,9 @@ def normalize_evidence(state: dict) -> dict:
     raw = state["_raw"]
     surface = active_surface(state)
     normalizer = getattr(surface, "normalize", None) if surface else None
-    return {"evidence": normalizer(raw) if callable(normalizer) else normalize_issue(raw)}
+    if not callable(normalizer):
+        return {"evidence": normalize_issue(raw)}
+    # The tenant's policy goes in so a surface can apply tenant VALUES -- the
+    # code_review surface widens its risky areas with them (T27). The policy is
+    # the one resolve_tenant pinned, so a resumed run routes as it started.
+    return {"evidence": normalizer(raw, policy=state.get("_policy") or {})}

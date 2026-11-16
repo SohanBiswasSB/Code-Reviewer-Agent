@@ -77,11 +77,12 @@ every fenced block before any model call: it replaces secrets and PII with stabl
 placeholders, and it escapes the fence markers so evidence cannot close its own
 delimiter and continue as operator text.
 
-**The guard protects the prompt, not the checkpoint.** Redaction happens on the
-way into a model call, so a secret in a diff never reaches the provider and never
-reaches the audit record — but the raw evidence is still written to the
-checkpoint, which is Postgres on disk in production. Measured, not assumed
-(TODO T25). Treat checkpoint storage as holding source-grade data.
+**The guard protects the prompt AND the checkpoint** (T25, closed 2026-11-17).
+Evidence is redacted in `fetch_evidence`, before anything is written to state, so
+a secret in a diff reaches neither the provider, nor the audit record, nor any
+checkpoint in the run's history. The approver therefore sees a placeholder where
+the secret was. Redaction is still pattern-based, so a secret of an unknown shape
+can get through; treat checkpoint storage as sensitive anyway.
 
 What it does **not** do is neutralise natural-language injection, and it does not
 claim to. Instruction-like phrasing is **counted and reported** into the audit

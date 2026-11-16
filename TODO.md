@@ -385,7 +385,7 @@ check that never happened. That is worse than saying nothing.
 **Done when:** the judge receives the retrieved snippets, and its prompt asks
 only for checks it can actually perform.
 
-### T19. Two copies of every prompt, and the surfaces point at the wrong one `[~]`
+### T19. Two copies of every prompt, and the surfaces point at the wrong one `[x]`
 
 `prompts/code_review_diagnosis.md` is **byte-identical** to
 `tenants/_default/prompts/code_review/diagnosis.md`. `prompts/README.md` says the
@@ -404,6 +404,11 @@ keep them and make the duplication mechanical.
 (`diagnosis_prompt = "diagnosis"`) instead of flat paths, so they no longer point
 at the non-canonical copies. Still open: the duplicate files under `prompts/`
 remain, and nothing prevents them drifting from `tenants/_default/prompts/**`.
+
+**DONE 2026-11-17.** Two of the four flat copies (`code_review_diagnosis.md`,
+`log_review_analysis.md`) had already drifted from the canonical tenant prompts, so
+all four were deleted rather than synced. `tests/test_prompts.py` fails if one
+reappears. The three flat skeletons with no tenant copy and no caller remain.
 
 ### T20. Prompt-engineering standards from BEST_PRACTICES section 11 unmet `[~]`
 
@@ -567,7 +572,11 @@ codebase, and the thresholds are re-measured with the method written down.
 - Offline callers now DECLARE `RETRIEVER=hybrid` (conftest, harness, demo).
 - `tests/test_index.py`, 39 tests; five deliberate breaks each caught.
 
-**Still open:** (1) embed + build MilesOne's index -- needs the embedder served;
+**2026-11-17:** MilesOne embedded -- 1,196 files, 15,306 chunks, 2,610 values
+redacted before embedding, 698 s (`var/index/MilesEducation-Tech__Miles-USP-Backend`).
+Both real tenants now have an index.
+
+**Still open:** (1) ~~embed + build MilesOne's index~~ done 2026-11-17;
 (2) re-measure every `min_relevance_score` from on-topic vs off-topic score
 distributions on that index, and write the method down; (3) project_a/project_b
 are placeholders with no repo to ingest.
@@ -640,7 +649,7 @@ prompt wording only — which the prompts themselves say is not a boundary.
 **Done when:** evidence passes through a redaction + delimiting stage before any
 LLM call, and an adversarial eval class covers injected instructions.
 
-### T28. An intermittent unit-test failure, not yet identified `[ ]`
+### T28. An intermittent unit-test failure, not yet identified `[~]`
 
 Seen twice on 2026-11-16, both times while the machine was under load (LM Studio
 embedding 17k chunks, or straight after `check.py`): one test failed, then passed
@@ -654,7 +663,12 @@ nothing). Found while hunting it and fixed: a slow server's read timeout escaped
 **Done when:** the next failure is captured WITH its name (run with `-rf`), and it
 is fixed or shown to be environmental.
 
-### T27. Tenant `risky_areas` is decorative `[ ]`
+**Capture is in place (2026-11-17).** `tests/conftest.py::pytest_runtest_logreport`
+appends every failed test to `var/test_failures.jsonl` -- id, phase, load average,
+strict-msgpack flag, the assertion text -- so the next one cannot scroll away.
+Still open: the failure itself, once it is caught.
+
+### T27. Tenant `risky_areas` is decorative `[x]`
 
 Found 2026-11-16 while onboarding `masterclass`. Every `policy.json` declares
 `code_review.risky_areas`, `docs/MULTI_TENANT.md` presents it as a per-codebase
@@ -670,6 +684,14 @@ paths go to a human), which is exactly why it stayed invisible.
 **Done when:** `classify` routes on the surface's defaults UNION the tenant's
 `risky_areas`, with a test that a tenant-only area (e.g. `subscription`) reaches
 `ai_investigation`, and the policy value is pinned into state like the rest.
+
+**DONE 2026-11-17.** `normalize_evidence` hands the surface the pinned `_policy`;
+`CodeReviewSurface.normalize` computes `touched_areas` from
+`risky_areas_for(policy)` = defaults UNION tenant (a union, so a tenant cannot make
+`migrations` routine). Tests in `tests/test_tenants.py`: Masterclass
+`Subscriptions/views.py` -> ai_investigation, `_default` -> human_review. Not yet seen
+on a live run: the 2026-11-17 batch meant to show it (Masterclass 2f639c1,
+subscriptions/utils) died when LM Studio ran out of Metal memory.
 
 ### T26. `resolves_to()` binds a role to the WRONG model `[x]`
 
@@ -723,7 +745,7 @@ positive test pins the affixes that must keep working. `doctor` should also prin
 the resolved id whenever it differs from the configured one, rather than only on
 a miss — a match that had to be massaged is exactly the one worth seeing.
 
-### T25. The CHECKPOINT still holds unredacted evidence `[ ]`
+### T25. The CHECKPOINT still holds unredacted evidence `[x]`
 
 Found while proving T12 end to end, and it is the precise limit of what T12
 closed. The `InputGuard` runs in `nodes/_render.py`, on the way into a **prompt**.
@@ -759,7 +781,17 @@ approval-gate consequence is accepted deliberately), or `_raw` is dropped from
 the checkpoint after `normalize_evidence` and the residual `evidence` exposure is
 accepted and documented in `MODEL_CARD.md`.
 
-### T13. `Reranker` unimplemented `[ ]`
+**DONE 2026-11-17 -- the first option; the user chose to proceed.** The second
+option turned out not to work at all: a checkpointer keeps every super-step, so
+dropping `_raw` later leaves the fetch step's checkpoint holding the secret.
+`fetch_evidence` now runs `guard_payload` over the whole payload before the first
+channel write (identifier keys -- paths, refs, URLs -- untouched, so routing is
+unchanged). The approver sees placeholders where secrets were. The run's `_guard`
+report sums the evidence pass and the prompt pass (injection hints counted once).
+`tests/test_graph_resume.py` asserts no secret in ANY checkpoint of the history;
+with the old `fetch_evidence` it fails.
+
+### T13. `Reranker` unimplemented `[~]`
 
 Port defined, no adapter. Must be in-process `sentence-transformers` — LM Studio
 exposes no rerank endpoint.
@@ -767,6 +799,17 @@ exposes no rerank endpoint.
 **Done when:** a wide retrieve (top-100) reranks to top-n, on the device
 `runtime()["reranker_device"]` names, with retrieval metrics proving it earns its
 cost.
+
+**BUILT 2026-11-17; the metrics say it does NOT earn its cost yet, so it is OFF by
+default.** `adapters/rerank_cross_encoder.py` (bge-reranker-v2-m3, HF cache only,
+sigmoid score), wired into `IndexedRetriever` (top `RERANK_CANDIDATES`=100 fused ->
+k), hits carry `score_kind` and the gate picks `min_rerank_score` vs
+`min_relevance_score` per hit. `tools.calibrate rerank` measured it on 176
+Masterclass queries against the cosine on identical pools: separation J 0.31 vs
+0.68, same-file-in-top-3 81.8% vs 98.9%, 13.5 s/query. `RERANKER=cross_encoder`
+opts in; `MIN_RERANK_SCORE` defaults to the measured keep-90% cut, 0.61.
+Still open: a human-labelled relevance set -- the same-file proxy favours the
+cosine, so it cannot settle the question either way.
 
 ### T24. Documentation drift — the docs now understate what is built `[x]`
 
@@ -853,8 +896,10 @@ Tracked in full in `docs/ARCHITECTURE_GAPS.md`; listed here so nothing lives in
 only one place: G2 surface dispatch `[x]` (T5) · G4 log detect→aggregate→sample `[x]` ·
 G6 AuditSink `[x]` (2026-09-10, docs/DATA_STORAGE.md) · G7 idempotency `[ ]` · G8 pin prompt+policy
 version into the checkpoint `[x]` (`_policy_version` / `_prompt_version`, pinned by
-`resolve_tenant`) · G9 failure edges + retry/backoff `[ ]` ·
-G10 corrective-RAG loop cap `[ ]` · G11 policy schema validation `[ ]` ·
+`resolve_tenant`) · G9 failure edges + retry/backoff `[~]` (retries exist; a crashed
+run writes a `failed` audit record since 2026-11-17; no failure EDGES yet) ·
+G10 corrective-RAG loop cap `[ ]` (there is no corrective loop yet, so nothing to cap) ·
+G11 policy schema validation `[x]` (gate + router keys, `schemas/policy.py`) ·
 G12 budgets/rate limits `[ ]` · G13 Notifier + approver authZ `[ ]` ·
 G14 prompt inheritance `[ ]` · G15 prompt/policy cache `[ ]` · G17 capability
 eval `[ ]`.
@@ -863,10 +908,9 @@ eval `[ ]`.
 
 ## Hygiene
 
-- [~] `.env.example` — every setting, with the `CRA_` prefix convention. **The file
-      exists but is NOT in the repo**: `.gitignore:11`'s `.env.*` matches it, so it
-      has never been committed. Either add a `!.env.example` negation or drop this
-      claim — right now the box is ticked for a file a fresh clone does not get.
+- [x] `.env.example` — every setting, with the `CRA_` prefix convention. Was ignored
+      by `.gitignore`'s `.env.*`; `!.env.example` added and the file committed
+      2026-11-16. Reranker settings added 2026-11-17.
 - [x] `MODEL_CARD.md` — scope limits, as SF-Crime has. States plainly: this agent
       never pushes code, only comments; it acts as the approving human's identity;
       it never mutates infrastructure or a database.
@@ -874,10 +918,12 @@ eval `[ ]`.
       one committed path is wrong on the other machine, so it is selected per
       machine instead. Both paths are in docs/DECISIONS.md section 1. Also sets
       python.analysis.extraPaths, which fixes the spurious import errors.
-- [ ] `requirements-lock.txt` — `pip freeze` once the environment is real. Still
-      open **deliberately**: this Mac has `requirements.txt` only, so a freeze here
-      would omit `openai`, `sentence-transformers` and torch and claim a
-      completeness it does not have. Do it on the machine that has run a live model.
+- [x] `requirements-lock.txt` — generated 2026-11-17 (`pip list --format=freeze`) on
+      the M4 Pro Mac, which has now run the whole live stack: LM Studio models, the
+      in-process reranker, the graph. The CUDA desktop is still unlocked.
+- [x] Activity-log retention — `python -m jobs.prune_activity --keep-days 90
+      [--apply]`, dry run by default, cuts by the date in the file name; never
+      touches the audit store.
 - [x] Pin the core direct deps in `requirements.txt` — 2026-09-10. Not for
       deployment hygiene: the checkpoint serialiser's treatment of unregistered
       types changed under us between releases, and because a blocked type comes

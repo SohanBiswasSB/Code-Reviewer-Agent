@@ -119,6 +119,28 @@ def get_retriever():
                    "CRA_DATA_DIR", "LMSTUDIO_BASE_URL", "EMBEDDER", "VECTOR_INDEX")
 
 
+def get_reranker():
+    """The Reranker (T13), or None when RERANKER=none -- the DEFAULT.
+
+    OFF by default, on measurement (2026-11-17, `tools.calibrate rerank`, 176
+    Masterclass queries, both instruments on the same 100-candidate pools):
+    same-file vs other-file separation (Youden J) was 0.68 for the cosine and 0.31
+    for bge-reranker-v2-m3; a same-file passage reached the top 3 in 98.9% of
+    queries by fusion order and 81.8% after reranking; and it cost 13.5 s per
+    query. "Same file" is a proxy that favours the cosine (the query IS the file's
+    path and diff), but nothing measured shows the reranker earning its cost, so
+    it is opt-in: RERANKER=cross_encoder.
+
+    Shared per process like the retriever: the model is ~2.3 GB and takes ~4 s to
+    load, which a CLI review would otherwise pay on every run.
+    """
+    name = os.getenv("RERANKER", "none")
+    if name == "none":
+        return None
+    return _shared(registry.get_adapter("reranker", name), "RERANKER_MODEL",
+                   "RERANK_MAX_LENGTH", "CRA_PLATFORM", "CRA_PROFILE")
+
+
 def get_source(name: str):
     """name comes from the active Surface (surface.source_name), not from env."""
     return registry.get_adapter("source", name)()
@@ -296,6 +318,7 @@ def registered() -> dict:
     out["selected"] = {
         "llm": os.getenv("LLM_PROVIDER", "lmstudio"),
         "retriever": os.getenv("RETRIEVER", "indexed"),
+        "reranker": os.getenv("RERANKER", "none"),
         "tenant_store": os.getenv("TENANT_STORE", "fs"),
         "audit": os.getenv("CRA_AUDIT", "jsonl"),
         "guard": os.getenv("CRA_GUARD", "regex"),

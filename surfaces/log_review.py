@@ -20,8 +20,9 @@ class LogReviewSurface:
     diagnosis_prompt = "diagnosis"
     judge_prompt = "judge"
 
-    def normalize(self, raw: dict) -> LogWindow:
-        """Reduced source payload -> validated LogWindow.
+    def normalize(self, raw: dict, policy: dict | None = None) -> LogWindow:
+        """Reduced source payload -> validated LogWindow. `policy` is accepted for
+        the port's shape and unused: log routing reads severities, not paths.
 
         The reduction already happened in the SOURCE, while the lines were still
         a stream (adapters/source_s3logs.py). By the time evidence reaches here it

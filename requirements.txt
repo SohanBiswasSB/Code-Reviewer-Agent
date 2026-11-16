@@ -5,7 +5,7 @@
 #   requirements-dev.txt    tests + lint
 #
 # The safety-gate suite (python -m eval.harness) needs this file and nothing more:
-# no model, no server, no torch.
+# no model and no server. (torch IS installed -- see sentence-transformers below.)
 #
 # ── why these are pinned (2026-09-10) ────────────────────────────────────────
 # These were unpinned "until anything is deployed". That turned out to be the
@@ -40,3 +40,10 @@ boto3==1.43.91                    # adapters/source_s3logs.py (log_review surfac
 # has to say what that costs.
 numpy==2.5.3
 openai==3.13.0
+
+# The in-process reranker (T13) and the NLI entailer import these at MODULE level
+# too, so the same rule puts them here rather than in -local. The cost is real and
+# accepted: torch (~2.5 GB) in every install, and ~3 s on every `import config`.
+# The models themselves are NOT fetched by pip; see adapters/rerank_cross_encoder.py.
+sentence-transformers==6.0.1
+torch==2.14.0
