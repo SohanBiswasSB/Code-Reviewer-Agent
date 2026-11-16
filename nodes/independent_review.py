@@ -21,7 +21,8 @@ from __future__ import annotations
 
 import os
 
-from nodes._render import render_for_judge
+import config
+from nodes._render import render_checklist, render_for_judge, render_review
 from nodes._surface import active_surface
 from schemas.diagnosis import ReviewResult
 
@@ -96,7 +97,6 @@ def independent_review(state: dict, judge_llm=None, entailer=None) -> dict:
     # LLM_PROVIDER=stub -- `eval/harness.py` does, because the gate suite must be
     # model-free to stay byte-identical across machines.
     if judge_llm is None:
-        import config
         judge_llm = config.get_llm("judge")
     # The TENANT's judge prompt, pinned by resolve_tenant (T6).
     system = (state.get("_prompts") or {}).get("judge")
@@ -144,10 +144,13 @@ def independent_review(state: dict, judge_llm=None, entailer=None) -> dict:
         failures.append(f"action {action_type!r} not in {sorted(allowed_actions)}")
 
     if entailer is None:
-        import config
         entailer = config.get_entailer()
+    # The text the gate judges is the text that will be posted: comment AND
+    # findings, rendered once. Checking only `proposed_comment` would let findings
+    # reach the page without ever being judged.
+    review_text = render_review(diag)
     entailment_ok, entail_score = _entailment(
-        diag.proposed_comment, cited_ids, retrieved_list, entailer, min_entail)
+        review_text, cited_ids, retrieved_list, entailer, min_entail)
     if not entailment_ok:
         failures.append(
             f"claim not entailed by its cited passages (score {entail_score} < {min_entail})")
@@ -164,7 +167,10 @@ def independent_review(state: dict, judge_llm=None, entailer=None) -> dict:
     if review.decision == "approve":
         out["proposed_action"] = {
             "type": action_type,
-            "comment": diag.proposed_comment,
+            # The model's judged text, then the code-computed checklist. Built
+            # here, once, and posted verbatim (invariant 4).
+            "comment": "\n\n".join(p for p in (
+                review_text, render_checklist(state.get("_checks") or [])) if p),
             "label": diag.proposed_label,
         }
     return out

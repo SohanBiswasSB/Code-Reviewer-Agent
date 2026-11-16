@@ -47,9 +47,19 @@ import time
 # `argv` uses sys.executable rather than "python", so the check runs under the
 # interpreter that invoked it instead of whatever is first on PATH -- the conda
 # env here is easy to shadow.
+# Forced on the steps that must be model-free, whatever the calling shell exports.
+# The gate suite and the demo only `setdefault` these; a shell configured to RUN
+# the agent (LLM_PROVIDER=lmstudio) would otherwise turn "model-free" into "calls
+# whatever is loaded" -- found in doctor on 2026-11-16, same hole here.
+# CRA_PROFILE is pinned WITH the platform: a shell exporting CRA_PROFILE=mac_max
+# against the pinned `cpu` platform is an unsupported pair, and the platform
+# layer rightly raises rather than silently downgrading.
+OFFLINE = {"LLM_PROVIDER": "stub", "RETRIEVER": "hybrid",
+           "CRA_PLATFORM": "cpu", "CRA_PROFILE": "portable"}
+
 STEPS: tuple[tuple[str, list[str], dict[str, str], bool], ...] = (
     ("safety gates (no model, 100% bar)",
-     [sys.executable, "-m", "eval.harness"], {"CRA_PLATFORM": "cpu"}, True),
+     [sys.executable, "-m", "eval.harness"], OFFLINE, True),
     ("lint (ruff)",
      [sys.executable, "-m", "ruff", "check", "."], {}, True),
     ("unit tests",
@@ -58,9 +68,10 @@ STEPS: tuple[tuple[str, list[str], dict[str, str], bool], ...] = (
      [sys.executable, "-m", "pytest", "-q"],
      {"LANGGRAPH_STRICT_MSGPACK": "true"}, True),
     ("multi-tenant demo",
-     [sys.executable, "-m", "eval.demo_multitenant"], {"CRA_PLATFORM": "cpu"}, True),
+     [sys.executable, "-m", "eval.demo_multitenant"], OFFLINE, True),
     ("doctor (report only)",
-     [sys.executable, "-m", "app.doctor"], {"CRA_PLATFORM": "cpu"}, False),
+     [sys.executable, "-m", "app.doctor"],
+     {"CRA_PLATFORM": "cpu", "CRA_PROFILE": "portable"}, False),
 )
 
 OK, FAIL, SKIP = "OK  ", "FAIL", "NOTE"

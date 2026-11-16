@@ -1519,11 +1519,106 @@ caught). Gates 54/54. ruff clean.
 
 ---
 
-## 9. RESUME HERE (updated 2026-11-14)
+### 2026-11-16 — the reviewer reviews a real codebase: Masterclass, end to end
 
-**Read this paragraph first; the rest of §9 below it is from 2026-09-10 and partly
-superseded.** Since then: the first live model run happened (2026-09-11, §8), **T1 is
-closed** (`390f1b0` -- committed, not pushed), and **T10 is built but not embedded**
+The first time the agent reviewed a codebase other than its own fixtures: the
+user's staged change in `MilesEducation-Tech/Merged_Miles_Masterclass`, with real
+retrieval, the real diagnosis model and the real judge, on the M4 Pro.
+
+**Built to make that possible** (each with tests, each test checked by reverting
+the thing it pins):
+
+- **`git_local` source + `review_file` sink + `python -m app.review`.** The GitHub
+  network calls are still stubs, and the change most worth reviewing is often not
+  a PR yet. Targets: `staged`, `<rev>`, `a..b`, `a...b`. Chosen per surface by
+  `CRA_SOURCE_<SURFACE>` / `CRA_SINK_<SURFACE>`; the CLI defaults them.
+  `tools/codebase.codebase_root` is the ONE place a repo's per-machine location is
+  resolved, so ingest and the source can never read different checkouts.
+- **`masterclass` tenant** (a new one; `project_b` left alone, tests use it).
+  Indexed: 894 files -> 17,622 chunks, 8.7 min, 304 values redacted. The untracked
+  `Miscellaneous/Masterclass_Legacy_Data_Request/` is excluded (not part of the
+  codebase); everything tracked is indexed, matching the MilesOne choice.
+
+**What the first real run exposed, and what was done about each:**
+
+1. **The diff budget was spent in path order.** 93k chars of staged change, 48k
+   budget: CSV exports filled it and the riskiest file (a script that splits
+   shared question banks in the DB) was never seen. Now spent code -> config ->
+   docs, data files NAMED but never shown, everything omitted listed by name.
+2. **An approved review would have been a sentence ending in a colon.** The action
+   carried `proposed_comment` only; the findings stayed in the audit record. Now
+   `render_review` builds comment + findings ONCE, and the SAME text is what
+   entailment judges and what is posted -- findings were previously unjudged text.
+3. **T26 was worse than filed.** The adapter sent the configured id verbatim;
+   LM Studio rejects `qwen3-4b` (it serves `qwen/qwen3-4b`) while doctor's loose
+   matcher said OK. Matching is now strict and the RESOLVED id is sent. T26 closed.
+4. **"Model-free" gates were only model-free by default.** Exporting
+   `LLM_PROVIDER=lmstudio` to use the agent made doctor's gate check call the real
+   judge; `check.py` likewise, plus a cpu-platform/mac_max-profile clash. Both now
+   FORCE the offline env.
+5. **Metal OOM on a 24 GB Mac** with both LLMs at `parallel 4`. Reloaded at
+   `parallel 1`, judge at 8k context. Also showed that a crashed run writes NO
+   audit record (G9) -- the live view now at least shows the failed stage.
+
+With 1 and 2 fixed, the second run reviewed the code that matters and named the
+real risk (the new unique constraints break on existing shared banks; run the
+split script before the migration). It still escalated, correctly: lexical
+entailment 0.13 < 0.25.
+
+**Retrieval evidence for calibration (T10):** every hit scored 0.78-0.82 against a
+0.40 bar, so `groundedness_ok` is effectively always true for this embedder; and 3
+of 5 hits were Markdown (JIRA notes, DATA_MODELS.md, a PRD) outranking code.
+
+**Live view (`python -m app.monitor`, http://127.0.0.1:8765).** Asked for because
+a 3-minute diagnosis was invisible: traces are written when a span ENDS.
+`app/live.py` writes the START half (`var/live/`), best-effort, ids/scores only,
+never evidence text; localhost only. See DATA_STORAGE.md.
+
+**Pre-push checks (`nodes/prepush_checks.py`, `tools/change_checks.py`).** The
+Masterclass repo's own `/prepush-ritual` (steps 0-5) is now applied by the
+reviewer to whatever it reviews, and a change that skipped a step is FLAGGED for
+it. Generic checks always run (N+1 in loops, new warning-silencers, line length /
+ASCII on added lines, new undocumented handlers, imports of untracked files);
+convention checks (per-app docs + change-log, Postman, tracker row, commit
+message, read-only / never-commit paths) run only where a tenant's
+`code_review.prepush` declares them. What needs Django/DB/network is reported as
+`skip` with the reason. Decisions: **flags inform, they do not route or decide**
+(a veto would be a fifth boolean -- a deliberate design change, not a side effect);
+the checklist is appended to the review AFTER the gate and never entailed (it is
+computed fact, not model claim). On the real staged change: 6 flagged (a real
+offline N+1 in the split script, 3 docs not updated, tracker row missing x2),
+9 passed, 6 not checkable.
+
+**Owned limits:** the N+1 port follows helpers within a module only (the ritual's
+scanner follows absolute imports repo-wide); D7/D8 docstring house style, D14
+old-identifier sweep, P5/P6 Postman envelope/query rows, J5/J7 field formats and
+C6 commit/JIRA agreement are not implemented. One intermittent test failure was
+seen twice under load and not reproduced in 75+ runs (TODO).
+
+Imports-at-top is now a project rule (user, 2026-11-16): lazy only where genuinely
+circular, so `numpy` and `openai` moved to `requirements.txt`. Tests 313. Gates 54/54.
+
+---
+
+## 9. RESUME HERE (updated 2026-11-16)
+
+**Read this paragraph first.** The reviewer now runs end to end on a real codebase
+(Masterclass): local diff -> namespaced retrieval -> real diagnosis + judge -> four
+booleans -> pre-push checks -> live monitor. Nothing it produced has been approved
+yet -- every real run escalated, correctly. **T1, T26 closed; T10 half done** (index
+built for masterclass, NOT milesone; thresholds uncalibrated). Unpushed: `390f1b0`
+and everything since (the user has staged T10; the rest is unstaged).
+
+**Do next, in order:** (1) **calibrate `min_relevance_score`** on the masterclass
+index -- the measured cosines (0.78-0.82 for everything) say 0.40 is inert; (2)
+rank code above Markdown in retrieval, or index docs separately -- 3 of 5 hits were
+notes/PRDs; (3) replace lexical entailment, which escalates every real run (0.08,
+0.13); (4) T27 (`risky_areas` is decorative); (5) G9 -- a crashed run writes no
+audit record; (6) ingest milesone; (7) commit + push.
+
+
+*(2026-11-14 update, superseded by the paragraph above:)* Since 2026-09-10: the
+first live model run happened (2026-09-11, §8), **T1 is closed** (`390f1b0` -- committed, not pushed), and **T10 is built but not embedded**
 (2026-11-14, §8). So N2 is done and N4 is half done. 208 tests, 54/54 gates, ruff clean.
 
 **Do next, in order:** (1) serve the embedder (LM Studio locally, or the Studio over

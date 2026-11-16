@@ -114,8 +114,14 @@ outcome                             # human_review | escalated | denied | execut
 tenant, surface, target, route
 policy_version, prompt_version      # already pinned into state by resolve_tenant
 retrieved[]  {id, score}            # THE highest-value field -- see below
-diagnosis    {summary, severity, citations[], findings_count}
-review       {groundedness_ok, risk_ok, permission_ok, entailment_ok, failures[]}
+checks[]     {check, step, status, message, file, line}   # pre-push detectors
+gates        {min_relevance_score, min_entailment_score, severity_allowlist, allowed_actions}
+runtime      {platform, profile, models{role: id}, entailer, model_server}
+diagnosis    {summary, severity, citations[], findings_count,
+              findings[] {severity, file, line, issue, suggestion, grounded, citation_ids},
+              proposed_comment}
+review       {groundedness_ok, risk_ok, permission_ok, entailment_ok, failures[],
+              reasoning}                # judge's free text: explanation, never the verdict
 approved, approver                  # identity is a token today; see Open questions
 action, result                      # what was posted, verbatim, and what came back
 ```
@@ -138,6 +144,28 @@ but the guard is pattern-based, and a durable verbatim copy of every prompt is
 still a larger surface than a hash. Hash always; text only while debugging.
 
 ---
+
+## Live status — `var/live/` (built 2026-11-16)
+
+Traces are written when a span ENDS, so they cannot say what is running now; a
+3-minute diagnosis was invisible until it finished. `app/live.py` writes the other
+half: one small JSON snapshot per graph run (`run-<thread>.json`, every stage's
+start, end, duration and status) and per ingest (`ingest-<tenant>.json`, phase,
+done/total, rate, ETA). `python -m app.monitor` renders them at
+`http://127.0.0.1:8765`, with stage estimates from the traces and finished runs
+from the audit store.
+
+- **Overwritten, not appended** — it is a view of now, not a record. The audit
+  record remains the artefact of what happened.
+- **Never evidence text** — ids, scores, counts, booleans, durations only. The
+  page is a wider surface than a file, so the diff and snippets stay out.
+- **Best-effort by contract** — a failed write costs the view, never the run.
+- **The monitor binds 127.0.0.1 and has no auth.** Same trust level as `var/`.
+  It shows the audit record's diagnosis text and findings, which is model output
+  over redacted evidence, so the localhost-only rule matters more than it did.
+- **Run history is traces joined with audit, by `run_id`.** A run that crashed
+  mid-graph writes no audit record (G9), and listing audit records alone hid
+  exactly the run worth looking at.
 
 ## Layer 3 — log-review reports
 

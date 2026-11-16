@@ -1,0 +1,194 @@
+{
+  "codebase": {
+    "name": "Miles Masterclass Backend (merged)",
+    "vcs": "github",
+    "repo": "MilesEducation-Tech/Merged_Miles_Masterclass",
+    "language": "python",
+    "root": "/repos/Merged_Miles_Masterclass",
+    "extra": "Django; Masterclass, Commerce, Subscriptions, BadgeCertificateCPE, Zoom, Notification apps in one repo",
+    "index_exclude": [
+      "Miscellaneous/Masterclass_Legacy_Data_Request",
+      ".claude",
+      ".uat-local",
+      "logs"
+    ]
+  },
+  "enabled_surfaces": [
+    "code_review"
+  ],
+  "code_review": {
+    "min_relevance_score": 0.4,
+    "severity_allowlist": [
+      "low",
+      "medium"
+    ],
+    "allowed_actions": [
+      "comment",
+      "comment+label"
+    ],
+    "escalate_to_human": true,
+    "risky_areas": [
+      "migrations",
+      "auth",
+      "permission",
+      "payment",
+      "subscription",
+      "zoom",
+      "webhook"
+    ],
+    "prepush": {
+      "_comment": "Mirrors the repo's own .claude/skills/prepush-ritual. Paths and rules from those skills.",
+      "max_line_length": 120,
+      "hygiene_suffixes": [
+        ".py"
+      ],
+      "skip_dirs": [
+        ".claude",
+        "migrations",
+        "Parked"
+      ],
+      "never_commit": [
+        "Miscellaneous/API Captures/"
+      ],
+      "read_only": [
+        "*/Code Documentation/Legacy Source Records/*"
+      ],
+      "docs": {
+        "folder": "Code Documentation",
+        "files": [
+          "DATA_MODELS.md",
+          "ADMIN_DOCS.md",
+          "CODEBASE_OVERVIEW.md",
+          "README.md"
+        ],
+        "allowed_dirs": [
+          "Legacy Source Records"
+        ],
+        "rules": [
+          {
+            "when": [
+              "models.py"
+            ],
+            "doc": "DATA_MODELS.md"
+          },
+          {
+            "when": [
+              "admin.py"
+            ],
+            "doc": "ADMIN_DOCS.md"
+          },
+          {
+            "when": [
+              "views*.py",
+              "serializers.py",
+              "urls.py",
+              "tasks.py",
+              "signals.py",
+              "services*.py",
+              "utils/"
+            ],
+            "doc": "CODEBASE_OVERVIEW.md"
+          }
+        ],
+        "changelog_heading": "^###\\s*\\[\\d{4}-\\d{2}-\\d{2}\\]\\s*-\\s*\\S"
+      },
+      "postman": {
+        "collection": "Miscellaneous/Postman Collection/Merged_Masterclass_Backend_All_APIs.postman_collection.json",
+        "environments": "Miscellaneous/Postman Collection/*environment*.json",
+        "when": [
+          "urls.py",
+          "views*.py",
+          "serializers.py"
+        ],
+        "generator_inputs": [
+          "Miscellaneous/Scripts/generate_postman_collection.py"
+        ],
+        "no_failure_example_ok": [
+          "faqs-v1",
+          "privacy-policy-v1",
+          "terms-and-conditions-v1",
+          "app-maintainance-v1",
+          "web-maintainance-v1",
+          "referral-course-options-v1"
+        ]
+      },
+      "tracker": {
+        "dir": "Miscellaneous/SB_JIRA_Tickets",
+        "owners": {
+          "Sohan Biswas": {
+            "base": "SB_JIRA_TASKS_SINCE_August_07_2026",
+            "prefix": "MO-"
+          },
+          "Usaid Khan": {
+            "base": "UK_JIRA_SEP",
+            "prefix": "MMC-"
+          },
+          "Nikhil Krishnan": {
+            "base": "NK_JIRA_TASKS_SINCE_August_07_2026",
+            "prefix": "MMO-"
+          }
+        },
+        "header": [
+          "Issue Key",
+          "Issue Type",
+          "Summary",
+          "Description",
+          "Original Estimate",
+          "Components",
+          "Labels",
+          "Sprint",
+          "Reporter",
+          "Assignee",
+          "Epic Link",
+          "Date"
+        ],
+        "required_blocks": [
+          "**Estimate**",
+          "**Time Taken**",
+          "**Variance**",
+          "**VERIFIED.**"
+        ]
+      },
+      "commit_message": {
+        "file": "commit_message.txt",
+        "max_line_length": 120,
+        "subject": "^\\w+\\(\\S+\\): .+",
+        "required_blocks": [
+          "VERIFIED."
+        ]
+      },
+      "not_checkable": [
+        [
+          "manage_py_check",
+          1,
+          "needs Django settings and a database"
+        ],
+        [
+          "pylint_pyright_regression",
+          1,
+          "needs pylint_django/pyright on the project interpreter"
+        ],
+        [
+          "isort",
+          1,
+          "needs the pinned isort binary on the project interpreter"
+        ],
+        [
+          "query_count_probe",
+          0,
+          "needs the local Postgres and a running app"
+        ],
+        [
+          "postman_regeneration",
+          2,
+          "needs a Django import to regenerate and byte-compare"
+        ],
+        [
+          "artifact_republish",
+          3,
+          "needs network access and artifact writer rights"
+        ]
+      ]
+    }
+  }
+}

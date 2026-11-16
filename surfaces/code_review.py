@@ -45,6 +45,9 @@ class CodeReviewSurface:
     # Node KEYS, resolved per tenant by the TenantStore -- not flat paths under
     # prompts/. The flat files duplicate tenants/_default/prompts/** and are not
     # the canonical copy (T19).
+    # nodes/prepush_checks.py runs the deterministic change checks only for
+    # surfaces that say so; a log window has no diff to check.
+    runs_change_checks = True
     diagnosis_prompt = "diagnosis"
     judge_prompt = "judge"
 
@@ -67,6 +70,7 @@ class CodeReviewSurface:
             "has_failing_ci": any(c.get("conclusion") == "failure"
                                   for c in checks if isinstance(c, dict)),
             "is_trivial": _is_trivial(files),
+            "revision": raw.get("revision") or {},
         }
 
     def action_type(self, diagnosis) -> str:

@@ -37,6 +37,12 @@ ruff check .                          # line-length 100, target py311
 uvicorn app.main:app --reload         # the API
 python -m jobs.daily_log_review --date YYYY-MM-DD
 python -m jobs.prune_checkpoints --keep-days 30           # dry run by default; --apply to act
+
+# Review a LOCAL change with the full graph (git_local source -> review_file sink):
+python -m tools.ingest --tenant masterclass --root ~/Dev/<repo>            # build the index once
+python -m app.review --tenant masterclass --root ~/Dev/<repo>              # staged changes
+python -m app.review --tenant masterclass --root ~/Dev/<repo> --target main...HEAD
+python -m app.monitor                 # live view: http://127.0.0.1:8765 (localhost only)
 ```
 
 Requirements files are layered: `requirements.txt` (graph + API) ⊂
@@ -209,7 +215,15 @@ Config is env-driven; see `.env.example` for the full annotated set. Key vars:
 `LLM_PROVIDER` (`lmstudio`|`openai`), `RETRIEVER`, `TENANT_STORE`, `SURFACES`,
 `CRA_PLATFORM` (`auto`|`mac`|`cuda`|`cpu`|`studio`), `CRA_PROFILE`,
 `LMSTUDIO_BASE_URL`, `DATABASE_URL`, `ENTAILER` (`lexical`|`cross_encoder`),
-`CRA_GUARD` (`regex`|`null`), `CRA_AUDIT`, `CRA_TRACE`, `CRA_DATA_DIR`.
+`CRA_GUARD` (`regex`|`null`), `CRA_AUDIT`, `CRA_TRACE`, `CRA_DATA_DIR`,
+`CRA_LLM_RETRIES` (default 2) and `CRA_LLM_RETRY_BACKOFF` (default `5,15` seconds).
+
+**Model calls retry only TRANSIENT failures** (`adapters/llm_lmstudio.py::with_retry`,
+shared by the embedder): connection errors, timeouts, 5xx, 429, and LM Studio's
+backend crash -- which it reports as **HTTP 400**, so it is matched by an allowlist of
+observed crash text. Any other 400 fails on the first attempt. The OpenAI client's
+own hidden retries are off (`max_retries=0`) so there is one loop, and every retry
+is printed to stderr and traced as `llm.retry`, which the monitor shows on the step.
 
 **The defaults that must stay real:** `CRA_AUDIT`, `CRA_TRACE` and `CRA_GUARD` all
 default to working implementations, and the `null` variants exist for tests only. A
@@ -236,6 +250,22 @@ retrieval (`RETRIEVER=indexed`, the default: dense cosine + BM25, RRF-ordered) o
 on-disk index that `tools/ingest.py` builds. `RETRIEVER=hybrid` is the 4-document
 offline demo; tests, the gate suite and the demo declare it.
 
+**Pre-push checks run on every code review** (`nodes/prepush_checks.py` ->
+`tools/change_checks.py`), modelled on the Masterclass `/prepush-ritual`: generic
+checks always, convention checks where `code_review.prepush` in a tenant's policy
+declares them. Results are `pass` / `flag` / `skip` (skip always says why). They
+reach the prompt (fenced), the review (a code-generated checklist appended AFTER the
+gate, never entailed), the audit record and the monitor. **They never route or
+decide** -- making one a veto is a fifth boolean and must be a deliberate change.
+
+**Local review works without GitHub:** `adapters/source_git_local.py` reads a diff from
+the tenant's checkout (`staged` | `<rev>` | `a..b` | `a...b`) and `ReviewFileSink`
+writes an approved review to `var/reviews/`. Selected per surface by
+`CRA_SOURCE_<SURFACE>` / `CRA_SINK_<SURFACE>` (`config.source_name_for`), which
+`app/review.py` defaults for you. Where a repo lives on THIS machine is
+`tools/codebase.codebase_root` — shared by ingest and the source, so they never
+disagree.
+
 **Stubbed deliberately and visibly** (`NotImplementedError`, never fake success): the
 four network calls in `tools/github_client.py` (the `EvidenceSource` / `ActionSink`
 adapters around it are real), the S3 read in `adapters/source_s3logs.py` (inject
@@ -250,7 +280,7 @@ Scope cuts are owned explicitly, not hidden: `docs/ARCHITECTURE_GAPS.md` (G1–G
 prioritized P0–P2), `TODO.md` (T1–T24, each with a "done when"), and the node
 docstrings. When closing one, update the tracker in the same change.
 
-## Current state — last updated 2026-11-14
+## Current state — last updated 2026-11-16
 
 Distilled from the session transcripts (`../chat-archive/`); `docs/DECISIONS.md` §8/§9 is
 the fuller narrative and the designated handoff. **Verify before relying on any of it** —
@@ -258,7 +288,7 @@ this is a snapshot, not a guarantee.
 
 **Repo:** branch `ID_SB_Ongoing_Development_Branch` on
 `github.com/SohanBiswasSB/Code-Reviewer-Agent` (private). Re-run and confirmed on this Mac
-on 2026-11-14: **ruff clean · 208 tests pass (both normally and under
+on 2026-11-16: **ruff clean · 313 tests pass (both normally and under
 `LANGGRAPH_STRICT_MSGPACK=true`) · 54/54 gates pass**, on Python 3.14.7 with langgraph
 1.2.11, pydantic 2.13.5, fastapi 0.141.1. Core deps are now pinned in `requirements.txt`.
 
@@ -276,6 +306,9 @@ Both suites are green, so CI should pass.
 - **T1 is closed** (`390f1b0`, 2026-09-11): both LLM nodes resolve from
   `config.get_llm(role)`, proven on the real graph with nothing injected. Offline
   callers declare `LLM_PROVIDER=stub`. That commit is **not pushed** yet.
+- **2026-11-16: first real review of another codebase (Masterclass)** -- see
+  DECISIONS §8 for what it exposed (diff budget, findings not posted, T26, forced
+  offline gates, Metal OOM) and §9 for the next steps (calibration first).
 - **T10 is `[~]` — built, not embedded** (2026-11-14). The indexed retriever, index,
   ingest and `doctor` checks exist and are tested offline; no tenant's index has been
   built, so `doctor` WARNs for all three and every real run escalates on empty

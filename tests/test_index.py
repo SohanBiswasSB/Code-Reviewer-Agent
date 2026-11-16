@@ -378,6 +378,23 @@ def test_ingest_builds_the_tenants_namespace(monkeypatch, repo, capsys):
     assert all(kind == "passage" for kind, _ in emb.calls)
 
 
+def test_ingest_reports_live_progress(monkeypatch, repo, tmp_path):
+    _ingest(monkeypatch, repo, FakeEmbedder())
+    snap = json.loads((tmp_path / "var" / "live" / "ingest-milesone.json").read_text())
+    assert snap["status"] == "finished" and snap["done"] == snap["total"] > 0
+    assert snap["namespace"] == "MilesEducation-Tech/Miles-USP-Backend"
+
+
+def test_a_failed_ingest_is_marked_failed(monkeypatch, repo, tmp_path):
+    class Broken(FakeEmbedder):
+        def embed(self, texts, *, kind="passage"):
+            raise ConnectionError("embedder went away")
+    with pytest.raises(ConnectionError):
+        _ingest(monkeypatch, repo, Broken())
+    snap = json.loads((tmp_path / "var" / "live" / "ingest-milesone.json").read_text())
+    assert snap["status"] == "error" and "embedder went away" in snap["error"]
+
+
 def test_ingest_redacts_before_anything_is_stored(monkeypatch, repo):
     """An index is durable: a secret embedded once stays citable until rebuilt."""
     _ingest(monkeypatch, repo, FakeEmbedder())

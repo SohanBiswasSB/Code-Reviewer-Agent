@@ -127,7 +127,7 @@ def _check_lmstudio(r: Report, models: dict) -> None:
     except ConnectionError as e:
         r.add(FAIL, "lm studio server", str(e))
         return
-    r.add(OK, "lm studio server", f"{llm_lmstudio.base_url()} ({len(loaded)} model(s) loaded)")
+    r.add(OK, "lm studio server", f"{llm_lmstudio.base_url()} ({len(loaded)} model(s) available)")
 
     for role in ("diagnosis", "judge", "utility", "embedding"):
         wanted = models.get(role)
@@ -140,7 +140,10 @@ def _check_lmstudio(r: Report, models: dict) -> None:
         else:
             # WARN not FAIL: with residency=jit_swap the model is loaded on
             # demand, so "not currently loaded" is expected rather than broken.
-            r.add(WARN, f"model: {role}", f"{wanted} not loaded (fetch: lms get {wanted})")
+            near = [m for m in loaded if wanted.lower() in m.lower()]
+            hint = (f"ambiguous or near-miss: {near} -- matching is strict (T26)"
+                    if near else f"not available (fetch: lms get {wanted})")
+            r.add(WARN, f"model: {role}", f"{wanted} {hint}")
 
 
 def _check_local_stack(r: Report) -> None:
@@ -244,18 +247,37 @@ def _check_indexes(r: Report) -> None:
               f"{m.get('chunks')} chunks / {m.get('files')} files, built {m.get('built_at')}")
 
 
+# What "model-independent" has to mean for the gate check: forced, not defaulted.
+# eval/harness.py only `setdefault`s these, so an operator can point the suite at a
+# real model on purpose -- but doctor runs inside whatever shell it is given, and
+# once someone exports LLM_PROVIDER=lmstudio to use the agent, the "model-free"
+# gate check started calling the real judge (and crashed doctor when the id did
+# not resolve). Found 2026-11-16, the first time doctor ran in a configured shell.
+OFFLINE_GATE_ENV = {"LLM_PROVIDER": "stub", "RETRIEVER": "hybrid"}
+
+
 def _check_gates(r: Report) -> None:
     """The safety gates must pass on every machine, with no model server."""
-    try:
-        from eval.harness import run
-    except Exception as e:
-        r.add(FAIL, "safety gate suite", f"import failed: {type(e).__name__}: {e}")
-        return
     import contextlib
     import io
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        code = run()
+
+    saved = {k: os.environ.get(k) for k in OFFLINE_GATE_ENV}
+    os.environ.update(OFFLINE_GATE_ENV)
+    try:
+        try:
+            from eval.harness import run
+        except Exception as e:
+            r.add(FAIL, "safety gate suite", f"import failed: {type(e).__name__}: {e}")
+            return
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = run()
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
     if code == 0:
         r.add(OK, "safety gate suite", "all gates pass (pass^k, model-independent)")
     else:

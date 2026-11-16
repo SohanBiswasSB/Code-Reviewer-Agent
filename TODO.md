@@ -640,7 +640,47 @@ prompt wording only — which the prompts themselves say is not a boundary.
 **Done when:** evidence passes through a redaction + delimiting stage before any
 LLM call, and an adversarial eval class covers injected instructions.
 
-### T26. `resolves_to()` binds a role to the WRONG model `[ ]`
+### T28. An intermittent unit-test failure, not yet identified `[ ]`
+
+Seen twice on 2026-11-16, both times while the machine was under load (LM Studio
+embedding 17k chunks, or straight after `check.py`): one test failed, then passed
+on rerun. Not reproduced in 15 full-suite runs and 60 runs of test_index.py, and
+the failing test's name was not captured either time. Ruled out: the index cache
+(now keyed on inode+size+mtime anyway), env leaks from the CLI fixtures (one such
+leak WAS found and fixed -- `monkeypatch.delenv` on an absent key restores
+nothing). Found while hunting it and fixed: a slow server's read timeout escaped
+`available_models()` as a bare TimeoutError.
+
+**Done when:** the next failure is captured WITH its name (run with `-rf`), and it
+is fixed or shown to be environmental.
+
+### T27. Tenant `risky_areas` is decorative `[ ]`
+
+Found 2026-11-16 while onboarding `masterclass`. Every `policy.json` declares
+`code_review.risky_areas`, `docs/MULTI_TENANT.md` presents it as a per-codebase
+knob, and **no code reads it**: routing uses the hardcoded `RISKY_AREAS` tuple in
+`surfaces/code_review.py`, and `Surface.classify(evidence)` is never handed the
+policy. So `milesone`'s `"credly", "zoom"` and `masterclass`'s `"subscription"`
+change nothing -- a Masterclass change touching only `Subscriptions/` routes to
+`human_review` instead of `ai_investigation`.
+
+The T5 shape again: a configured value with no caller. It fails safe (unmatched
+paths go to a human), which is exactly why it stayed invisible.
+
+**Done when:** `classify` routes on the surface's defaults UNION the tenant's
+`risky_areas`, with a test that a tenant-only area (e.g. `subscription`) reaches
+`ai_investigation`, and the policy value is pinned into state like the rest.
+
+### T26. `resolves_to()` binds a role to the WRONG model `[x]`
+
+**CLOSED 2026-11-16**, and it turned out to be worse than filed. The adapter sent
+the CONFIGURED id verbatim, so `qwen3-4b` reached LM Studio as `qwen3-4b`, which it
+rejects (400 "Invalid model identifier") -- while `doctor`, matching loosely, said
+OK. Now `resolves_to()` is strict (exact; one publisher prefix; a quant suffix;
+the `text-embedding-` role prefix; two candidates = None) and the adapter SENDS
+the resolved id, so the matcher decides which weights run. Tests pin the
+DeepSeek negative, ambiguity, every allowed affix, and the id actually sent;
+each was checked by reverting it. The original report follows.
 
 Found on 2026-09-11, the first time `doctor` was run against a live LM Studio.
 It reported the `mac_resident` judge as present:

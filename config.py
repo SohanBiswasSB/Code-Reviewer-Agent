@@ -94,6 +94,28 @@ def get_sink(name: str):
     return registry.get_adapter("sink", name)()
 
 
+def source_name_for(surface) -> str:
+    """The evidence source for a surface: its own choice unless this machine overrides.
+
+    `CRA_SOURCE_<SURFACE>` (e.g. `CRA_SOURCE_CODE_REVIEW=git_local`) swaps WHERE
+    evidence comes from without touching the surface, the same split as
+    CRA_PLATFORM: the surface says what it needs, the deployment says where to
+    get it. Per surface, not global, because one source cannot serve both a PR
+    diff and a day of S3 logs -- a global override would break whichever surface
+    it was not meant for.
+    """
+    return os.getenv(f"CRA_SOURCE_{surface.name.upper()}") or surface.source_name
+
+
+def sink_name_for(surface) -> str:
+    """The action sink for a surface, with `CRA_SINK_<SURFACE>` as the override.
+
+    The override changes only WHERE an approved action lands. It cannot change
+    whether one lands: `execute` still refuses without `approved is True`.
+    """
+    return os.getenv(f"CRA_SINK_{surface.name.upper()}") or surface.sink_name
+
+
 def get_entailer():
     """The Entailer used by the gate's third grounding check (T22).
 

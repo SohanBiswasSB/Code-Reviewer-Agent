@@ -7,6 +7,7 @@ surface names and config resolves, so GitHub -> GitLab is a config change.
 """
 from __future__ import annotations
 
+import config
 from nodes._surface import active_surface
 
 
@@ -21,9 +22,11 @@ def fetch_evidence(state: dict, source=None) -> dict:
                 "fetch_evidence: no active surface. resolve_tenant should have "
                 "put `_surface_name` in state before this node ran."
             )
-        import config
-        source = config.get_source(surface.source_name)
+        source = config.get_source(config.source_name_for(surface))
 
     # The approver's own token when present; a shared credential is a fallback.
-    raw = source.gather(target, token=state.get("github_token"))
+    # `codebase` is the tenant's binding, so a source that reads a repo (git_local)
+    # knows WHICH repo without a second, competing configuration of its own.
+    raw = source.gather(target, token=state.get("github_token"),
+                        codebase=(state.get("_policy") or {}).get("codebase") or {})
     return {"_raw": raw}

@@ -34,13 +34,14 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
-import os
 import pathlib
 import sys
 import time
 
 import config
+from app.live import IngestProgress
 from tools.chunking import chunk_file
+from tools.codebase import codebase_root
 
 SKIP_DIRS = {
     ".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".mypy_cache",
@@ -144,9 +145,7 @@ def build(tenant: str, include: list[str] | None, dry_run: bool,
     # repo lives under ~/Dev on the Mac. CRA_CODEBASE_ROOT (or --root) overrides
     # it per machine, the same split the platform layer already uses -- shared
     # config names WHAT, local config says WHERE.
-    root = pathlib.Path(
-        root_override or os.getenv("CRA_CODEBASE_ROOT") or root_setting
-    ).expanduser()
+    root = codebase_root(codebase, root_override)
     if not root.exists():
         raise SystemExit(
             f"tenant '{tenant}' points codebase.root at {root_setting!r}, which does "
@@ -158,13 +157,27 @@ def build(tenant: str, include: list[str] | None, dry_run: bool,
     print(f"namespace : {namespace}")
     print(f"root      : {root}")
 
+    # Live progress for `python -m app.monitor` -- a 10-minute embed that only
+    # prints "\r embedded 3424/17622" is invisible to anyone not tailing a log.
+    live = IngestProgress(tenant, namespace)
+    try:
+        return _build(live, tenant, namespace, root, codebase, include, dry_run, limit)
+    except BaseException as e:
+        live.end("error", error=f"{type(e).__name__}: {e}"[:300])
+        raise
+
+
+def _build(live, tenant, namespace, root, codebase, include, dry_run, limit) -> int:
+    """The body of `build`, run under a live-progress record that marks failures."""
     exclude = list(codebase.get("index_exclude") or [])
     if exclude:
         print(f"exclude   : {exclude}")
+    live.phase("scanning")
     files = iter_files(root, include, exclude)
     if limit:
         files = files[:limit]
     print(f"files     : {len(files)}")
+    live.phase("chunking", files=len(files))
 
     chunks: list[dict] = []
     for f in files:
@@ -175,6 +188,7 @@ def build(tenant: str, include: list[str] | None, dry_run: bool,
 
     # Redact BEFORE embedding. An index is durable: a secret embedded once stays
     # retrievable and quotable until the whole namespace is rebuilt.
+    live.phase("redacting", chunks=len(chunks))
     guard = config.get_input_guard()
     redacted_total = 0
     for c in chunks:
@@ -188,11 +202,13 @@ def build(tenant: str, include: list[str] | None, dry_run: bool,
             by_kind[c["kind"]] = by_kind.get(c["kind"], 0) + 1
         print(f"kinds     : {by_kind}")
         print("dry run - nothing embedded or written")
+        live.end("finished", dry_run=True, redacted=redacted_total)
         return 0
 
     embedder = config.get_embedder()
     index = config.get_index()
     print(f"embedder  : {embedder}")
+    live.phase("embedding", redacted=redacted_total, model=embedder.model)
 
     started = time.time()
     for i in range(0, len(chunks), BATCH):
@@ -202,6 +218,7 @@ def build(tenant: str, include: list[str] | None, dry_run: bool,
             c["vector"] = v
         done = min(i + BATCH, len(chunks))
         print(f"\r  embedded {done}/{len(chunks)}", end="", flush=True)
+        live.progress(done, len(chunks))
     print()
 
     # The manifest is what lets the retriever refuse a query from a different
@@ -210,9 +227,11 @@ def build(tenant: str, include: list[str] | None, dry_run: bool,
     # when the same corpus is built on the other machine.
     manifest = {"tenant": tenant, "model": embedder.model, "dims": embedder.dims,
                 "include": include or [], "exclude": exclude}
+    live.phase("writing")
     written = index.upsert(namespace, chunks, manifest=manifest)
     print(f"indexed   : {written} chunks in {time.time() - started:.1f}s")
     print(f"stats     : {index.stats(namespace)}")
+    live.end("finished", chunks=written)
     return 0
 
 

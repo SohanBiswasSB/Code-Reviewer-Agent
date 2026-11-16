@@ -25,6 +25,7 @@ import os
 
 from openai import OpenAI
 
+from adapters.llm_lmstudio import with_retry
 from adapters.platforms import base
 from registry import adapter
 
@@ -48,7 +49,8 @@ class LMStudioEmbedder:
 
     def _get_client(self):
         if self._client is None:
-            self._client = OpenAI(base_url=self.base_url, api_key="lm-studio")
+            # Same policy as the LLM adapter: one visible retry loop, not two.
+            self._client = OpenAI(base_url=self.base_url, api_key="lm-studio", max_retries=0)
         return self._client
 
     def embed(self, texts: list[str], *, kind: str = "passage") -> list[list[float]]:
@@ -61,8 +63,11 @@ class LMStudioEmbedder:
         if not texts:
             return []
         prefix = _PREFIX.get(kind, "")
-        resp = self._get_client().embeddings.create(
-            model=self.model, input=[prefix + t for t in texts])
+        # An ingest is thousands of these; one transient failure must not cost
+        # the whole build.
+        resp = with_retry(lambda: self._get_client().embeddings.create(
+            model=self.model, input=[prefix + t for t in texts]),
+            what="embedding", role="embedding", model=self.model)
         vectors = [d.embedding for d in resp.data]
         got = len(vectors[0])
         if got != self.dims:

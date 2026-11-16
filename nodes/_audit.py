@@ -14,6 +14,7 @@ When G9 adds failure edges, both should collapse onto one terminal audit path.
 """
 from __future__ import annotations
 
+import os
 import uuid
 
 
@@ -21,6 +22,57 @@ def _model(obj):
     """Pydantic model -> dict, anything else unchanged."""
     dump = getattr(obj, "model_dump", None)
     return dump() if callable(dump) else obj
+
+
+def _runtime() -> dict:
+    """Which models and plugs THIS run used, resolved in the run's own process.
+
+    Recorded because the profile is env-driven: the monitor, a later shell or a
+    teammate reading the record cannot reconstruct it, and a diagnosis cannot be
+    judged without knowing which model wrote it. Never raises -- a profile that
+    does not resolve must not be why the record is lost.
+    """
+    try:
+        # Function-level: `config` imports `nodes` (via adapters), so a module-
+        # level import here is circular -- same reason `write` defers it.
+        import config
+        from adapters.llm_lmstudio import base_url
+        out = {"platform": type(config.get_platform()).__name__,
+               "profile": config.get_profile(),
+               "llm_provider": os.getenv("LLM_PROVIDER", "lmstudio"),
+               "retriever": os.getenv("RETRIEVER", "indexed"),
+               "entailer": os.getenv("ENTAILER", "lexical"),
+               "model_server": base_url()}
+        out["models"] = config.get_models()
+        if out["entailer"] == "cross_encoder":
+            out["models"]["entailer"] = os.getenv("ENTAILER_MODEL", "")
+        return out
+    except Exception as e:                    # noqa: BLE001 -- see docstring
+        return {"error": f"{type(e).__name__}: {e}"[:200]}
+
+
+def _gates(pol: dict) -> dict:
+    """The EFFECTIVE bars the gate compared against: the policy's value, else the
+    node default that `independent_review` falls back to.
+
+    A failure string says "0.1283 < 0.25"; without this, a record read after the
+    policy changed cannot say which bar the run was held to. Recording only the
+    policy's keys showed "entailment >= default" for every tenant that leaves it
+    unset -- i.e. it hid the one bar that has escalated every real run so far.
+    """
+    try:
+        # Function-level: independent_review imports `config` at module level,
+        # and `config` imports `nodes` -- circular, as `_runtime` notes.
+        from nodes import independent_review as ir
+        defaults = {"min_relevance_score": ir.MIN_RELEVANCE_SCORE,
+                    "min_entailment_score": ir.MIN_ENTAILMENT_SCORE,
+                    "severity_allowlist": sorted(ir.SEVERITY_ALLOWLIST),
+                    "allowed_actions": sorted(ir.ALLOWED_ACTIONS)}
+    except Exception:                         # noqa: BLE001 -- never lose the record
+        defaults = {}
+    return {k: pol.get(k, defaults.get(k)) for k in (
+        "min_relevance_score", "min_entailment_score", "severity_allowlist",
+        "allowed_actions") if k in pol or k in defaults}
 
 
 def build_record(state: dict, outcome: str) -> dict:
@@ -52,6 +104,8 @@ def build_record(state: dict, outcome: str) -> dict:
         # `injection_suspected` is the signal worth watching, since the guard
         # deliberately reports injection phrasing instead of rewriting it.
         "guard": state.get("_guard") or {},
+        # Deterministic check results (status + location + message, no code).
+        "checks": list(state.get("_checks") or []),
         # The retriever's OWN scores. This is the field that earns the layer:
         # T21 -- the grounding gate inert against real retrieval -- would have
         # been one line of this, showing every score as 1.0 on every query.
@@ -67,18 +121,35 @@ def build_record(state: dict, outcome: str) -> dict:
         "result": state.get("result"),
     }
 
+    record["gates"] = _gates(state.get("_policy") or {})
+    record["runtime"] = _runtime()
+
     if diag is not None:
         d = _model(diag)
+        findings = [f for f in (d.get("findings") or []) if isinstance(f, dict)]
         record["diagnosis"] = {
             "summary": d.get("summary"),
             "severity": d.get("severity"),
             "citations": d.get("citations", []),
-            "findings_count": len(d.get("findings", []) or []),
+            "findings_count": len(findings),
+            # The findings themselves, not just their number. An ESCALATED run
+            # posts nothing and writes no review file, so until this was recorded
+            # the five things the model said about the code existed nowhere once
+            # the process exited -- which is exactly the run a human must look at.
+            # Model output over evidence the guard already redacted (T12).
+            "findings": [{k: f.get(k) for k in (
+                "severity", "file", "line", "issue", "suggestion", "grounded",
+                "citation_ids")} for f in findings],
+            "proposed_comment": d.get("proposed_comment"),
         }
     if review is not None:
         r = _model(review)
         booleans = ("groundedness_ok", "risk_ok", "permission_ok", "entailment_ok")
         record["review"] = {k: r.get(k) for k in (*booleans, "failures")}
+        # The judge's free text. Recorded as an explanation for the human, never
+        # as an input to `decision` (invariant 1) -- that is recomputed below
+        # from the booleans alone.
+        record["review"]["reasoning"] = r.get("reasoning")
         # `decision` is a PROPERTY, so it survives on a model and vanishes on a
         # dict — and state types really do come back as dicts across a resume
         # under LANGGRAPH_STRICT_MSGPACK. Recompute from the booleans rather than

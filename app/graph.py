@@ -1,9 +1,9 @@
-"""Build the LangGraph StateGraph. Requires `langgraph` (only imported when you
-run the server/graph — the eval suite imports nodes directly and needs nothing).
+"""Build the LangGraph StateGraph. Imports langgraph and every node at module level
+(the project rule); the gate suite imports nodes directly and never loads this.
 
     request {tenant, surface, target}
       -> resolve_tenant     (tenant policy + surface pinned into state, ONCE)
-      -> fetch_evidence -> normalize_evidence -> classify   (RULE-BASED, no LLM)
+      -> fetch_evidence -> normalize_evidence -> prepush_checks -> classify  (no LLM)
            deterministic     -> await_approval -> execute -> audit -> END
            human_review      -> audit -> END                 (no LLM touches it)
            ai_investigation  -> generate_diagnosis            (RAG-grounded)
@@ -42,6 +42,24 @@ restart.
 """
 from __future__ import annotations
 
+import time
+
+from langgraph.graph import END, START, StateGraph
+
+import config
+from app import live
+from app.state import TriageState
+from nodes.audit import audit
+from nodes.await_approval import await_approval
+from nodes.classify import classify
+from nodes.execute import execute
+from nodes.fetch_evidence import fetch_evidence
+from nodes.generate_diagnosis import generate_diagnosis
+from nodes.independent_review import independent_review
+from nodes.normalize_evidence import normalize_evidence
+from nodes.prepush_checks import prepush_checks
+from nodes.resolve_tenant import resolve_tenant
+
 
 def _traced(name, fn, tracer):
     """Wrap a node in a span (T23).
@@ -55,15 +73,39 @@ def _traced(name, fn, tracer):
     on `run_id`.
     """
     def wrapped(state, *args, **kwargs):
-        with tracer.span(f"node.{name}",
-                         run_id=state.get("_run_id"),
-                         tenant=state.get("tenant"),
-                         surface=state.get("surface") or state.get("_surface_name"),
-                         target=state.get("target"),
-                         route=state.get("route")):
-            return fn(state, *args, **kwargs)
+        # Live status (app/live.py) is the START half the trace lacks: a span row
+        # is written when a node ENDS, so a 3-minute diagnosis was invisible
+        # until it was over. Same single insertion point, same reason.
+        _live(state, name, "running")
+        started = time.perf_counter()
+        try:
+            with tracer.span(f"node.{name}",
+                             run_id=state.get("_run_id"),
+                             tenant=state.get("tenant"),
+                             surface=state.get("surface") or state.get("_surface_name"),
+                             target=state.get("target"),
+                             route=state.get("route")):
+                out = fn(state, *args, **kwargs)
+        except BaseException as e:
+            ms = (time.perf_counter() - started) * 1000
+            if type(e).__name__ in ("GraphInterrupt", "Interrupt", "GraphBubbleUp"):
+                _live(state, name, "waiting", duration_ms=ms)    # suspended, not failed
+            else:
+                _live(state, name, "error", duration_ms=ms, error=f"{type(e).__name__}: {e}")
+            raise
+        ms = (time.perf_counter() - started) * 1000
+        _live(state, name, "ok", duration_ms=ms, detail=live.summarize(name, out))
+        return out
     wrapped.__name__ = name
     return wrapped
+
+
+def _live(state, name, status, **kw):
+    """Live status, which must never be the reason a run fails. See app/live.py."""
+    try:
+        live.stage(state, name, status, **kw)
+    except Exception:  # noqa: BLE001 -- observability is best-effort by contract
+        pass
 
 
 def build_graph(checkpointer=None, tracer=None):
@@ -83,27 +125,14 @@ def build_graph(checkpointer=None, tracer=None):
     # The tracer, unlike the checkpointer, is OPTIONAL by design: losing a span
     # costs a debugging aid, losing a checkpoint costs a pending approval.
     if tracer is None:
-        import config
         tracer = config.get_tracer()
-
-    from langgraph.graph import END, START, StateGraph
-
-    from app.state import TriageState
-    from nodes.audit import audit
-    from nodes.await_approval import await_approval
-    from nodes.classify import classify
-    from nodes.execute import execute
-    from nodes.fetch_evidence import fetch_evidence
-    from nodes.generate_diagnosis import generate_diagnosis
-    from nodes.independent_review import independent_review
-    from nodes.normalize_evidence import normalize_evidence
-    from nodes.resolve_tenant import resolve_tenant
 
     g = StateGraph(TriageState)
     for name, fn in [
         ("resolve_tenant", resolve_tenant),
         ("fetch_evidence", fetch_evidence),
         ("normalize_evidence", normalize_evidence),
+        ("prepush_checks", prepush_checks),
         ("classify", classify),
         ("generate_diagnosis", generate_diagnosis),
         ("independent_review", independent_review),
@@ -116,7 +145,8 @@ def build_graph(checkpointer=None, tracer=None):
     g.add_edge(START, "resolve_tenant")
     g.add_edge("resolve_tenant", "fetch_evidence")
     g.add_edge("fetch_evidence", "normalize_evidence")
-    g.add_edge("normalize_evidence", "classify")
+    g.add_edge("normalize_evidence", "prepush_checks")
+    g.add_edge("prepush_checks", "classify")
     # Every terminal path goes through `audit` (G6). human_review and
     # escalate_to_human are OUTCOMES, not absences of one -- a run that routed
     # straight to a human is exactly as worth recording as one that posted.

@@ -3,6 +3,8 @@
 No model is called here. These tests cover the wiring that makes it *impossible*
 to accidentally review a diagnosis with the model that produced it.
 """
+import os
+
 import pytest
 
 import config
@@ -114,29 +116,83 @@ def test_model_id_matching_tolerates_lm_studio_naming(wanted, loaded, expected):
     assert llm_lmstudio.resolves_to(wanted, loaded) == expected
 
 
-def test_calling_a_model_without_the_client_says_so_clearly(monkeypatch):
-    """The failure must name requirements-local.txt, not just ImportError.
+@pytest.mark.parametrize("wanted,loaded", [
+    # T26: a different model whose name merely CONTAINS the configured id
+    ("qwen3-8b", ["deepseek/deepseek-r1-0528-qwen3-8b"]),
+    ("qwen3-4b", ["qwen/qwen3-4b-thinking"]),
+    # two candidates is a decision the matcher must not make silently
+    ("qwen3-4b", ["qwen/qwen3-4b", "lmstudio-community/qwen3-4b"]),
+])
+def test_model_id_matching_refuses_substrings_and_ambiguity(wanted, loaded):
+    assert llm_lmstudio.resolves_to(wanted, loaded) is None
 
-    Forces the real adapter: `conftest._offline_llm` points LLM_PROVIDER at the
-    stub so no test reaches a live server, and the stub has no openai import to
-    fail on. This test is specifically ABOUT the LM Studio adapter's error
-    message, so it asks for it by name.
-    """
-    import builtins
 
+@pytest.mark.parametrize("wanted,loaded,expected", [
+    ("bge-m3", ["text-embedding-bge-m3"], "text-embedding-bge-m3"),          # role prefix
+    ("qwen3-4b", ["qwen/qwen3-4b@8bit"], "qwen/qwen3-4b@8bit"),                # both affixes
+    ("mistralai/ministral-3-14b-reasoning", ["mistralai/ministral-3-14b-reasoning"],
+     "mistralai/ministral-3-14b-reasoning"),                                  # fully qualified
+])
+def test_model_id_matching_keeps_the_affixes_that_must_work(wanted, loaded, expected):
+    assert llm_lmstudio.resolves_to(wanted, loaded) == expected
+
+
+def test_the_adapter_sends_the_resolved_id_not_the_configured_one(monkeypatch):
+    """LM Studio rejects `qwen3-4b`; it serves `qwen/qwen3-4b`. Found when the
+    first configured shell ran doctor: the call failed with 400 while doctor's
+    presence check (which resolved) said OK."""
+    monkeypatch.setattr(llm_lmstudio, "available_models",
+                        lambda url=None, timeout=2.0: ["qwen/qwen3-4b", "qwen/qwen3-1.7b"])
+    sent = {}
+
+    class FakeCompletions:
+        def create(self, **kw):
+            sent.update(kw)
+            msg = type("M", (), {"content": "ok"})
+            return type("R", (), {"choices": [type("C", (), {"message": msg})]})
+
+    llm = llm_lmstudio.LMStudioLLM("qwen3-4b", role="judge")
+    llm._client = type("Cl", (), {"chat": type("Ch", (), {"completions": FakeCompletions()})})
+    assert llm.complete("sys", "user") == "ok"
+    assert sent["model"] == "qwen/qwen3-4b"
+
+
+def test_an_unresolvable_model_fails_with_the_near_misses(monkeypatch):
+    monkeypatch.setattr(llm_lmstudio, "available_models",
+                        lambda url=None, timeout=2.0: ["deepseek/deepseek-r1-0528-qwen3-8b"])
+    with pytest.raises(LookupError, match="deepseek-r1-0528-qwen3-8b"):
+        llm_lmstudio.LMStudioLLM("qwen3-8b", role="judge").resolved_model()
+
+
+def test_doctor_gate_check_is_model_free_even_in_a_configured_shell(monkeypatch):
+    """The shell that RUNS the agent exports LLM_PROVIDER=lmstudio; doctor's gate
+    check must still use the stub, and must leave the shell's value alone."""
+    from app import doctor
     monkeypatch.setenv("LLM_PROVIDER", "lmstudio")
+    monkeypatch.setattr(llm_lmstudio.LMStudioLLM, "complete",
+                        lambda *a, **k: pytest.fail("the gate check reached a real model"))
+    r = doctor.Report()
+    doctor._check_gates(r)
+    assert r.lines[-1][0] == doctor.OK
+    assert os.environ["LLM_PROVIDER"] == "lmstudio"
 
-    real_import = builtins.__import__
 
-    def blocked(name, *args, **kwargs):
-        if name == "openai":
-            raise ModuleNotFoundError("no module named 'openai'")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", blocked)
-    llm = config.get_llm("judge")
-    with pytest.raises(ModuleNotFoundError, match="requirements-local.txt"):
-        llm.complete("sys", "user")
+def test_a_server_that_accepts_but_never_answers_is_not_reachable():
+    """A read timeout is a bare TimeoutError, not a URLError; it must still come
+    back as the actionable ConnectionError rather than crash doctor."""
+    import socket
+    import threading
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    held = []
+    threading.Thread(target=lambda: held.append(srv.accept()), daemon=True).start()
+    try:
+        with pytest.raises(ConnectionError, match="lms server start"):
+            llm_lmstudio.available_models(f"http://127.0.0.1:{srv.getsockname()[1]}/v1",
+                                          timeout=0.3)
+    finally:
+        srv.close()
 
 
 # ── the wiring itself (T1) ───────────────────────────────────────────────────

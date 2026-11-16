@@ -13,16 +13,26 @@ Two things worth knowing about this file:
     requirements-local.txt is installed. A diagnostic that needs the dependency
     it is diagnosing is not much of a diagnostic.
 
-  · The `openai` import is lazy, inside the call. Importing this module must not
-    require the package, or `config` — and therefore the dependency-free eval
-    suite — stops importing on a bare environment.
+  · **The model id SENT is the id LM Studio reports, resolved strictly (T26).**
+    Profiles name models briefly (`qwen3-4b`); LM Studio's API rejects anything
+    but its own identifier (`qwen/qwen3-4b`). The adapter used to send the
+    configured id verbatim, so `doctor` (which matched loosely) reported OK while
+    every real call failed with "Invalid model identifier". Resolving makes the
+    matcher load-bearing for WHICH WEIGHTS RUN -- which is why it is strict: the
+    old `w in g` clause would have bound `qwen3-8b` to a DeepSeek-R1 distill and
+    then actually called it.
 """
 from __future__ import annotations
 
 import json as _json
 import os
+import sys
+import time
 import urllib.error
 import urllib.request
+
+import openai
+from openai import OpenAI
 
 from registry import adapter
 
@@ -33,6 +43,97 @@ PLACEHOLDER_KEY = "lm-studio"
 
 def base_url() -> str:
     return os.getenv("LMSTUDIO_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
+
+
+# ── retry ────────────────────────────────────────────────────────────────────
+# A model call is a pure function of its prompt (temperature 0, no side effects),
+# so repeating one is safe -- the question is only WHICH failures are worth it.
+#
+# The OpenAI client already retried transport errors, 429 and 5xx twice, silently.
+# What it never retried is the failure that actually killed a real run
+# (2026-11-16, 2:59 PM): LM Studio's MLX backend crashed mid-generation and the
+# server reported that as **HTTP 400** -- "Error in iterating prediction stream:
+# ... fatal exception in the backend generation thread". A 400 means "your request
+# is wrong" everywhere else, so nothing retried it, and three minutes of diagnosis
+# were thrown away by a one-off crash in the judge call.
+#
+# So the policy lives here, in one place, with the client's own retries turned
+# off (`max_retries=0`) -- two nested retry loops multiply, and the hidden one
+# never shows up in a trace.
+#
+# The 400 case is an ALLOWLIST of observed crash text, like ROLE_PREFIXES: a
+# genuinely bad request (unknown model id, schema rejected) must fail on the
+# first attempt, because retrying it only triples the time to the same error.
+CRASH_SIGNATURES = (
+    "Error in iterating prediction stream",
+    "backend generation thread",
+)
+DEFAULT_RETRIES = 2                 # i.e. up to 3 attempts
+DEFAULT_BACKOFF_S = (5.0, 15.0)     # long enough for LM Studio to reload a crashed model
+
+
+def transient_reason(e: BaseException) -> str | None:
+    """Why `e` is worth another attempt, or None if it must propagate now."""
+    if isinstance(e, openai.APITimeoutError):
+        return "the model server timed out"
+    if isinstance(e, openai.APIConnectionError):
+        return "could not reach the model server"
+    if isinstance(e, (openai.InternalServerError, openai.RateLimitError)):
+        return f"the model server answered {type(e).__name__}"
+    if isinstance(e, openai.BadRequestError) and any(s in str(e) for s in CRASH_SIGNATURES):
+        return "LM Studio's backend crashed mid-generation"
+    return None
+
+
+def retry_policy() -> tuple[int, tuple[float, ...]]:
+    """(retries, backoff seconds) from CRA_LLM_RETRIES / CRA_LLM_RETRY_BACKOFF."""
+    retries = max(0, int(os.getenv("CRA_LLM_RETRIES", str(DEFAULT_RETRIES))))
+    raw = os.getenv("CRA_LLM_RETRY_BACKOFF")
+    waits = tuple(float(x) for x in raw.split(",") if x.strip()) if raw else ()
+    return retries, waits or DEFAULT_BACKOFF_S
+
+
+def _announce_retry(what: str, role, model, next_attempt: int, total: int, why: str,
+                    error: BaseException, wait: float, sleep) -> None:
+    """Say so on stderr and in the trace, then wait. A retry nobody can see is how
+    a flaky server stays flaky: the run "just took longer"."""
+    print(f"[retry] {what} ({role or '-'}, {model}): {why}. "
+          f"Attempt {next_attempt} of {total} in {wait:g}s.", file=sys.stderr, flush=True)
+    try:
+        # Function-level: `config` imports `adapters`, so this is circular at
+        # module level.
+        import config
+        tracer = config.get_tracer()
+    except Exception:                     # noqa: BLE001 -- observability is best-effort
+        tracer = None
+    if tracer is None:
+        sleep(wait)
+        return
+    with tracer.span("llm.retry", what=what, role=role, model=model, attempt=next_attempt,
+                     of=total, reason=why, wait_s=wait,
+                     error=f"{type(error).__name__}: {error}"[:500]):
+        sleep(wait)
+
+
+def with_retry(call, *, what: str, role: str | None = None, model: str | None = None,
+               sleep=time.sleep):
+    """Run `call()`; on a TRANSIENT failure wait and try again, up to the policy.
+
+    Anything not in `transient_reason` propagates on the first attempt, and the
+    last transient one propagates unchanged once attempts run out -- the caller
+    sees the real error, never a wrapper that hides its type.
+    """
+    retries, waits = retry_policy()
+    for attempt in range(retries + 1):
+        try:
+            return call()
+        except openai.OpenAIError as e:
+            why = transient_reason(e)
+            if why is None or attempt == retries:
+                raise
+            _announce_retry(what, role, model, attempt + 2, retries + 1, why, e,
+                            waits[min(attempt, len(waits) - 1)], sleep)
+    raise AssertionError("unreachable")   # the loop always returns or raises
 
 
 def available_models(url: str | None = None, timeout: float = 2.0) -> list[str]:
@@ -46,30 +147,53 @@ def available_models(url: str | None = None, timeout: float = 2.0) -> list[str]:
     try:
         with urllib.request.urlopen(endpoint, timeout=timeout) as resp:
             payload = _json.loads(resp.read().decode("utf-8"))
-    except urllib.error.URLError as e:
+    except (urllib.error.URLError, OSError) as e:
+        # OSError too: a server that ACCEPTS and then answers slowly raises a bare
+        # TimeoutError while reading, which urlopen does not wrap in URLError -- a
+        # busy LM Studio, or the Studio over Tailscale, crashed doctor instead.
         raise ConnectionError(
-            f"LM Studio is not reachable at {endpoint} ({e.reason}). "
+            f"LM Studio is not reachable at {endpoint} ({getattr(e, 'reason', e)}). "
             f"Start it with `lms server start`."
         ) from None
     return [m.get("id", "") for m in payload.get("data", [])]
 
 
-def resolves_to(wanted: str, loaded: list[str]) -> str | None:
-    """Match a configured model id against what LM Studio reports.
+# Role prefixes LM Studio puts in front of a model's own name. An ALLOWLIST, not
+# a pattern: each entry is a naming convention someone has actually observed.
+ROLE_PREFIXES = ("text-embedding-",)
 
-    Exact match first, then a prefix/suffix match, because LM Studio's reported
-    id often carries the publisher or the quantisation that the configured id
-    omits ("qwen3-8b" vs "qwen/qwen3-8b" vs "qwen3-8b@q4_k_m"). Returns the
-    loaded id, or None.
+
+def _core(model_id: str) -> str:
+    """A reported id with ONE publisher prefix and any quantisation suffix removed.
+
+    `qwen/qwen3-4b@8bit` -> `qwen3-4b`. Only the outermost of each is stripped, and
+    nothing else: what remains must then equal the configured id EXACTLY.
+    """
+    core = model_id.lower()
+    if "/" in core:
+        core = core.split("/", 1)[1]
+    return core.split("@", 1)[0]
+
+
+def resolves_to(wanted: str, loaded: list[str]) -> str | None:
+    """The one id LM Studio serves for `wanted`, or None. Strict, by design (T26).
+
+    Matches: the exact id; the id behind one publisher prefix (`qwen/qwen3-4b`);
+    the id with a quantisation suffix (`qwen3-4b@8bit`); the id behind an
+    allowlisted role prefix (`text-embedding-bge-m3`). Never a substring --
+    `qwen3-8b` must not resolve to `deepseek/deepseek-r1-0528-qwen3-8b`, a
+    different model fine-tuned FROM it.
+
+    Two different candidates is None, not "the first one": choosing between two
+    models is a decision, and silently making it is how a profile ends up
+    labelling results with weights that never ran.
     """
     if wanted in loaded:
         return wanted
     w = wanted.lower()
-    for got in loaded:
-        g = got.lower()
-        if g == w or g.endswith("/" + w) or g.startswith(w + "@") or w in g:
-            return got
-    return None
+    forms = {w} | {prefix + w for prefix in ROLE_PREFIXES}
+    matches = sorted({got for got in loaded if got.lower() == w or _core(got) in forms})
+    return matches[0] if len(matches) == 1 else None
 
 
 DEFAULT_TEMPERATURE = {
@@ -136,19 +260,33 @@ class LMStudioLLM:
         # Leave room for the response inside the platform's context budget.
         self.max_tokens = int(os.getenv("CRA_MAX_TOKENS", "2048"))
         self._client = None
+        self._resolved: str | None = None
 
     def _get_client(self):
         if self._client is None:
-            try:
-                from openai import OpenAI
-            except ModuleNotFoundError:
-                raise ModuleNotFoundError(
-                    "the openai package is required to CALL a model "
-                    "(pip install -r requirements-local.txt). Note that "
-                    "`doctor` deliberately works without it."
-                ) from None
-            self._client = OpenAI(base_url=self.base_url, api_key=PLACEHOLDER_KEY)
+            # max_retries=0: the retry policy is `with_retry`, in one visible place.
+            self._client = OpenAI(base_url=self.base_url, api_key=PLACEHOLDER_KEY,
+                                  max_retries=0)
         return self._client
+
+    def resolved_model(self) -> str:
+        """The identifier LM Studio actually serves for `self.model`. Cached per instance.
+
+        Raises rather than guessing when the configured id matches nothing, or more
+        than one thing, and names the near misses so the fix is obvious.
+        """
+        if self._resolved is None:
+            loaded = available_models(self.base_url)
+            got = resolves_to(self.model, loaded)
+            if got is None:
+                near = [m for m in loaded if self.model.lower() in m.lower()]
+                raise LookupError(
+                    f"model {self.model!r} (role {self.role}) does not resolve to exactly "
+                    f"one model served at {self.base_url}. Near misses: {near or 'none'}. "
+                    f"Matching is strict on purpose (T26): load it with `lms load`, or "
+                    f"name the exact identifier in the profile.")
+            self._resolved = got
+        return self._resolved
 
     def complete(self, system: str, user: str, *, json_schema: dict | None = None) -> str:
         """Return raw text. Parsing and validation belong to the caller.
@@ -159,7 +297,7 @@ class LMStudioLLM:
         is what stops a provider adapter from quietly becoming a decision-maker.
         """
         kwargs: dict = {
-            "model": self.model,
+            "model": self.resolved_model(),
             "messages": [
                 {"role": "system", "content": system},
                 # The untrusted material (diff, log lines, issue text) arrives in
@@ -179,7 +317,8 @@ class LMStudioLLM:
                     "strict": True,
                 },
             }
-        resp = self._get_client().chat.completions.create(**kwargs)
+        resp = with_retry(lambda: self._get_client().chat.completions.create(**kwargs),
+                          what="completion", role=self.role, model=kwargs["model"])
         return resp.choices[0].message.content or ""
 
     def __repr__(self) -> str:  # shows up in doctor output and tracebacks

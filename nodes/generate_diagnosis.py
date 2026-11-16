@@ -80,7 +80,7 @@ def generate_diagnosis(state: dict, llm=None, retriever=None) -> dict:
     # cannot leave the shape. The schema deliberately omits citation scores --
     # see schemas.diagnosis.diagnosis_request_schema.
     user_turn, guard_report = render_evidence(
-        ev, hits, tenant=state.get("tenant") or "_default")
+        ev, hits, tenant=state.get("tenant") or "_default", checks=state.get("_checks"))
     raw = llm.complete(system, user_turn, json_schema=diagnosis_request_schema())
     diag = _parse_diagnosis(raw, hits)
 

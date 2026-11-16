@@ -11,6 +11,7 @@ here still cannot bypass approval.
 """
 from __future__ import annotations
 
+import config
 from nodes._surface import active_surface
 
 
@@ -28,8 +29,7 @@ def execute(state: dict, sink=None) -> dict:
         surface = active_surface(state)
         if surface is None:
             raise ValueError("execute: no active surface, so no sink to write through")
-        import config
-        sink = config.get_sink(surface.sink_name)
+        sink = config.get_sink(config.sink_name_for(surface))
 
     # Run METADATA, never content. The action itself is posted verbatim and is
     # not touched here; `context` only tells a per-tenant sink (the daily report)

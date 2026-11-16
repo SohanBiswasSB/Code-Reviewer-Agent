@@ -64,3 +64,25 @@ an index is a durable copy, so excluding such files is the only complete fix.
 on the same conditions — an ungroundable diagnosis, a risk/permission miss, or an explicit
 `escalate_to_human: true` safety default. It's the org-wide safety net; a codebase tunes
 its *thresholds and prompts*, but the escalate route is always there for A and B alike.
+
+## Pre-push checks per codebase (`code_review.prepush`)
+
+Every code review runs the GENERIC change checks -- N+1 queries in loops, new
+warning-silencing comments, line length / ASCII on added lines, new undocumented
+HTTP handlers, imports of files git does not track. A codebase that has its own
+pre-push conventions declares them, and the reviewer then FLAGS a change that
+skipped them:
+
+| key | what it enforces |
+|---|---|
+| `max_line_length`, `hygiene_suffixes`, `skip_dirs` | tune the generic checks |
+| `never_commit`, `read_only` | path prefixes / globs the change must not touch |
+| `docs` | per-app doc folder; which changed file needs which doc; dated change-log entry; the exact file set |
+| `postman` | collection + environments; API-file triggers; generator inputs; no secret values |
+| `tracker` | owner (git author) -> tracker file + key prefix; CSV header; required description blocks |
+| `commit_message` | file (staged) or the commit itself; subject regex; required blocks; no attribution |
+| `not_checkable` | `[name, step, why]` rows the reviewer cannot run (DB, Django, network) -- reported as `skip` |
+
+`tenants/masterclass/policy.json` is the worked example: it mirrors that repo's
+`.claude/skills/prepush-ritual`. A codebase without a block is held to the generic
+checks only -- it is never flagged for lacking someone else's conventions.

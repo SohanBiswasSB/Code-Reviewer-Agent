@@ -188,7 +188,10 @@ class LocalVectorIndex:
         if not vec_path.exists():
             self._cache.pop(namespace, None)
             return None, [], {}
-        stamp = vec_path.stat().st_mtime_ns
+        # inode + size + mtime: a rebuild renames a NEW file into place, so its
+        # inode changes even if two writes land inside one timestamp tick.
+        st = vec_path.stat()
+        stamp = (st.st_ino, st.st_size, st.st_mtime_ns)
         hit = self._cache.get(namespace)
         if hit and hit[0] == stamp:
             return hit[1], hit[2], hit[3]
