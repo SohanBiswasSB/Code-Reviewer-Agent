@@ -17,6 +17,10 @@ from __future__ import annotations
 import os
 import uuid
 
+import config
+from errors import CONFIG_ERRORS, WRITE_ERRORS
+from nodes.independent_review import effective_gates
+
 
 def _model(obj):
     """Pydantic model -> dict, anything else unchanged."""
@@ -33,21 +37,20 @@ def _runtime() -> dict:
     does not resolve must not be why the record is lost.
     """
     try:
-        # Function-level: `config` imports `nodes` (via adapters), so a module-
-        # level import here is circular -- same reason `write` defers it.
-        import config
-        from adapters.llm_lmstudio import base_url
         out = {"platform": type(config.get_platform()).__name__,
                "profile": config.get_profile(),
                "llm_provider": os.getenv("LLM_PROVIDER", "lmstudio"),
                "retriever": os.getenv("RETRIEVER", "indexed"),
                "entailer": os.getenv("ENTAILER", "lexical"),
-               "model_server": base_url()}
+               "model_server": config.model_server()}
         out["models"] = config.get_models()
         if out["entailer"] == "cross_encoder":
             out["models"]["entailer"] = os.getenv("ENTAILER_MODEL", "")
         return out
-    except Exception as e:                    # noqa: BLE001 -- see docstring
+    except CONFIG_ERRORS as e:
+        # An unresolvable profile/platform is recorded, not fatal: the record
+        # must still be written. Anything outside CONFIG_ERRORS is a bug and
+        # propagates -- the activity log keeps its traceback.
         return {"error": f"{type(e).__name__}: {e}"[:200]}
 
 
@@ -61,18 +64,11 @@ def _gates(pol: dict) -> dict:
     unset -- i.e. it hid the one bar that has escalated every real run so far.
     """
     try:
-        # Function-level: independent_review imports `config` at module level,
-        # and `config` imports `nodes` -- circular, as `_runtime` notes.
-        from nodes import independent_review as ir
-        defaults = {"min_relevance_score": ir.MIN_RELEVANCE_SCORE,
-                    "min_entailment_score": ir.MIN_ENTAILMENT_SCORE,
-                    "severity_allowlist": sorted(ir.SEVERITY_ALLOWLIST),
-                    "allowed_actions": sorted(ir.ALLOWED_ACTIONS)}
-    except Exception:                         # noqa: BLE001 -- never lose the record
-        defaults = {}
-    return {k: pol.get(k, defaults.get(k)) for k in (
-        "min_relevance_score", "min_entailment_score", "severity_allowlist",
-        "allowed_actions") if k in pol or k in defaults}
+        return effective_gates(pol)
+    except (*CONFIG_ERRORS, TypeError) as e:
+        # A policy value of the wrong type (e.g. a threshold given as a list)
+        # must not cost the record; the bars are then reported as unknown.
+        return {"error": f"{type(e).__name__}: {e}"[:200]}
 
 
 def build_record(state: dict, outcome: str) -> dict:
@@ -173,11 +169,11 @@ def write(state: dict, outcome: str, sink=None) -> dict:
     """
     record = build_record(state, outcome)
     if sink is None:
-        import config
         sink = config.get_audit_sink()
     try:
         sink.record(record)
-    except Exception as e:                    # noqa: BLE001 -- see docstring
+    except WRITE_ERRORS as e:
+        # Disk or serialisation failure: said in state, never swallowed silently.
         return {"_audit": {"written": False, "run_id": record["run_id"],
                            "error": f"{type(e).__name__}: {e}"}}
     return {"_audit": {"written": True, "run_id": record["run_id"],

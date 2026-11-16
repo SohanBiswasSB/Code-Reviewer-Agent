@@ -29,6 +29,8 @@ import os
 import platform as _platform
 import sys
 
+from errors import CONFIG_ERRORS
+
 OK, WARN, FAIL = "OK  ", "WARN", "FAIL"
 
 
@@ -168,7 +170,7 @@ def _check_tenants(r: Report) -> None:
     try:
         store = config.get_tenant_store()
         tenants = store.tenants()
-    except Exception as e:
+    except CONFIG_ERRORS as e:          # missing dir, bad JSON, unknown store
         r.add(FAIL, "tenant store", f"{type(e).__name__}: {e}")
         return
     r.add(OK, "tenant store", f"{len(tenants)} codebase(s): {tenants}")
@@ -177,7 +179,7 @@ def _check_tenants(r: Report) -> None:
         for surface in config.enabled_surfaces():
             try:
                 pol = store.policy(t, surface)
-            except Exception as e:
+            except CONFIG_ERRORS as e:      # unreadable or malformed policy.json
                 r.add(FAIL, f"policy: {t}/{surface}", f"{type(e).__name__}: {e}")
                 continue
             if surface not in pol.get("enabled_surfaces", []):
@@ -222,14 +224,14 @@ def _check_indexes(r: Report) -> None:
     try:
         store = config.get_tenant_store()
         tenants = store.tenants()
-    except Exception:
+    except CONFIG_ERRORS:
         return                      # _check_tenants already reported it
     root = _root()
     for t in tenants:
         try:
             repo = (store.policy(t, "code_review").get("codebase") or {}).get("repo")
-        except Exception:
-            continue
+        except CONFIG_ERRORS:
+            continue                    # reported by _check_tenants
         if not repo:
             continue
         path = root / namespace_dirname(repo) / MANIFEST
@@ -253,7 +255,7 @@ def _check_indexes(r: Report) -> None:
 # once someone exports LLM_PROVIDER=lmstudio to use the agent, the "model-free"
 # gate check started calling the real judge (and crashed doctor when the id did
 # not resolve). Found 2026-11-16, the first time doctor ran in a configured shell.
-OFFLINE_GATE_ENV = {"LLM_PROVIDER": "stub", "RETRIEVER": "hybrid"}
+OFFLINE_GATE_ENV = {"LLM_PROVIDER": "stub", "RETRIEVER": "hybrid", "CRA_ACTIVITY": "null"}
 
 
 def _check_gates(r: Report) -> None:
@@ -266,7 +268,7 @@ def _check_gates(r: Report) -> None:
     try:
         try:
             from eval.harness import run
-        except Exception as e:
+        except (ImportError, SyntaxError) as e:
             r.add(FAIL, "safety gate suite", f"import failed: {type(e).__name__}: {e}")
             return
         buf = io.StringIO()
@@ -284,12 +286,14 @@ def _check_gates(r: Report) -> None:
         r.add(FAIL, "safety gate suite", "one or more gates FAILED -- run python -m eval.harness")
 
 
-def main() -> int:
-    """Run every check, print the report, and return 1 if anything FAILED."""
-    ap = argparse.ArgumentParser(description="check this machine can run the agent")
-    ap.add_argument("--json", action="store_true", help="machine-readable output")
-    args = ap.parse_args()
+def run_checks(*, gates: bool = True) -> Report:
+    """Every check, in order -- the ONE list the CLI and `GET /doctor` share.
 
+    The HTTP endpoint used to import four private `_check_*` functions and run a
+    subset of them while its docstring claimed "the same checks", so it silently
+    skipped tenants and indexes. `gates=False` is the only difference allowed:
+    the gate suite prints and takes ~0.5 s, which is wrong inside a request.
+    """
     r = Report()
     _check_host(r)
     models = _check_platform(r)
@@ -298,7 +302,18 @@ def main() -> int:
         _check_lmstudio(r, models)
     _check_tenants(r)
     _check_indexes(r)
-    _check_gates(r)
+    if gates:
+        _check_gates(r)
+    return r
+
+
+def main() -> int:
+    """Run every check, print the report, and return 1 if anything FAILED."""
+    ap = argparse.ArgumentParser(description="check this machine can run the agent")
+    ap.add_argument("--json", action="store_true", help="machine-readable output")
+    args = ap.parse_args()
+
+    r = run_checks()
 
     if args.json:
         print(json.dumps(r.as_dict(), indent=2))

@@ -221,6 +221,18 @@ dl.kv dt{color:var(--mute)}dl.kv dd{margin:0;font-family:var(--mono);font-size:1
  .top,.content{padding-left:16px;padding-right:16px}.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}
  .lst{grid-template-columns:22px minmax(0,1fr) 90px}.lst .lbar{display:none}.search{min-width:0;flex:1 1 100%;margin-left:0}}
 @media (max-width:520px){.gates{grid-template-columns:1fr}}
+/* activity log */
+.atable{width:100%;border-collapse:collapse;font-size:13px}
+.atable th{text-align:left;font-weight:500;color:var(--mute);padding:8px 12px;border-bottom:1px solid var(--line)}
+.atable td{padding:8px 12px;border-bottom:1px solid var(--line2);vertical-align:top}
+.arow{cursor:pointer}.arow:hover,.arow:focus-visible{background:var(--hover);outline:none}
+.arow.aerr td:first-child{box-shadow:inset 3px 0 0 var(--err)}
+.adetail td{background:var(--sunk)}
+.apre{max-height:320px;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:8px;
+ padding:10px 12px;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;word-break:break-word;margin:4px 0 10px}
+.acid{padding:0 16px}.acid:empty{display:none}
+#atype,#ahours{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:6px 8px;font:inherit;font-size:13px}
+@media (max-width:640px){.atable td:nth-child(6),.atable th:nth-child(6),.atable td:nth-child(7),.atable th:nth-child(7){display:none}}
 </style></head><body>
 <div class="app">
 <aside class="side">
@@ -229,6 +241,8 @@ dl.kv dt{color:var(--mute)}dl.kv dd{margin:0;font-family:var(--mono);font-size:1
  <button class="nav" data-go="sec-running"><span data-ico="activity"></span>Now running<span class="cnt" id="nav-running">0</span></button>
  <button class="nav" data-go="sec-models"><span data-ico="server"></span>Model server<span class="cnt" id="nav-models">–</span></button>
  <button class="nav" data-go="sec-history"><span data-ico="history"></span>Review history<span class="cnt" id="nav-history">0</span></button>
+ <div class="navh">Admin</div>
+ <button class="nav" data-go="sec-activity"><span data-ico="list"></span>Activity log<span class="cnt" id="nav-activity">–</span></button>
  <div class="side-foot"><div>Reading</div><div class="mono" id="where">connecting…</div></div>
 </aside>
 
@@ -260,6 +274,16 @@ dl.kv dt{color:var(--mute)}dl.kv dd{margin:0;font-family:var(--mono);font-size:1
    <div class="rhead"><span>Status</span><span>Run</span><span>Outcome</span><span>Steps</span><span>Duration</span><span>When</span><span></span></div>
    <div id="history"></div>
   </details>
+
+  <details class="panel" id="sec-activity" open>
+   <summary><span class="ph-ic" data-ico="list"></span><div><div class="ph-t">Activity log</div><div class="ph-s" id="peek-activity">Every operation the agent ran, with errors and tracebacks</div></div><span class="chev" data-ico="down"></span></summary>
+   <div class="toolbar"><div class="seg" id="asev"></div>
+    <label class="search"><span data-ico="search"></span><input id="aq" type="search" placeholder="Search operation, error, tenant, correlation id…" aria-label="Search activity"></label>
+    <select id="atype" aria-label="Operation type"><option value="">All operations</option></select>
+    <select id="ahours" aria-label="Time window"><option value="1">Last hour</option><option value="24" selected>Last 24 hours</option><option value="168">Last 7 days</option><option value="720">Last 30 days</option></select></div>
+   <div class="acid" id="acid"></div>
+   <div class="tw"><table class="atable" id="atable"></table></div>
+  </details>
  </div>
 </div>
 </div>
@@ -271,6 +295,7 @@ const ICONS={
  activity:"M22 12h-4l-3 9L9 3l-3 9H2",
  server:"M4 2h16a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zM4 14h16a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2zM6 6h.01M6 18h.01",
  history:"M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5M12 7v5l3 3",
+ list:"M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01",
  down:"M6 9l6 6 6-6",check:"M20 6 9 17l-5-5",x:"M18 6 6 18M6 6l12 12",
  alert:"M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0zM12 9v4M12 17h.01",
  user:"M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z",
@@ -289,7 +314,20 @@ function ico(name){const s=document.createElementNS(NS,"svg");s.setAttribute("vi
 for(const n of document.querySelectorAll("[data-ico]"))n.append(ico(n.dataset.ico));
 
 /* ── vocabulary: what each step and check MEANS, in plain words ─────────── */
-const BASE=["resolve_tenant","fetch_evidence","normalize_evidence","prepush_checks","classify"];
+// The stage plan comes from app/graph.py via /api/status (one source, tested
+// against the compiled graph). This fallback only covers the first paint.
+let PLAN={base:["resolve_tenant","fetch_evidence","normalize_evidence","prepush_checks","classify"],
+ deterministic:["await_approval","execute","audit"],human_review:["audit"],
+ ai_investigation:["generate_diagnosis","independent_review","await_approval","execute","audit"],
+ "ai_investigation:escalate_to_human":["generate_diagnosis","independent_review","audit"]};
+/* The stages a run will pass through. Before routing is known, the AI path up
+   to the gate is the best guess; stages that ran anyway are appended. */
+function planFor(route,decision,done){
+ const rest=route?(PLAN[route+":"+decision]||PLAN[route]||["audit"]):PLAN["ai_investigation:escalate_to_human"];
+ // Runs from before prepush_checks existed did not skip it; they never had it.
+ const base=done.includes("classify")&&!done.includes("prepush_checks")?PLAN.base.filter(n=>n!=="prepush_checks"):PLAN.base;
+ const all=[...base,...rest];for(const n of done)if(!all.includes(n))all.push(n);return all;
+}
 const STEP={
  resolve_tenant:["Load codebase policy","Picks this codebase's thresholds, allowlists and prompts."],
  fetch_evidence:["Read the diff","Collects the changed files from git."],
@@ -319,7 +357,8 @@ const pname=c=>PRECHECK[c]||String(c||"").replace(/_/g," ");
 const ROUTE={ai_investigation:"AI investigation",deterministic:"Deterministic fix",human_review:"Straight to a human"};
 const STATUS={executed:["Approved","b-ok"],escalated:["Escalated","b-warn"],denied:["Declined","b-idle"],
  human_review:["Human review","b-warn"],ended:["Ended","b-idle"],crashed:["Crashed","b-err"],
- incomplete:["Stopped","b-err"],in_progress:["In progress","b-info"]};
+ incomplete:["Stopped","b-err"],in_progress:["In progress","b-info"],
+ awaiting_approval:["Awaiting approval","b-info"],abandoned:["Not approved","b-idle"]};
 const FILTERS=[["all","All"],["escalated","Escalated"],["executed","Approved"],["failed","Crashed / stopped"]];
 const ROLEICO={diagnosis:["cpu","t-acc"],judge:["scale","t-info"],embedding:["layers","t-ok"],utility:["tool","t-idle"],
  reranker:["sort","t-idle"],entailer:["link","t-warn"],"(none)":["dot","t-idle"]};
@@ -374,14 +413,9 @@ function renderModels(m){
 
 /* ── live work ─────────────────────────────────────────────────────────── */
 function plan(job){
- const done=job.stages.map(s=>s.name),route=(job.stages.find(s=>s.detail&&s.detail.route)||{}).detail?.route;
+ const route=(job.stages.find(s=>s.detail&&s.detail.route)||{}).detail?.route;
  const dec=(job.stages.find(s=>s.detail&&s.detail.decision)||{}).detail?.decision;
- let rest=[];
- if(route==="ai_investigation")rest=["generate_diagnosis","independent_review",...(dec==="escalate_to_human"?[]:["await_approval","execute"]),"audit"];
- else if(route==="deterministic")rest=["await_approval","execute","audit"];
- else if(route)rest=["audit"];
- else rest=["generate_diagnosis","independent_review","audit"];
- const all=[...BASE,...rest];for(const n of done)if(!all.includes(n))all.push(n);return all;
+ return planFor(route,dec,job.stages.map(s=>s.name));
 }
 function describe(d){
  if(!d)return"";const p=[];
@@ -442,15 +476,7 @@ function renderJobs(s){
 /* ── history ───────────────────────────────────────────────────────────── */
 let filter="all",query="",lastSig="",openRuns=new Set(),tabOf=new Map(),seeded=false,latest=null;
 function bucket(r){return r.status==="crashed"||r.status==="incomplete"?"failed":r.status}
-function expected(r){
- const done=r.steps.map(s=>s.name);let rest=[];
- if(r.route==="ai_investigation")rest=["generate_diagnosis","independent_review",...(r.decision==="escalate_to_human"?[]:["await_approval","execute"]),"audit"];
- else if(r.route==="deterministic")rest=["await_approval","execute","audit"];
- else if(r.route)rest=["audit"];
- // Runs from before prepush_checks existed did not skip it; they never had it.
- const base=done.includes("classify")&&!done.includes("prepush_checks")?BASE.filter(n=>n!=="prepush_checks"):BASE;
- const all=[...base,...rest];for(const n of done)if(!all.includes(n))all.push(n);return all;
-}
+function expected(r){return planFor(r.route,r.decision,r.steps.map(s=>s.name))}
 function verdict(r){
  const a=r.audit||{},fails=GATE.filter(c=>(a.review||{})[c[0]]===false).map(c=>c[1].toLowerCase());
  const pf=tally(a.checks||[]).flag,pre=pf?` ${pf} pre-push flag(s).`:"",rt=retriesOf(r),rtx=rt?` Recovered from ${rt} model-server retr${rt>1?"ies":"y"}.`:"";
@@ -462,6 +488,8 @@ function verdict(r){
   case"crashed":return`Crashed at ${LABEL(r.error.step)}${rt?` after ${rt} retr${rt>1?"ies":"y"}`:""}: ${hint(r.error.message)||firstLine(r.error.message)}`;
   case"incomplete":{const l=r.steps[r.steps.length-1];return`Stopped after ${l?LABEL(l.name):"start"} without writing a record. The process was probably killed.`}
   case"in_progress":return"Still running, or just finished.";
+  case"awaiting_approval":return`Passed ${a.review?GATE.filter(c=>a.review[c[0]]).length:"?"} of 4 checks and is waiting at the approval prompt. Nothing is written until you answer.`;
+  case"abandoned":return`Passed ${a.review?GATE.filter(c=>a.review[c[0]]).length:"?"} of 4 checks, then stopped at the approval prompt with nobody to answer it. Nothing was written.`;
   default:return r.outcome||""}
 }
 function stepDetail(name,a){
@@ -471,10 +499,11 @@ function stepDetail(name,a){
  if(name==="generate_diagnosis"&&d)return`Retrieved ${(a.retrieved||[]).length} passages · severity ${d.severity} · ${d.findings_count??0} finding(s) · ${(d.citations||[]).length} citation(s)`;
  if(name==="independent_review"&&v){const ok=GATE.filter(c=>v[c[0]]).length;return`${ok} of 4 checks passed → ${a.decision==="approve"?"approve":"escalate to a human"}`}
  if(name==="await_approval"&&a.approved!=null)return a.approved?"You approved":"You declined";
+ if(name==="await_approval"&&a.provisional)return"Paused here for your answer";
  if(name==="audit"&&a.outcome)return`Recorded outcome: ${a.outcome}`;
  return null;
 }
-function stepIcon(st){const m={ok:["check","t-ok"],error:["x","t-err"],waiting:["pause","t-warn"],skip:["dot","t-idle"],pending:["dot","t-idle"]}[st]||["dot","t-idle"];return iconBox(m[0],m[1],"sic")}
+function stepIcon(st){const m={ok:["check","t-ok"],error:["x","t-err"],waiting:["pause","t-warn"],suspended:["pause","t-warn"],skip:["dot","t-idle"],pending:["dot","t-idle"]}[st]||["dot","t-idle"];return iconBox(m[0],m[1],"sic")}
 function stepsTab(r){
  const a=r.audit||{},ol=el("ol","steps"),seen=new Set(),stopped=r.status==="crashed"||r.status==="incomplete";
  for(const name of expected(r)){
@@ -607,6 +636,8 @@ function actionsBar(r){
 function detailFor(r){
  const a=r.audit||{},box=el("div"),t=tally(a.checks||[]),fs=((a.diagnosis||{}).findings||[]).length||(a.diagnosis||{}).findings_count||0;
  add(box,actionsBar(r),nextSteps(r));
+ if(a.provisional){const n=el("div","banner show");n.style.cssText="display:flex;border-color:var(--info-bd);background:var(--info-bg);color:var(--ink2)";
+  n.append(ico("pause"),el("span",null,"This run stopped at the approval prompt, so it wrote no audit record yet. The checks and evidence below come from its live snapshot: ids and scores only, no finding text."));box.append(n)}
  const gateOk=a.review?GATE.filter(c=>a.review[c[0]]).length:null;
  const TABS=[["steps","Steps",String(r.steps.length),r.status==="crashed"||r.status==="incomplete"?"err":""],
   ["prepush","Pre-push checks",(a.checks||[]).length?String(t.flag):null,t.flag?"err":"ok"],
@@ -682,7 +713,69 @@ const FOLD_KEY="cra-monitor-folded";
 
 /* ── loop: poll every second; on failure say so and back off ───────────── */
 let fails=0;
-function render(s){if(!s)return;renderKpis(s.recent);renderJobs(s);renderModels(s.models);renderHistory(s.recent);renderChrome(s)}
+function render(s){if(!s)return;if(s.stage_plan)PLAN=s.stage_plan;renderKpis(s.recent);renderJobs(s);renderModels(s.models);renderHistory(s.recent);renderChrome(s)}
+/* ── activity log (admin) ─────────────────────────────────────────────────
+   Read-only. Every value is set with textContent, never parsed as HTML: rows
+   carry error messages and tracebacks, which can quote caller input. */
+const A={sev:"",type:"",q:"",hours:"24",cid:"",open:new Set(),sig:""};
+const SEVCLS={ERROR:"b-err",WARNING:"b-warn",INFO:"b-ok",DEBUG:"b-idle"};
+function aParams(){const p=new URLSearchParams();for(const[k,v]of[["severity",A.sev],["type",A.type],["q",A.q],["hours",A.hours],["cid",A.cid]])if(v)p.set(k,v);return p.toString()}
+function aRow(r,tb){
+ const tr=el("tr","arow"+(r.is_error?" aerr":""));tr.tabIndex=0;
+ const ts=new Date(r.timestamp);
+ add(tr,el("td","mono mute",ts.toLocaleString()),
+  (()=>{const td=el("td");td.append(badge(r.severity||"?",SEVCLS[r.severity]||"b-idle"));return td})(),
+  (()=>{const td=el("td");add(td,el("div",null,r.operation_name||""),el("div","sm mute",`${r.operation_type||""}${r.target_service?" · "+r.target_service:""}`));return td})(),
+  el("td",r.is_error?"t-err":"mute",r.is_error?firstLine(`${r.exception_type||"Error"}: ${r.error_message||""}`):(r.status||"")),
+  el("td","mono",r.duration_ms!=null?fmt(r.duration_ms):""),
+  (()=>{const td=el("td");const b=el("button","btn mono",String(r.correlation_id||"").slice(0,13));b.title="Show every record of this run/request";
+   b.onclick=e=>{e.stopPropagation();A.cid=r.correlation_id;loadActivity(true)};td.append(b);return td})(),
+  el("td","mute",r.tenant||""));
+ const toggle=()=>{A.open.has(r.log_id)?A.open.delete(r.log_id):A.open.add(r.log_id);loadActivity(true)};
+ tr.onclick=toggle;tr.onkeydown=e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();toggle()}};
+ tb.append(tr);
+ if(A.open.has(r.log_id)){
+  const dt=el("tr","adetail"),td=el("td");td.colSpan=7;
+  const dl=el("dl","kv"),kv=(k,v)=>{if(v==null||v==="")return;dl.append(el("dt",null,k),el("dd","mono",String(v)))};
+  kv("log id",r.log_id);kv("correlation",r.correlation_id);kv("run id",r.run_id);kv("status",r.status);
+  kv("started",r.start_time);kv("ended",r.end_time);kv("failure source",r.failure_source);kv("exception",r.exception_type);kv("message",r.error_message);
+  td.append(dl);
+  if(r.traceback){td.append(el("div","sm mute","Traceback"));td.append(el("pre","apre",r.traceback))}
+  if(r.metadata){td.append(el("div","sm mute","Metadata"));td.append(el("pre","apre",JSON.stringify(r.metadata,null,2)))}
+  const cp=el("button","btn","Copy for a bug report");
+  cp.onclick=e=>{e.stopPropagation();copy(`[${r.timestamp}] ${r.exception_type||r.severity} @ ${r.operation_name} | ${(r.error_message||r.status||"").slice(0,200)} | ref=${r.correlation_id} log=${r.log_id}`,cp)};
+  td.append(cp);dt.append(td);tb.append(dt);
+ }
+}
+function renderActivity(d){
+ const seg=document.getElementById("asev");seg.replaceChildren();
+ const facets=d.facets||{severity:{},operation_type:{}};
+ for(const[k,l]of[["","All"],["ERROR","Errors"],["WARNING","Warnings"],["INFO","Info"]]){
+  const n=k?(facets.severity[k]||0):d.total;const b=el("button");b.append(el("span",null,l),el("span","n",String(n)));
+  b.setAttribute("aria-pressed",String(A.sev===k));b.onclick=()=>{A.sev=k;loadActivity(true)};seg.append(b)}
+ const sel=document.getElementById("atype"),have=new Set([...sel.options].map(o=>o.value));
+ for(const t of Object.keys(facets.operation_type).sort())if(!have.has(t)){const o=el("option",null,`${t} (${facets.operation_type[t]})`);o.value=t;sel.append(o)}
+ const c=document.getElementById("acid");c.replaceChildren();
+ if(A.cid){const b=el("button","btn",`Showing one run/request: ${A.cid} — clear`);b.onclick=()=>{A.cid="";loadActivity(true)};c.append(b)}
+ const t=document.getElementById("atable");t.replaceChildren();
+ const h=el("tr");for(const x of["When","Severity","Operation","Outcome","Duration","Correlation","Tenant"])h.append(el("th",null,x));t.append(h);
+ const tb=el("tbody");for(const r of d.rows)aRow(r,tb);t.append(tb);
+ if(!d.rows.length){const tr=el("tr"),td=el("td","empty",d.total?"No records match these filters.":"No activity recorded in this window yet.");td.colSpan=7;tr.append(td);t.append(tr)}
+ const errs=facets.severity.ERROR||0,na=document.getElementById("nav-activity");
+ na.textContent=errs?`${errs} !`:String(d.total);na.className="cnt"+(errs?" err":"");
+ document.getElementById("peek-activity").textContent=`${d.matched} of ${d.total} records in the last ${d.hours>=24?Math.round(d.hours/24)+" day(s)":d.hours+" h"}${errs?` · ${errs} error${errs>1?"s":""}`:""}`;
+}
+async function loadActivity(force){
+ try{const r=await fetch("/api/activity?"+aParams(),{cache:"no-store"});if(!r.ok)return;const d=await r.json();
+  const sig=JSON.stringify([d.total,d.matched,d.rows.slice(0,3).map(x=>x.log_id),[...A.open]]);
+  if(force||sig!==A.sig){A.sig=sig;renderActivity(d)}}catch(e){/* the status banner already reports a lost server */}
+}
+(function wireActivity(){
+ let deb;document.getElementById("aq").addEventListener("input",e=>{clearTimeout(deb);deb=setTimeout(()=>{A.q=e.target.value.trim();loadActivity(true)},250)});
+ document.getElementById("atype").addEventListener("change",e=>{A.type=e.target.value;loadActivity(true)});
+ document.getElementById("ahours").addEventListener("change",e=>{A.hours=e.target.value;loadActivity(true)});
+ loadActivity(true);setInterval(()=>loadActivity(false),3000);
+})();
 async function tick(){
  try{const r=await fetch("/api/status",{cache:"no-store"});if(!r.ok)throw new Error("HTTP "+r.status);latest=await r.json();fails=0}
  catch(e){fails++;const wait=Math.min(30,2**Math.min(fails,5));

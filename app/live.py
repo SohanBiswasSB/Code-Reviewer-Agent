@@ -23,15 +23,16 @@ audit file. The audit record already holds the full detail for a finished run.
 from __future__ import annotations
 
 import json
-import os
 import pathlib
 import time
 from datetime import UTC, datetime
 
+from datadir import data_dir
+
 
 def live_dir() -> pathlib.Path:
     """`<CRA_DATA_DIR>/live`, created on demand."""
-    return pathlib.Path(os.getenv("CRA_DATA_DIR", "var")) / "live"
+    return data_dir() / "live"
 
 
 def _now() -> str:
@@ -53,7 +54,9 @@ def _write(path: pathlib.Path, data: dict) -> None:
         pass
 
 
-def _read(path: pathlib.Path) -> dict:
+def read_json(path: pathlib.Path) -> dict:
+    """A JSON file as a dict; {} when it is missing, half-written or not JSON.
+    The monitor reads snapshots through this too -- one reader, one failure rule."""
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -101,7 +104,7 @@ def stage(state: dict, name: str, status: str, *, duration_ms: float | None = No
     if not key:
         return
     path = live_dir() / f"run-{_safe(str(key))}.json"
-    snap = _read(path) or {"kind": "run", "id": key, "started_at": _now(), "stages": []}
+    snap = read_json(path) or {"kind": "run", "id": key, "started_at": _now(), "stages": []}
     snap.update(tenant=state.get("tenant"), target=state.get("target"),
                 surface=state.get("surface") or state.get("_surface_name"),
                 run_id=state.get("_run_id") or snap.get("run_id"), updated_at=_now())
@@ -128,7 +131,7 @@ def finish(state_or_key, status: str) -> None:
     key = state_or_key if isinstance(state_or_key, str) else (
         state_or_key.get("thread_id") or state_or_key.get("_run_id"))
     path = live_dir() / f"run-{_safe(str(key))}.json"
-    snap = _read(path)
+    snap = read_json(path)
     if snap:
         snap.update(status=status, updated_at=_now())
         _write(path, snap)

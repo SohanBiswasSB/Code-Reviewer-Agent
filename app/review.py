@@ -36,7 +36,7 @@ import uuid
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
-from app import live
+from app import activity, live
 from app.graph import build_graph
 from app.state import checkpoint_serde
 from nodes._render import render_checklist
@@ -95,13 +95,27 @@ def _show(state: dict) -> None:
 
 
 def run(tenant: str, target: str, ask=input, interactive: bool | None = None) -> int:
+    """Drive one review to its end, as one correlated operation in the activity log.
+
+    The thread id IS the correlation id, so every node, model call and approval
+    decision of this run shares one key with its audit record and live status.
+    """
+    thread_id = f"cli-{uuid.uuid4()}"
+    with activity.correlation(thread_id), activity.ActivityLogger(
+            "review", "review.cli", tenant=tenant,
+            metadata={"target": target, "thread_id": thread_id}) as alog:
+        code = _run(tenant, target, thread_id, ask, interactive)
+        alog.set_response(code)
+        return code
+
+
+def _run(tenant: str, target: str, thread_id: str, ask, interactive: bool | None) -> int:
     """Drive one review to its end. Returns a process exit code.
 
     `ask` and `interactive` are injectable so the approval path can be tested
     without a terminal; in normal use they are `input` and `sys.stdin.isatty()`.
     """
     graph = build_graph(checkpointer=MemorySaver(serde=checkpoint_serde()))
-    thread_id = f"cli-{uuid.uuid4()}"
     cfg = {"configurable": {"thread_id": thread_id}}
 
     print(f"run {thread_id} -- watch it live with: python -m app.monitor")
@@ -127,6 +141,8 @@ def run(tenant: str, target: str, ask=input, interactive: bool | None = None) ->
     if not interactive:
         print("no terminal attached: refusing to decide. Nothing was approved or written.")
         live.finish(thread_id, "abandoned")
+        activity.log_event("approval", "approval.abandoned", severity=activity.WARNING,
+                           tenant=tenant, message="no terminal attached to answer")
         return 2
 
     answer = ask("approve and write this review? [y/N] ").strip().lower()
@@ -137,8 +153,12 @@ def run(tenant: str, target: str, ask=input, interactive: bool | None = None) ->
         # mechanism, and await_approval has already recorded the denial.
         print("denied. The denial is in the audit record; nothing was written.")
         live.finish(thread_id, "denied")
+        activity.log_event("approval", "approval.denied", severity=activity.WARNING,
+                           tenant=tenant, metadata={"answer": answer[:20]})
         return 0
     print(f"approved and written: {done.get('result')}")
+    activity.log_event("approval", "approval.granted", tenant=tenant,
+                       metadata={"result": done.get("result")})
     return 0
 
 
@@ -151,6 +171,7 @@ def main() -> None:
     ap.add_argument("--root", help="where the tenant's repo lives on THIS machine")
     args = ap.parse_args()
     _defaults(args.root)
+    activity.capture_library_logs()
     raise SystemExit(run(args.tenant, args.target))
 
 

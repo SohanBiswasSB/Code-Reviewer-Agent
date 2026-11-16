@@ -21,6 +21,8 @@ import threading
 import time
 from datetime import UTC, datetime
 
+from datadir import data_dir
+from errors import WRITE_ERRORS
 from registry import adapter
 
 SCHEMA_VERSION = 1
@@ -38,9 +40,9 @@ def _interrupt_names() -> tuple[str, ...]:
 
 
 def prompts_enabled() -> bool:
-    """Off by default. T12 (InputGuard) is open, so nothing redacts PII or
-    secrets out of evidence — storing every prompt verbatim would create a
-    durable copy of exactly what the guard is meant to remove."""
+    """Off by default. T12 now redacts secrets and PII before a prompt is built,
+    but the guard is pattern-based, and a durable verbatim copy of every prompt
+    is still a larger surface than a hash. Hash always; text only while debugging."""
     return os.getenv("CRA_TRACE_PROMPTS", "").lower() in ("1", "true", "yes")
 
 
@@ -53,7 +55,7 @@ class JsonlTracer:
     """var/traces/<YYYY-MM-DD>.jsonl, one row per span."""
 
     def __init__(self, root: str | None = None):
-        self.root = root or os.getenv("CRA_DATA_DIR", "var")
+        self.root = root or str(data_dir())
 
     def path_for(self, when: datetime | None = None) -> str:
         when = when or datetime.now(UTC)
@@ -79,7 +81,9 @@ class JsonlTracer:
         status, error = "ok", None
         try:
             yield self
-        except BaseException as e:                      # noqa: BLE001 -- re-raised below
+        except BaseException as e:
+            # Not a swallow: classify for the span, then ALWAYS re-raise below.
+            # BaseException on purpose -- a Ctrl-C mid-node is still a span.
             if type(e).__name__ in _interrupt_names():
                 status = "suspended"                    # the approval gate, not a failure
             else:
@@ -98,7 +102,9 @@ class JsonlTracer:
                 row["error"] = error
             try:
                 self._write(row)
-            except Exception:                           # noqa: BLE001 -- see docstring
+            except WRITE_ERRORS:
+                # A full disk or an unserialisable attribute costs the span,
+                # never the run. Any other error is a bug and propagates.
                 pass
 
 

@@ -14,10 +14,12 @@ from __future__ import annotations
 import os
 import platform as _platform
 import shutil
+import threading
 
 import adapters  # noqa: F401 -- side effect: adapters self-register  # pylint: disable=unused-import
 import registry
 import surfaces  # noqa: F401 -- side effect: surfaces self-register  # pylint: disable=unused-import
+from adapters.llm_lmstudio import base_url as lmstudio_base_url
 from adapters.platforms import base as _profiles
 from nodes._render import FENCE_MARKERS
 
@@ -27,6 +29,41 @@ DEFAULT_SURFACES = "code_review,log_review"
 # Roles an LLM can be bound to. `diagnosis` and `judge` MUST resolve to
 # different models — see ports.LLM and adapters/platforms/base.py.
 LLM_ROLES = ("diagnosis", "judge", "utility")
+
+
+# ── process-wide providers ───────────────────────────────────────────────────
+# Providers whose value is a CACHE live once per process. The retriever holds the
+# loaded index and the BM25 statistics; the cross-encoder entailer holds a model.
+# Built fresh per run, both caches started empty every time: measured on the
+# 17.6k-chunk Masterclass index, 1.46 s and ~360 MB of churn per review, against
+# ~14 ms with one shared instance. Staleness is already handled inside them
+# (index file stamp + fingerprint), and the namespace is still passed on every
+# retrieve, so G1 is unchanged.
+#
+# Keyed on the adapter CLASS plus the env vars its construction reads, so a
+# changed setting -- or a test pointing CRA_DATA_DIR somewhere new -- gets a new
+# instance rather than a stale one.
+_SHARED: dict[tuple, object] = {}
+_SHARED_LOCK = threading.Lock()
+
+
+def _shared(cls, *env_keys: str):
+    key = (cls, *(os.getenv(k) for k in env_keys))
+    inst = _SHARED.get(key)
+    if inst is None:
+        with _SHARED_LOCK:
+            inst = _SHARED.get(key)
+            if inst is None:
+                inst = _SHARED[key] = cls()
+    return inst
+
+
+def model_server() -> str | None:
+    """Where the LLM provider is served, for the audit record. None when the
+    provider is not a server (stub) -- a node asking this instead of importing an
+    adapter is the T5/G2 rule, and the record stops naming LM Studio for runs
+    that never touched it."""
+    return lmstudio_base_url() if os.getenv("LLM_PROVIDER", "lmstudio") == "lmstudio" else None
 
 
 def get_llm(role: str = "diagnosis"):
@@ -45,15 +82,12 @@ def get_llm(role: str = "diagnosis"):
     if not model_id:
         raise KeyError(f"profile '{get_profile()}' defines no model for role '{role}'")
     cls = registry.get_adapter("llm", os.getenv("LLM_PROVIDER", "lmstudio"))
-    # The role is passed so the adapter can apply per-role decoding settings --
-    # the diagnosis model needs a non-zero temperature to terminate, the judge
-    # does not (adapters/llm_lmstudio.py::DEFAULT_TEMPERATURE). Kept optional so
-    # an adapter that does not care can ignore it.
-    try:
-        return cls(model=model_id, runtime=get_platform().runtime(get_profile()),
-                   role=role)
-    except TypeError:
-        return cls(model=model_id, runtime=get_platform().runtime(get_profile()))
+    # The role is passed so the adapter can apply per-role decoding settings
+    # (adapters/llm_lmstudio.py::DEFAULT_TEMPERATURE). Every LLM adapter accepts
+    # it. There used to be an `except TypeError` retry without `role`, which also
+    # swallowed a TypeError raised INSIDE a constructor and silently dropped the
+    # role -- a bug that looked like a working fallback.
+    return cls(model=model_id, runtime=get_platform().runtime(get_profile()), role=role)
 
 
 def assert_judge_is_independent() -> None:
@@ -81,7 +115,8 @@ def get_retriever():
     themselves, the same way they declare LLM_PROVIDER=stub: offline is a choice
     a caller makes, not a state the system defaults into.
     """
-    return registry.get_adapter("retriever", os.getenv("RETRIEVER", "indexed"))()
+    return _shared(registry.get_adapter("retriever", os.getenv("RETRIEVER", "indexed")),
+                   "CRA_DATA_DIR", "LMSTUDIO_BASE_URL", "EMBEDDER", "VECTOR_INDEX")
 
 
 def get_source(name: str):
@@ -124,7 +159,8 @@ def get_entailer():
     being runnable everywhere. Set ENTAILER=cross_encoder for the stronger
     instrument once the model is present.
     """
-    return registry.get_adapter("entailer", os.getenv("ENTAILER", "lexical"))()
+    return _shared(registry.get_adapter("entailer", os.getenv("ENTAILER", "lexical")),
+                   "ENTAILER_MODEL")
 
 
 def get_detector():
@@ -150,12 +186,12 @@ def get_input_guard():
     tries to close its own fence. `nodes/_render.py` owns those markers; passing
     them in keeps the adapter from importing the module it protects.
     """
+    # Every guard accepts the markers (the null one ignores them). No `except
+    # TypeError` fallback: that used to swallow a TypeError raised inside a
+    # constructor and quietly build a guard with NO fence markers -- the
+    # fence-forgery defence switched off by a typo.
     cls = registry.get_adapter("guard", os.getenv("CRA_GUARD", "regex"))
-    try:
-        return cls(fence_markers=FENCE_MARKERS)
-    except TypeError:
-        # A guard adapter that takes no markers (the null one) is still valid.
-        return cls()
+    return cls(fence_markers=FENCE_MARKERS)
 
 
 def get_embedder():
@@ -193,7 +229,7 @@ def get_audit_sink():
 
 
 def get_tracer():
-    """Spans per node/retrieval/LLM call (T23). Defaults to append-only JSONL.
+    """Spans per graph node and per LLM call, plus retries (T23). Append-only JSONL.
 
     ON by default, unlike most debugging tooling. The reason is specific: the
     first live model runs are imminent, and a trace that has to be switched on

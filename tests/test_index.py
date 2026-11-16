@@ -469,3 +469,29 @@ def test_doctor_reports_a_good_index(monkeypatch):
     _build(LocalVectorIndex(), "MilesEducation-Tech/Miles-USP-Backend", [dict(c) for c in CORPUS])
     status, detail = _doctor_index_lines(monkeypatch)["index: milesone"]
     assert status == "OK  " and f"{len(CORPUS)} chunks" in detail
+
+
+# ── saved BM25 statistics ─────────────────────────────────────────────────────
+def test_saved_bm25_round_trips_and_refuses_another_index(tmp_path):
+    docs = [tokenize(t) for t in ["self oauth callback", "self return none", "getUserToken"]]
+    bm = BM25(docs)
+    path = tmp_path / "bm25.npz"
+    assert bm.save(path, "fp-1")
+    loaded = BM25.load(path, "fp-1")
+    assert loaded.top("oauth user token", 3) == bm.top("oauth user token", 3)
+    assert BM25.load(path, "fp-2") is None, "statistics of a different index"
+    assert BM25.load(tmp_path / "missing.npz", "fp-1") is None
+
+
+def test_a_new_process_loads_bm25_instead_of_rebuilding_it(built, monkeypatch):
+    """Every CLI review is a new process; the first one saves, the next loads."""
+    IndexedRetriever(embedder=FakeEmbedder(), index=built).retrieve(
+        "oauth", k=1, namespace="org/backend")
+    assert built.sidecar("org/backend", "bm25.npz").exists()
+
+    def no_rebuild(*a, **k):
+        raise AssertionError("rebuilt BM25 although a saved copy matched")
+    monkeypatch.setattr(BM25, "for_chunks", classmethod(no_rebuild))
+    hit = IndexedRetriever(embedder=FakeEmbedder(), index=built).retrieve(
+        "oauth", k=1, namespace="org/backend")[0]
+    assert hit["id"] == "oauth"

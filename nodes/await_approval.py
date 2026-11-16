@@ -24,6 +24,10 @@ regardless of how it was reached.
 """
 from __future__ import annotations
 
+from langgraph.types import interrupt
+
+from nodes._audit import write
+
 
 def await_approval(state: dict, interrupt_fn=None, audit_sink=None) -> dict:
     """Suspend for human approval; return the decision as `approved`.
@@ -53,7 +57,7 @@ def await_approval(state: dict, interrupt_fn=None, audit_sink=None) -> dict:
     }
 
     if interrupt_fn is None:
-        from langgraph.types import interrupt as interrupt_fn
+        interrupt_fn = interrupt
 
     decision = interrupt_fn(payload)
 
@@ -76,7 +80,6 @@ def await_approval(state: dict, interrupt_fn=None, audit_sink=None) -> dict:
         # routing denials around `execute` to reach an audit node would remove
         # the defence in depth those tests exist to prove. So the node that
         # observes the denial records it. See docs/DATA_STORAGE.md.
-        from nodes._audit import write
         out.update(write({**state, **out}, "denied", sink=audit_sink))
 
     return out

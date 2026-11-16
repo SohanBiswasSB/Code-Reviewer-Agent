@@ -187,6 +187,10 @@ class NullInputGuard:
     reasoning as the audit sink: a boundary you get by forgetting is not one.
     """
 
+    def __init__(self, fence_markers=()):
+        """Same constructor shape as the real guard, so config needs no fallback."""
+        self.fence_markers = tuple(fence_markers)
+
     def sanitize(self, text: str, *, tenant: str = "_default") -> tuple[str, dict]:
         return text, {"tenant": tenant, "redacted": {}, "total_redactions": 0,
                       "injection_suspected": {}, "fence_forgery": 0, "guard": "null"}

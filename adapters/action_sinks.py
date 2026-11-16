@@ -5,6 +5,9 @@ import json
 import os
 from datetime import UTC, datetime
 
+from app.activity import ERROR, log_event
+from datadir import data_dir
+from errors import ProviderError
 from registry import adapter
 from tools import github_client
 
@@ -20,6 +23,12 @@ def safe_part(part: str, fallback: str) -> str:
     """
     cleaned = "".join(c for c in (part or "") if c.isalnum() or c in "-_.")
     return cleaned.lstrip(".") or fallback
+
+
+def _label_source(exc: BaseException) -> str:
+    """`external` for a provider/permission/network failure, else `internal` (a bug)."""
+    expected = (ProviderError, PermissionError, OSError, NotImplementedError)
+    return "external" if isinstance(exc, expected) else "internal"
 
 
 @adapter("sink", "pr_comment")
@@ -43,8 +52,19 @@ class PRCommentSink:
         if action.get("label"):
             try:
                 result["label"] = github_client.add_label(target, action["label"], identity)
-            except Exception as e:      # noqa: BLE001 -- any label failure is partial success
-                result["label"] = {"skipped": str(e)}
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                # The ONE deliberately broad handler in the service. The comment
+                # above is already POSTED -- an irreversible write. Letting any
+                # label error escape would crash `execute` after that write, and
+                # with no failure edges (G9) the run would lose the audit record
+                # of a write that really happened (invariant 9). So every label
+                # failure is a partial success, pinned by the safety gate
+                # `partial_success_reported` -- and is logged at ERROR with its full
+                # traceback, so a bug here is loud rather than lost.
+                result["label"] = {"skipped": f"{type(e).__name__}: {e}"}
+                log_event("external_api", "github.add_label", severity=ERROR,
+                          exception=e, failure_source=_label_source(e),
+                          metadata={"target": target, "label": action.get("label")})
         return result
 
 
@@ -67,7 +87,7 @@ class ReportSink:
     """
 
     def __init__(self, root: str | None = None):
-        self.root = root or os.getenv("CRA_DATA_DIR", "var")
+        self.root = root or str(data_dir())
 
     def path_for(self, tenant: str, target: str, ext: str) -> str:
         """`<root>/reports/<tenant>/<date>.<ext>`, both parts sanitised."""
@@ -147,7 +167,7 @@ class ReviewFileSink:
     SUBDIR = "reviews"
 
     def __init__(self, root: str | None = None):
-        self.root = root or os.getenv("CRA_DATA_DIR", "var")
+        self.root = root or str(data_dir())
 
     def path_for(self, tenant: str, target: str, run_id: str | None) -> str:
         """`<root>/reviews/<tenant>/<target>-<run>.md`, every part sanitised."""

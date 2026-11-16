@@ -44,11 +44,13 @@ from __future__ import annotations
 
 import time
 
+from langgraph.errors import GraphBubbleUp
 from langgraph.graph import END, START, StateGraph
 
 import config
-from app import live
+from app import activity, live
 from app.state import TriageState
+from errors import WRITE_ERRORS, ConfigError, EvidenceError, ProviderError, StorageError
 from nodes.audit import audit
 from nodes.await_approval import await_approval
 from nodes.classify import classify
@@ -78,6 +80,9 @@ def _traced(name, fn, tracer):
         # until it was over. Same single insertion point, same reason.
         _live(state, name, "running")
         started = time.perf_counter()
+        alog = activity.ActivityLogger(
+            "node", name, tenant=state.get("tenant"), run_id=state.get("_run_id"),
+            correlation_id=state.get("thread_id") or activity.current_correlation()).start()
         try:
             with tracer.span(f"node.{name}",
                              run_id=state.get("_run_id"),
@@ -86,26 +91,74 @@ def _traced(name, fn, tracer):
                              target=state.get("target"),
                              route=state.get("route")):
                 out = fn(state, *args, **kwargs)
-        except BaseException as e:
+        except GraphBubbleUp:
+            # interrupt() suspends by raising: the approval gate, not a failure.
+            _live(state, name, "waiting", duration_ms=(time.perf_counter() - started) * 1000)
+            alog.complete("waiting")
+            raise
+        except KeyboardInterrupt as e:
+            _live(state, name, "error", duration_ms=(time.perf_counter() - started) * 1000,
+                  error="interrupted (Ctrl-C)")
+            alog.record_error(e, "interrupted (Ctrl-C)")
+            alog.complete()
+            raise
+        except Exception as e:
+            # Recorded -- with its traceback, in the activity log -- then re-raised
+            # unchanged. Nothing is swallowed: the graph has no failure edges (G9),
+            # so this record is how a crashed run stays explainable.
             ms = (time.perf_counter() - started) * 1000
-            if type(e).__name__ in ("GraphInterrupt", "Interrupt", "GraphBubbleUp"):
-                _live(state, name, "waiting", duration_ms=ms)    # suspended, not failed
-            else:
-                _live(state, name, "error", duration_ms=ms, error=f"{type(e).__name__}: {e}")
+            _live(state, name, "error", duration_ms=ms, error=f"{type(e).__name__}: {e}")
+            alog.record_error(e, failure_source=_failure_source(e))
+            alog.complete()
             raise
         ms = (time.perf_counter() - started) * 1000
-        _live(state, name, "ok", duration_ms=ms, detail=live.summarize(name, out))
+        detail = live.summarize(name, out)
+        _live(state, name, "ok", duration_ms=ms, detail=detail)
+        for key in ("route", "decision", "severity", "findings", "files"):
+            if key in detail:
+                alog.add_metadata(key, detail[key])
+        alog.complete()
         return out
     wrapped.__name__ = name
     return wrapped
+
+
+def _failure_source(exc: BaseException) -> str:
+    """Which side failed, by the error family -- the Masterclass categories."""
+    if isinstance(exc, ProviderError | ConnectionError | TimeoutError):
+        return "external"
+    if isinstance(exc, StorageError | OSError):
+        return "storage"
+    if isinstance(exc, ConfigError | EvidenceError | LookupError):
+        return "config"
+    return "internal"
 
 
 def _live(state, name, status, **kw):
     """Live status, which must never be the reason a run fails. See app/live.py."""
     try:
         live.stage(state, name, status, **kw)
-    except Exception:  # noqa: BLE001 -- observability is best-effort by contract
+    except WRITE_ERRORS:
+        # Disk or serialisation: costs the progress view, never the run. Any
+        # other error is a bug in app/live.py and propagates.
         pass
+
+
+# The stages a run passes through, by route -- and, for an AI run, by decision.
+# The monitor draws its step list from THIS, served in /api/status; it used to
+# keep two hand-copied plans in its JavaScript, which is the kind of copy that is
+# right until the graph changes. tests/test_monitor.py walks the compiled graph
+# and fails if a plan here stops matching its edges.
+STAGE_PLAN = {
+    "base": ["resolve_tenant", "fetch_evidence", "normalize_evidence", "prepush_checks",
+             "classify"],
+    "deterministic": ["await_approval", "execute", "audit"],
+    "human_review": ["audit"],
+    "ai_investigation": ["generate_diagnosis", "independent_review", "await_approval",
+                         "execute", "audit"],
+    "ai_investigation:escalate_to_human": ["generate_diagnosis", "independent_review",
+                                           "audit"],
+}
 
 
 def build_graph(checkpointer=None, tracer=None):

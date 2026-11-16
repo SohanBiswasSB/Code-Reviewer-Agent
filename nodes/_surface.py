@@ -10,6 +10,8 @@ that name becomes an object again.
 """
 from __future__ import annotations
 
+import config
+
 
 def active_surface(state: dict):
     """The Surface driving this run, or None for the built-in issue-triage path.
@@ -23,7 +25,6 @@ def active_surface(state: dict):
     name = state.get("_surface_name")
     if not name:
         return None
-    import config
     return config.get_surface(name)
 
 
@@ -61,6 +62,8 @@ def evidence_as_dict(ev) -> dict:
         if isinstance(getattr(type(ev), name, None), property):
             try:
                 out[name] = getattr(ev, name)
-            except Exception:      # a property that raises must not break routing
+            except (AttributeError, LookupError, TypeError, ValueError):
+                # A computed property over incomplete evidence (a missing field,
+                # an empty list) must not break routing; the key is just absent.
                 pass
     return out

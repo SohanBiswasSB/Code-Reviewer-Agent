@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from typing import Any, Literal, TypedDict
 
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+
 
 class TriageState(TypedDict, total=False):
     # ── request ──────────────────────────────────────────────────────────────
@@ -96,6 +98,5 @@ def checkpoint_serde():
     the failure mode this exists to prevent, and it is invisible until a run
     resumes.
     """
-    from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
     return JsonPlusSerializer(allowed_msgpack_modules=CHECKPOINT_TYPES)

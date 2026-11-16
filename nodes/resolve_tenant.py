@@ -34,30 +34,24 @@ import hashlib
 import json
 import uuid
 
+import config
+
 DEFAULT_TENANT = "_default"
 
 
-def _policy_version(policy: dict) -> str:
-    """A short content hash of the resolved policy.
+def _content_version(obj: dict) -> str:
+    """A short, order-independent content hash.
 
-    Pinned into state so an audit record (G6) or a resumed run can state exactly
-    which guardrail values it was judged against — "the tenant's policy" is not
-    an answer when the file is editable mid-run.
+    Pinned into state for the policy AND the composed prompts, so an audit record
+    (G6) or a run resumed hours later can state exactly which guardrail values and
+    which prompt text it was judged by -- "the tenant's policy" is not an answer
+    when the file is editable mid-run. A prompt is production configuration too.
     """
-    canonical = json.dumps(policy, sort_keys=True, separators=(",", ":"))
+    canonical = json.dumps(obj, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
 
 
-def _prompt_version(prompts: dict) -> str:
-    """Content hash of the composed prompts, for the same reason as the policy.
-
-    A prompt is production configuration. A run that pauses at the gate and
-    resumes hours later must be able to state which prompt text produced the
-    diagnosis a human approved — "the tenant's prompt" is not an answer when the
-    file is editable mid-run.
-    """
-    canonical = json.dumps(prompts, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
+_policy_version = _prompt_version = _content_version
 
 
 def resolve_tenant(state: dict, store=None, surface=None) -> dict:
@@ -74,7 +68,6 @@ def resolve_tenant(state: dict, store=None, surface=None) -> dict:
     tenant = state.get("tenant") or DEFAULT_TENANT
 
     if store is None:                      # injectable for tests
-        import config
         store = config.get_tenant_store()
 
     policy = store.policy(tenant, surface_name)
@@ -91,7 +84,6 @@ def resolve_tenant(state: dict, store=None, surface=None) -> dict:
     if surface is None:
         surface = state.get("_surface")
         if surface is None:
-            import config
             surface = config.get_surface(surface_name)
 
     node_keys = {

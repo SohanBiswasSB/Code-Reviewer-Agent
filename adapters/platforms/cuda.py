@@ -24,7 +24,7 @@ KV_RESERVE_GB = 1.0         # 8k context at q8_0 KV
 
 
 @adapter("platform", "cuda")
-class CudaPlatform:
+class CudaPlatform(base.PlatformBase):
     name = "cuda"
     # 6 GB cannot hold mac_max's ~19 GB of weights, let alone studio's ~33 GB.
     # Not offered.
@@ -52,5 +52,3 @@ class CudaPlatform:
             "memory": accounting,
         }
 
-    def models(self, profile: str = base.DEFAULT_PROFILE) -> dict:
-        return base.resolve(profile, self.profiles).as_dict()

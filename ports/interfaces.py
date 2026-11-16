@@ -1,5 +1,13 @@
 """Ports = the interfaces the core depends on. Adapters implement these; the core
 never imports a concrete provider. Swap providers without touching core/nodes.
+
+Some ports are DECLARED AHEAD of any adapter, on purpose: they fix the shape of
+a planned seam (docs/ARCHITECTURE.md) so the first implementation has a contract
+to meet rather than inventing one. Nothing implements them yet, and nothing
+calls them -- do not read their presence as a working feature:
+
+    Checkpointer (LangGraph's own savers are used directly), CredentialProvider,
+    Notifier, ToolRunner, OutputGuard, Evaluator, Reranker (T13).
 """
 from __future__ import annotations
 

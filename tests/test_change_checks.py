@@ -370,16 +370,105 @@ def test_what_cannot_be_checked_is_said_out_loud(repo):
     assert res == [{"check": "isort", "step": 1, "status": "skip", "message": "needs the binary"}]
 
 
-def test_a_crashing_check_becomes_a_skip_and_the_rest_still_run(repo, monkeypatch):
-    def boom(change, config):
-        raise RuntimeError("bad day")
-    monkeypatch.setattr(cc, "CHECKS", [boom, cc.check_line_hygiene])
+def test_an_unreadable_repo_skips_that_check_and_the_rest_still_run(repo, monkeypatch):
+    def unreadable(change, config):
+        raise OSError("permission denied reading app/x.py")
+    monkeypatch.setattr(cc, "CHECKS", [unreadable, cc.check_line_hygiene])
     write(repo, {"app/x.py": "x = 1\n"})
     res = cc.run_all({"files": ["app/x.py"], "revision": STAGED}, repo, {})
-    assert res[0]["status"] == "skip" and "bad day" in res[0]["message"]
+    assert res[0]["status"] == "skip" and "permission denied" in res[0]["message"]
     assert any(r["check"] == "line_length" for r in res)
+
+
+def test_a_bug_in_a_check_is_not_hidden_as_a_skip(repo, monkeypatch):
+    """A TypeError is a bug, not an unreadable repo. Turning it into a permanent
+    "skip" is how a check silently stops checking anything."""
+    def buggy(change, config):
+        return [None.missing]                                  # AttributeError
+    monkeypatch.setattr(cc, "CHECKS", [buggy])
+    write(repo, {"app/x.py": "x = 1\n"})
+    with pytest.raises(AttributeError):
+        cc.run_all({"files": ["app/x.py"], "revision": STAGED}, repo, {})
 
 
 def test_an_unreadable_change_skips_rather_than_passes(tmp_path):
     res = cc.run_all({"files": ["a.py"], "revision": {}}, tmp_path, {})
     assert any(r["check"] == "n_plus_one" and r["status"] == "skip" for r in res)
+
+
+# ── the detector's known misreads (2026-11-16 audit), and batched git reads ─
+@pytest.mark.parametrize("src,expect", [
+    # false positives that used to be flagged
+    ("def v(request, rows):\n    for r in rows:\n        request.session.get(r)\n", None),
+    ("def v(rows):\n    cache = {}\n    for r in rows:\n        cache.get(r)\n", None),
+    # false negatives that used to pass
+    ("def v(rows):\n    for r in rows:\n        for k in ('a', 'b'):\n"
+     "            User.objects.get(pk=r)\n", "db"),
+    ("def v(entries):\n    for i in range(len(entries)):\n"
+     "        User.objects.get(pk=entries[i])\n", "db"),
+    ("def v(page_rows):\n    for row in page_rows:\n        User.objects.get(pk=row)\n", "db"),
+])
+def test_the_detector_reads_these_loops_correctly(src, expect):
+    tree = cc.ast.parse(src)
+    visitor = cc._LoopVisitor(cc._Module(tree))
+    visitor.visit(tree)
+    assert [k for _, _, k, _ in visitor.found][:1] == ([expect] if expect else [])
+
+
+def test_a_query_added_inside_an_existing_serializer_hook_is_new(repo):
+    """The hook's `def` line is old, but the round trip in it is not."""
+    base = ("class S(serializers.ModelSerializer):\n    def get_n(self, obj):\n"
+            "        return obj.n\n")
+    write(repo, {"app/serializers.py": base}, commit="hook")
+    write(repo, {"app/serializers.py": base.replace(
+        "return obj.n", "return Order.objects.filter(user=obj).count()")})
+    (f,) = flags(run(repo, cc.check_n_plus_one))
+    assert "once per serializer row" in f["message"]
+
+
+def test_batched_reads_match_per_file_git_and_use_a_handful_of_calls(repo, monkeypatch):
+    files = {f"app/m{i}.py": f"import os\nX = {i}\n" for i in range(12)}
+    write(repo, dict.fromkeys(list(files)[:6], "OLD = 1\n"), commit="base files")
+    write(repo, files)
+    calls = []
+    real = cc.subprocess.run
+
+    def counting(cmd, *a, **k):
+        calls.append(cmd[3] if len(cmd) > 3 else cmd)
+        return real(cmd, *a, **k)
+    monkeypatch.setattr(cc.subprocess, "run", counting)
+    change = cc.Change(root=repo, files=sorted(files), revision=dict(STAGED))
+    for path in sorted(files):
+        alone = real(["git", "-C", str(repo), "diff", "--cached", "--", path],
+                     capture_output=True, text=True).stdout
+        assert change.diff_for(path) == alone
+        assert change.content_for(path) == files[path]
+        assert change.base_for(path) == ("OLD = 1\n" if path in list(files)[:6] else "")
+        assert change.tracked(path)
+    assert not change.tracked("app/nope.py")
+    assert len(calls) == 4, calls          # diff + new blobs + base blobs + ls-files
+
+
+def test_a_range_is_checked_against_its_head_commit_not_the_reviewer(repo):
+    _git(repo, "-c", "user.name=Someone Else", "commit", "-q", "--allow-empty",
+         "-m", "feat(x): thing\n\nVERIFIED. yes")
+    head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+    change = cc.Change(root=repo, files=[], revision={
+        "diff_args": ["diff", f"{head}~1..{head}"], "new_ref": f"{head}:",
+        "base_ref": f"{head}~1:", "head": head, "commit": None})
+    assert cc._author(change) == "Someone Else"
+    assert flags(cc.check_commit_message(change, CM)) == [], "read from the commit, not a file"
+
+
+def test_a_query_several_helpers_deep_is_still_followed():
+    """Propagation ran three rounds and stopped; it now runs to a fixed point."""
+    src = ("def d(x):\n    return User.objects.get(pk=x)\n"
+           "def c(x):\n    return d(x)\n"
+           "def b(x):\n    return c(x)\n"
+           "def a(x):\n    return b(x)\n"
+           "def view(rows):\n    for r in rows:\n        a(r)\n")
+    tree = cc.ast.parse(src)
+    visitor = cc._LoopVisitor(cc._Module(tree))
+    visitor.visit(tree)
+    assert [(k, how) for _, _, k, how in visitor.found] == [("db", "via a()")]

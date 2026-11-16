@@ -19,8 +19,8 @@ def normalize_issue(raw: dict) -> IssueEvidence:
     """The built-in issue-triage normaliser.
 
     GitHub's issues endpoint returns PRs mixed in; that filtering belongs
-    upstream in the client. TODO(T11): Pydantic, so malformed provider JSON
-    raises here rather than propagating into the graph.
+    upstream in the client. `IssueEvidence` is a Pydantic model (T11), so
+    malformed provider JSON raises HERE rather than propagating into the graph.
     """
     return IssueEvidence(
         url=raw["html_url"],

@@ -34,7 +34,7 @@ KV_RESERVE_GB_LARGE = 2.0   # reduced-context profiles
 
 
 @adapter("platform", "mac")
-class MacPlatform:
+class MacPlatform(base.PlatformBase):
     name = "mac"
     profiles = ("portable", "mac_resident", "mac_max")
 
@@ -77,5 +77,3 @@ class MacPlatform:
             "memory": accounting,
         }
 
-    def models(self, profile: str = base.DEFAULT_PROFILE) -> dict:
-        return base.resolve(profile, self.profiles).as_dict()

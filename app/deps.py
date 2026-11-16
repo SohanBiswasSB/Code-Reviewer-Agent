@@ -24,6 +24,8 @@ import os
 import warnings
 from contextlib import asynccontextmanager
 
+from app.activity import WARNING, log_event
+
 # Read straight from the environment. Anything platform- or model-related lives
 # in config.py / adapters/platforms instead -- this is only external services.
 _SETTING_KEYS = (
@@ -45,7 +47,11 @@ def _memory_saver():
     from langgraph.checkpoint.memory import MemorySaver
 
     from app.state import checkpoint_serde
+    # Kept as a Python warning (a developer running this sees it) AND recorded:
+    # "approvals are not durable" is exactly what an operator must find later.
     warnings.warn(_MEMORY_WARNING, RuntimeWarning, stacklevel=3)
+    log_event("config", "checkpointer.memory", severity=WARNING, message=_MEMORY_WARNING,
+              failure_source="config")
     return MemorySaver(serde=checkpoint_serde())
 
 

@@ -9,6 +9,8 @@ invisible because `human_review` is a legitimate route.
 from __future__ import annotations
 
 from registry import surface
+from tools.filekinds import DATA, file_rank
+from tools.prepush.change import split_diff
 
 # Paths whose changes get the expensive, LLM-backed investigation. Deliberately
 # path-based and blunt: the whole value of a rule-based classify is that it is
@@ -37,6 +39,12 @@ def _is_trivial(files: list[str]) -> bool:
         for f in files
     )
 
+
+# Per-file retrieval (see CodeReviewSurface.build_queries). At most this many files
+# get their own query, and each query carries this much of the file's diff -- the
+# embedder's context is 2,048 tokens, and the hunk's first lines say most.
+MAX_QUERY_FILES = 6
+PER_FILE_QUERY_CHARS = 1500
 
 @surface("code_review")
 class CodeReviewSurface:
@@ -83,6 +91,29 @@ class CodeReviewSurface:
         """
         return "comment+label" if diagnosis.proposed_label else "comment"
 
+    def build_queries(self, evidence: dict) -> list[str]:
+        """One retrieval query PER CHANGED FILE: its path, then its own diff.
+
+        A single query for the whole change found evidence for whichever file
+        dominated the embedding. On the first real Masterclass run it returned 5
+        passages for a 15-file change -- two chunks of admin.py and three docs --
+        so 4 of the 5 findings cited passages from a DIFFERENT file than the one
+        they were about, and the entailment check correctly failed every run.
+
+        Code first, then config, then docs, by the same rank the git source packs
+        the diff with; data files are never queried (their content is records,
+        not code). A file whose diff fell past the budget still gets a path-only
+        query, which BM25 matches on. The whole-change query goes last, as
+        context, so it never crowds out a file.
+        """
+        chunks = split_diff(evidence.get("diff", ""))
+        files = sorted((f for f in evidence.get("files", []) if file_rank(f) != DATA),
+                       key=lambda f: (file_rank(f), evidence["files"].index(f)))
+        queries = [f"{path}\n{chunks.get(path, '')[:PER_FILE_QUERY_CHARS]}".strip()
+                   for path in files[:MAX_QUERY_FILES]]
+        whole = self.build_query(evidence)
+        return [*queries, whole] if whole else queries
+
     def build_query(self, evidence: dict) -> str:
         """Retrieval query. Paths matter as much as prose for finding prior work
         on the same modules, so they are part of the query rather than dropped."""
@@ -101,6 +132,7 @@ class CodeReviewSurface:
             return "deterministic"
         if evidence.get("touched_areas"):
             return "ai_investigation"
-        if evidence.get("is_trivial"):
-            return "human_review"
+        # Trivial or not, anything else is a human's call (invariant 12: an
+        # ambiguous route goes to human_review). There used to be a separate
+        # `is_trivial` branch returning the same thing.
         return "human_review"

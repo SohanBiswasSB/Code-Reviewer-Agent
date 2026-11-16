@@ -25,8 +25,9 @@ Keep the two numbers separate, permanently.
 ## Status of the backends
 
 The dense and BM25 backends are STUBS over a tiny in-memory corpus so this
-module runs offline with no dependencies. Swap them for Pinecone/pgvector plus a
-real BM25 (or Postgres `ts_rank`). RRF and the two-score contract are real.
+module runs offline with no dependencies -- this is the DEMO behind
+`RETRIEVER=hybrid`. The real path is `adapters/retriever_indexed.py`. RRF
+(tools/fusion.py) and the two-score contract are shared and real.
 
 **The demo similarity is a Jaccard proxy, NOT a cosine.** Its numbers are on a
 different scale from any real embedding model's, so a threshold calibrated
@@ -40,7 +41,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-RRF_K = 60  # standard RRF constant
+from tools.fusion import RRF_K, reciprocal_rank_fusion  # noqa: F401 -- re-exported
 
 
 @dataclass
@@ -97,15 +98,6 @@ def _bm25_search(query: str, k: int) -> list[tuple[str, float]]:
     q = set(query.lower().split())
     scored = [(cid, float(len(q & set(txt.lower().split())))) for cid, txt in _CORPUS]
     return sorted(scored, key=lambda x: x[1], reverse=True)[:k]
-
-
-def reciprocal_rank_fusion(rankings: list[list[str]], k: int = RRF_K) -> dict[str, float]:
-    """Fuse several ranked id-lists. score(d) = sum 1/(k + rank_in_list)."""
-    fused: dict[str, float] = {}
-    for ranking in rankings:
-        for rank, doc_id in enumerate(ranking, start=1):
-            fused[doc_id] = fused.get(doc_id, 0.0) + 1.0 / (k + rank)
-    return fused
 
 
 def relevance_of(query: str) -> dict[str, float]:

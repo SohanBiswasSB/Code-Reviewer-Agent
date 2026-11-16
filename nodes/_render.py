@@ -96,9 +96,23 @@ def render_snippets(hits: list[dict]) -> str:
     if not hits:
         return "(nothing retrieved)"
     return "\n".join(
-        f"- id={h['id']} relevance={h.get('score')} :: {h.get('text', '')}"
+        f"- id={h['id']} relevance={h.get('score')} :: {_clip(h.get('text', ''))}"
         for h in hits
     )
+
+
+# A passage's text as a PROMPT shows it. Chunks run to ~6.8k chars on a real
+# index, and the judge re-reads every passage in an 8k-token context, so an
+# uncapped prompt could overflow it -- a likely cause of the 2026-11-16 crash in
+# the judge. Only the prompt is cut: the entailment check reads the full text
+# from state, so what a claim is checked against never shrinks.
+PROMPT_SNIPPET_CHARS = 1500
+
+
+def _clip(text: str) -> str:
+    if len(text) <= PROMPT_SNIPPET_CHARS:
+        return text
+    return text[:PROMPT_SNIPPET_CHARS] + " [...cut for the prompt]"
 
 
 def render_evidence(ev, hits: list[dict], guard=None, tenant: str = "_default",
@@ -146,9 +160,12 @@ def render_for_judge(diagnosis, hits: list[dict], guard=None,
     # The diagnosis is MODEL output, and is fenced and guarded all the same. It
     # was produced from untrusted evidence, so it can carry an injected
     # instruction forward -- and the judge is a second model that would read it.
-    diag_block, r1 = fence_guarded("DIAGNOSIS_UNDER_REVIEW", summary, guard, tenant)
-    retrieved, r2 = fence_guarded("RETRIEVED", render_snippets(hits), guard, tenant)
-    return diag_block + "\n\n" + retrieved, _merge(_merge({}, r1), r2)
+    diag_block, report = fence_guarded("DIAGNOSIS_UNDER_REVIEW", summary, guard, tenant)
+    # The report covers the DIAGNOSIS block only. The RETRIEVED snippets are the
+    # same ones the diagnosis prompt already guarded and counted; merging their
+    # report in again would double every redaction they contain.
+    retrieved, _ = fence_guarded("RETRIEVED", render_snippets(hits), guard, tenant)
+    return diag_block + "\n\n" + retrieved, report
 
 
 def render_review(diagnosis) -> str:

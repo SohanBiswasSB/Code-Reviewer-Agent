@@ -40,11 +40,12 @@ is sanitised and fenced by `nodes/_render.py` before a model sees it.
 """
 from __future__ import annotations
 
-import pathlib
 import subprocess
 
 from registry import adapter
+from tools.change_checks import split_diff
 from tools.codebase import codebase_root
+from tools.filekinds import file_rank
 
 # The diff BUDGET. ~48k chars is ~12k tokens: room for the prompt and retrieved
 # code inside a 32k context. What does not fit is NAMED, never silently dropped --
@@ -58,22 +59,7 @@ MAX_DIFF_CHARS = 48_000
 # while the riskiest file in the change -- a script that splits shared question
 # banks in the database -- fell past the cut and was never seen. Path order is
 # alphabetical, and alphabetical is not a priority.
-DATA_SUFFIXES = {".csv", ".tsv", ".xls", ".xlsx", ".parquet", ".jsonl", ".ndjson",
-                 ".sqlite", ".db", ".pkl", ".npy", ".npz"}
-DOC_SUFFIXES = {".md", ".rst", ".txt"}
-CONFIG_SUFFIXES = {".yml", ".yaml", ".toml", ".ini", ".cfg", ".json", ".lock", ".env"}
-
-
-def _rank(path: str) -> int:
-    """0 code · 1 config · 2 docs · 3 data (content never shown)."""
-    suffix = pathlib.PurePosixPath(path).suffix.lower()
-    if suffix in DATA_SUFFIXES:
-        return 3
-    if suffix in DOC_SUFFIXES:
-        return 2
-    if suffix in CONFIG_SUFFIXES:
-        return 1
-    return 0
+_rank = file_rank            # tools/filekinds.py; shared with the code-review surface
 
 
 def pack_diff(files: list[str], diff_for, budget: int = MAX_DIFF_CHARS) -> tuple[str, str]:
@@ -85,7 +71,8 @@ def pack_diff(files: list[str], diff_for, budget: int = MAX_DIFF_CHARS) -> tuple
     by name only: their content is records, not code, and is the part of a change
     most likely to carry someone's personal details into a prompt.
     """
-    order = sorted(files, key=lambda p: (_rank(p), files.index(p)))
+    position = {p: i for i, p in enumerate(files)}      # files.index() was O(n^2)
+    order = sorted(files, key=lambda p: (_rank(p), position[p]))
     parts: list[str] = []
     used = 0
     cut, unseen, data = [], [], []
@@ -163,6 +150,7 @@ class GitLocalSource:
             title = f"Staged changes in {codebase.get('name') or root.name}"
             body = _git(root, "diff", "--cached", "--stat")
             ref = "staged"
+            head = None                         # no commit yet: author is you
         elif ".." in target:
             # `a...b` = what b changed since it branched from a (a PR's view);
             # `a..b` = the straight difference between the two trees.
@@ -181,6 +169,7 @@ class GitLocalSource:
             title = f"{target} ({len(log.splitlines())} commit(s))"
             body = log
             ref = f"{a[:12]}..{b[:12]}"
+            head = b
         else:
             sha = _verify(root, target)
             diff_args = ("show", "--format=", sha)
@@ -190,14 +179,19 @@ class GitLocalSource:
             title = _git(root, "log", "-1", "--format=%s", sha).strip()
             body = _git(root, "log", "-1", "--format=%b", sha).strip()
             ref = sha[:12]
+            head = sha
 
         files = [f for f in (x.strip() for x in files) if f]
         if not files:
             raise GitTargetError(f"target {target!r} contains no changes to review")
 
-        # One file at a time, so the budget can be spent by priority. `--` ends
-        # option parsing: a path is a path even if it starts with a dash.
-        diff, note = pack_diff(files, lambda p: _git(root, *diff_args, "--", p))
+        # The budget is spent by priority, file by file -- but the diffs are fetched
+        # in ONE git call and split, not one call per file. `--no-renames` keeps
+        # each chunk identical to what a per-path diff prints; `--` ends option
+        # parsing, so a path is a path even if it starts with a dash.
+        whole = split_diff(_git(root, *diff_args, "--no-renames", "--", *files))
+        diff, note = pack_diff(
+            files, lambda p: whole[p] if p in whole else _git(root, *diff_args, "--", p))
         if note:
             diff = f"{diff}\n\n{note}"
             body = f"{body}\n\n{note}".strip()
@@ -213,6 +207,6 @@ class GitLocalSource:
             # the packed `diff` above is cut to a budget, and a check must not
             # pass a file merely because it fell past the cut.
             "revision": {"diff_args": list(diff_args), "new_ref": new_ref,
-                         "base_ref": base_ref,
+                         "base_ref": base_ref, "head": head,
                          "commit": ref if ref != "staged" and ".." not in ref else None},
         }

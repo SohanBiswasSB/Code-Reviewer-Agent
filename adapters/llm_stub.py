@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import re
 
+from adapters.llm_lmstudio import _temperature_for
 from registry import adapter
 
 # `nodes/_render.py::render_snippets` emits "- id=<id> relevance=<score> :: <text>".
@@ -52,7 +53,6 @@ class StubLLM:
         # Resolved the same way the real adapter does, so the stub is a faithful
         # stand-in rather than a thing with its own settings. A test asserting
         # per-role temperature should not have to care which provider is active.
-        from adapters.llm_lmstudio import _temperature_for
         self.temperature = _temperature_for(role)
 
     def complete(self, system: str, user: str, *, json_schema: dict | None = None) -> str:

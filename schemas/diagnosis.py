@@ -65,7 +65,9 @@ class ReviewResult(BaseModel):
     groundedness_ok: bool = False    # cited ids are real AND clear the threshold
     risk_ok: bool = False            # severity is in the tenant's allowlist
     permission_ok: bool = False      # the action type is in the tenant's allowlist
-    entailment_ok: bool = True       # the claim follows from the cited passage
+    # False like the other three (invariant 12): a ReviewResult built without
+    # running the entailment check must not count as having passed it.
+    entailment_ok: bool = False      # the claim follows from the cited passage
     # Why it failed, when it did. A gate that only says "escalated" makes the
     # human redo the diagnosis to find out what tripped.
     failures: list[str] = Field(default_factory=list)

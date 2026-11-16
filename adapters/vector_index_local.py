@@ -42,7 +42,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import pathlib
 import re
 import shutil
@@ -50,6 +49,7 @@ import time
 
 import numpy as np
 
+from datadir import data_dir
 from registry import adapter
 
 MANIFEST = "manifest.json"
@@ -57,7 +57,7 @@ MANIFEST = "manifest.json"
 
 def _root() -> pathlib.Path:
     """`<CRA_DATA_DIR>/index`, beside audit records -- and just as sensitive."""
-    return pathlib.Path(os.getenv("CRA_DATA_DIR", "./var")).expanduser() / "index"
+    return data_dir() / "index"
 
 
 def namespace_dirname(namespace: str) -> str:
@@ -116,6 +116,11 @@ class LocalVectorIndex:
 
     def _dir(self, namespace: str) -> pathlib.Path:
         return self.root / namespace_dirname(namespace)
+
+    def sidecar(self, namespace: str, name: str) -> pathlib.Path:
+        """Where derived data for a namespace lives (e.g. the saved BM25
+        statistics): beside the vectors, so it moves and is deleted with them."""
+        return self._dir(namespace) / name
 
     # ── write ────────────────────────────────────────────────────────────────
     def upsert(self, namespace: str, chunks: list[dict],
@@ -232,7 +237,11 @@ class LocalVectorIndex:
                 f"query vector has {len(vector)} dims but index '{namespace}' "
                 f"holds {vectors.shape[1]}: a different embedder built it")
         sims = vectors @ self._unit(vector)          # rows are already unit length
-        top = np.argsort(-sims)[:k]
+        # argpartition then sort only the k winners: a full argsort of every
+        # chunk to keep k was half the search cost on a 17.6k-chunk index.
+        k = min(k, len(sims))
+        top = np.argpartition(-sims, k - 1)[:k]
+        top = top[np.lexsort((top, -sims[top]))]
         out = []
         for rank, i in enumerate(top):
             meta = dict(metas[i])

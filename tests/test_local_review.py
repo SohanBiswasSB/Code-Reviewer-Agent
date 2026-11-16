@@ -358,7 +358,7 @@ def test_a_run_that_ends_at_the_prompt_says_how(cli, tmp_path, answer, interacti
 
 def test_live_status_can_never_fail_a_run(cli, tmp_path, monkeypatch):
     def broken(*a, **k):
-        raise RuntimeError("disk on fire")
+        raise OSError("disk full")              # the failure the contract is about
     monkeypatch.setattr(live, "stage", broken)
     assert review.run("_default", "staged", ask=lambda _: "y", interactive=True) == 0
 
@@ -454,3 +454,14 @@ def test_entailment_never_judges_the_code_generated_checklist():
 def test_a_surface_without_a_diff_gets_no_checks():
     from nodes.prepush_checks import prepush_checks
     assert prepush_checks({"_surface_name": "log_review", "evidence": {}}) == {"_checks": []}
+
+
+def test_the_judges_guard_report_reaches_the_audit_record(cli, tmp_path):
+    """The judge reads the DIAGNOSIS, which is model output built from untrusted
+    evidence. Its guard report used to be discarded (`judge_turn, _ = ...`), so
+    injection phrasing carried forward by the model was counted and then lost."""
+    review.run("_default", "staged", ask=lambda _: "y", interactive=True)
+    (rec,) = [json.loads(line) for p in tmp_path.glob("var/audit/**/*.jsonl")
+              for line in p.read_text().splitlines()]
+    judge = rec["guard"]["judge"]
+    assert {"redacted", "injection_suspected", "fence_forgery"} <= set(judge)

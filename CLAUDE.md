@@ -43,6 +43,10 @@ python -m tools.ingest --tenant masterclass --root ~/Dev/<repo>            # bui
 python -m app.review --tenant masterclass --root ~/Dev/<repo>              # staged changes
 python -m app.review --tenant masterclass --root ~/Dev/<repo> --target main...HEAD
 python -m app.monitor                 # live view: http://127.0.0.1:8765 (localhost only)
+
+# Measure the gate thresholds (prints a suggestion; never edits a policy):
+python -m tools.calibrate --tenant masterclass --root ~/Dev/<repo> relevance   # needs LM Studio
+python -m tools.calibrate --tenant masterclass entailment                      # from audit records
 ```
 
 Requirements files are layered: `requirements.txt` (graph + API) ⊂
@@ -186,7 +190,9 @@ rather than a tuning problem.
 
 **Thresholds are measured, not guessed.** `MIN_RELEVANCE_SCORE` and
 `MIN_ENTAILMENT_SCORE` are calibrated numbers; the shipped 0.35/0.40 were calibrated
-for a *different* embedder and are owed a re-measurement. Citation scores come from
+for a *different* embedder and are owed a re-measurement -- `python -m tools.calibrate`
+measures both (relevance needs the embedder; entailment reads real findings from the
+audit store, so it gets better with every review run). Citation scores come from
 the retriever's own `hits`, never from the model (a model-supplied score would be
 trivially gameable, and the gate compares against exactly that number — T17).
 
@@ -201,7 +207,8 @@ Two of them are easy to skip and are the ones that have caught real defects: the
 gate suite runs **first**, model-free, so no later step can mask a weakened
 gate; and pytest runs **twice**, the
 second time with `LANGGRAPH_STRICT_MSGPACK=true`. Never conclude "tests pass"
-from a bare `pytest`.
+from a bare `pytest`. After the gate suite, the remaining steps run in parallel
+(~18 s instead of ~31 s); `--serial` restores one at a time.
 
 **Two kinds of eval, kept separate.** `eval/harness.py` is a *regression* suite: one
 unambiguous right answer per task, bar is 100% forever, exit non-zero on any miss —
@@ -249,6 +256,32 @@ registry, the filesystem tenant store, JSONL audit + trace, and namespaced hybri
 retrieval (`RETRIEVER=indexed`, the default: dense cosine + BM25, RRF-ordered) over an
 on-disk index that `tools/ingest.py` builds. `RETRIEVER=hybrid` is the 4-document
 offline demo; tests, the gate suite and the demo declare it.
+
+**Retrieval is per changed file** (2026-11-16). `CodeReviewSurface.build_queries`
+makes one query per changed file (path + that file's diff; code, then config, then
+docs; data never), plus the whole-change query; `generate_diagnosis.merge_hits`
+round-robins them, deduplicates, keeps each chunk's best retriever score, and caps
+at 8 -- sized for the judge's 8k context, with each passage clipped to 1,500 chars
+in the PROMPT only (entailment reads full text). One query for the whole change had
+left 4 of 5 findings citing a different file than they were about. The retriever and
+cross-encoder are shared per process (`config._shared`), and BM25's statistics are
+saved beside the vectors (`bm25.npz`, keyed by the index fingerprint).
+
+**Errors: name the family, never `except Exception`** (user, 2026-11-16).
+`errors.py` holds the domain errors (`ConfigError`, `EvidenceError`, `ProviderError`,
+`StorageError` -- each also a builtin, so old `except ValueError` keeps working) and
+the families a boundary may catch: `WRITE_ERRORS` (disk / serialisation),
+`CONFIG_ERRORS`, `PARSE_ERRORS`. Anything outside its family is a bug and
+propagates; the activity log records it with its traceback. Re-raising handlers
+(record, then `raise`) are fine. The ONE deliberate broad catch is the label in
+`PRCommentSink` -- after an irreversible comment post -- and it logs at ERROR.
+
+**Activity log** (`app/activity.py`, port of the Masterclass `Logger` design):
+`ActivityLogger(...)` spans and `log_event(...)`; secrets/PII masked on the way in;
+one correlation id per run (= thread id) or request (`X-Correlation-Id`). Every
+graph node, LLM call, query embedding, approval decision, API request and ingest
+job is recorded in `var/activity/YYYY-MM-DD.jsonl` and shown on the monitor's
+**Activity log** panel. Never log prompt or evidence text -- counts and ids only.
 
 **Pre-push checks run on every code review** (`nodes/prepush_checks.py` ->
 `tools/change_checks.py`), modelled on the Masterclass `/prepush-ritual`: generic
@@ -305,7 +338,7 @@ Both suites are green, so CI should pass.
 
 - **T1 is closed** (`390f1b0`, 2026-09-11): both LLM nodes resolve from
   `config.get_llm(role)`, proven on the real graph with nothing injected. Offline
-  callers declare `LLM_PROVIDER=stub`. That commit is **not pushed** yet.
+  callers declare `LLM_PROVIDER=stub`. Pushed (it is in `origin`'s history).
 - **2026-11-16: first real review of another codebase (Masterclass)** -- see
   DECISIONS §8 for what it exposed (diff budget, findings not posted, T26, forced
   offline gates, Metal OOM) and §9 for the next steps (calibration first).
@@ -316,14 +349,23 @@ Both suites are green, so CI should pass.
   --root ~/Dev/Miles-USP-Backend-PROD`, then calibrate thresholds. The user chose to
   index MilesOne **whole** (redacted), `Miscellaneous/` included — see DECISIONS §8.
 - The Postgres checkpointer path is unverified — there is no Postgres on this machine.
-- `.env.example` is **not in the repo**: `.gitignore:11`'s `.env.*` matches it, despite
-  `TODO.md` marking it done. Decide which is wrong. (`.dockerignore` *is* tracked — an
-  earlier session's note that it was also missing was wrong.)
+- `.env.example` was ignored by `.gitignore`'s `.env.*` while `TODO.md` called it done.
+  Decided 2026-11-16: the ignore was wrong -- it holds names and defaults, no values --
+  so `.gitignore` now has `!.env.example`, and the file was brought up to date.
 - `min_relevance_score` (0.35 / 0.40 in `tenants/*/policy.json`) is **uncalibrated**, and
   the first live run showed why it matters: the one real citation scored **0.2 against the
   0.35 bar**, and entailment landed at **0.24 against 0.25**. The verdict turned on two
   constants calibrated for an embedder this project no longer uses — the embedder has
   changed three times since. `doctor` warns. Re-measure once ingest (T10) exists.
+- **MEASURED 2026-11-16 (`tools.calibrate`, masterclass, 305 per-file queries from 40
+  commits): the 0.40 relevance bar is INERT.** EmbeddingGemma packs cosines into
+  ~0.7-0.9: same-file passages p10/median/p90 = 0.780/0.823/0.869, other-file
+  passages 0.727/0.770/0.803 -- so 0.40 can never fail on real retrieval (T21's
+  shape). Youden cut 0.793 (J 0.66); a 0.78 cut keeps 90% of same-file evidence and
+  admits 33% of other-file passages. NOT adopted: the first approved run cited a
+  `models.py` chunk at 0.774, which 0.78 would escalate. "Same file" is a noisy proxy
+  for relevant; the user decides the value. Entailment has 5 findings so far -- too
+  few to measure; every audited review adds to it.
 
 **The inference host is decided and implemented** (the `studio` platform + profile):
 

@@ -26,9 +26,29 @@ import hashlib
 from registry import adapter
 from schemas.evidence import MAX_LINE_CHARS
 
-WINDOW_LINES = 5_000          # lines per detector call; bounds peak memory
+WINDOW_LINES = 5_000          # lines per detector call, per stream
+# Lines held across ALL streams before everything is flushed. WINDOW_LINES alone
+# bounded one stream, not the day: a stream only flushed at 5,000 lines, so every
+# shorter S3 object stayed buffered until EOF. Measured: 400 objects of 4,999
+# lines peaked at 252 MB -- the whole day, which is what this module exists to
+# never hold. Flushing early is safe: `starts` keeps each stream's offsets right.
+MAX_BUFFERED_LINES = 4 * WINDOW_LINES
 MAX_SAMPLES_PER_SIGNAL = 5    # what actually reaches the prompt, per signal
 MAX_CANDIDATES = 20           # distinct signals carried forward
+
+
+def _candidates(counts: dict, severity_of: dict, samples: dict) -> tuple[list, list[dict]]:
+    """(all signals by count, the capped candidate list). Most frequent first: a
+    cap has to drop the least informative signals, not arbitrary ones."""
+    ordered = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
+    return ordered, [
+        {"signal": signal,
+         "severity": severity_of.get(signal, "medium"),
+         "count": count,
+         "services": sorted({s["service"] for s in samples.get(signal, [])}),
+         "samples": samples.get(signal, [])}
+        for signal, count in ordered[:MAX_CANDIDATES]
+    ]
 
 
 @adapter("source", "s3logs")
@@ -76,12 +96,14 @@ class S3LogSource:
         buffers: dict[tuple[str, str], list[str]] = {}
         starts: dict[tuple[str, str], int] = {}
         per_stream_count: dict[tuple[str, str], int] = {}
+        buffered = 0
 
         def flush(key: tuple[str, str]) -> None:
-            nonlocal truncated
+            nonlocal truncated, buffered
             lines = buffers.get(key)
             if not lines:
                 return
+            buffered -= len(lines)
             service, ref = key
             hits = detector.detect({"service": service, "ref": ref,
                                     "start": starts[key], "lines": lines})
@@ -113,23 +135,17 @@ class S3LogSource:
             starts.setdefault(key, 0)
             per_stream_count[key] = per_stream_count.get(key, 0) + 1
             buffers.setdefault(key, []).append(line)
+            buffered += 1
             if len(buffers[key]) >= WINDOW_LINES:
                 flush(key)
+            elif buffered >= MAX_BUFFERED_LINES:
+                for k in list(buffers):
+                    flush(k)
         for key in list(buffers):
             flush(key)
 
-        # Most frequent signals first: a cap has to drop the least informative.
-        ordered = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
-        if len(ordered) > MAX_CANDIDATES:
-            truncated = True
-        candidates = [
-            {"signal": signal,
-             "severity": severity_of.get(signal, "medium"),
-             "count": count,
-             "services": sorted({s["service"] for s in samples.get(signal, [])}),
-             "samples": samples.get(signal, [])}
-            for signal, count in ordered[:MAX_CANDIDATES]
-        ]
+        ordered, candidates = _candidates(counts, severity_of, samples)
+        truncated = truncated or len(ordered) > MAX_CANDIDATES
 
         return {
             "date": target,

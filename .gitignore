@@ -9,6 +9,9 @@ dist/
 # Environments
 .env
 .env.*
+# The annotated settings reference IS committed: it holds no values, only
+# names and defaults, and TODO.md has long listed it as shipped.
+!.env.example
 .venv/
 venv/
 env/

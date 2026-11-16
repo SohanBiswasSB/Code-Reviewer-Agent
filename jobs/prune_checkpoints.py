@@ -30,6 +30,11 @@ import argparse
 import asyncio
 from datetime import UTC, datetime, timedelta
 
+from adapters.audit_jsonl import iter_records
+from app.activity import ActivityLogger, capture_library_logs, log_event
+from app.deps import open_checkpointer
+from app.graph import build_graph
+
 # Outcomes that mean the run is over. A denial counts: the human answered.
 TERMINAL_OUTCOMES = frozenset({"executed", "denied", "escalated", "human_review", "ended"})
 
@@ -75,9 +80,6 @@ def expired_threads(records, keep_days: int, now: datetime | None = None) -> lis
 
 
 async def prune(keep_days: int, apply: bool) -> dict:
-    from adapters.audit_jsonl import iter_records
-    from app.deps import open_checkpointer
-    from app.graph import build_graph
 
     candidates = expired_threads(iter_records(), keep_days)
     deleted, kept_pending, missing = [], [], []
@@ -97,6 +99,12 @@ async def prune(keep_days: int, apply: bool) -> dict:
             if apply:
                 await saver.adelete_thread(row["thread_id"])
             deleted.append(row)
+            # A deletion is irreversible: each one is on record, with the run's
+            # outcome, so "where did thread X go" always has an answer.
+            log_event("job", "prune.deleted" if apply else "prune.would_delete",
+                      tenant=row.get("tenant"), correlation_id=row["thread_id"],
+                      metadata={"thread_id": row["thread_id"], "outcome": row.get("outcome"),
+                                "keep_days": keep_days})
 
     return {"keep_days": keep_days, "applied": apply,
             "considered": len(candidates), "deleted": deleted,
@@ -110,7 +118,12 @@ def main() -> int:
                     help="actually delete; without it this is a dry run")
     args = ap.parse_args()
 
-    report = asyncio.run(prune(args.keep_days, args.apply))
+    capture_library_logs()
+    with ActivityLogger("job", "prune_checkpoints",
+                        metadata={"keep_days": args.keep_days, "apply": args.apply}) as alog:
+        report = asyncio.run(prune(args.keep_days, args.apply))
+        alog.add_metadata("deleted", len(report["deleted"]))
+        alog.add_metadata("kept_pending", len(report["kept_because_pending"]))
     verb = "DELETED" if report["applied"] else "would delete"
     print(f"{verb} {len(report['deleted'])} thread(s) "
           f"older than {report['keep_days']}d "

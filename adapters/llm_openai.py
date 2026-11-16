@@ -9,9 +9,11 @@ class OpenAILLM:
     swap stays a config change (LLM_PROVIDER=openai) rather than a code change.
     """
 
-    def __init__(self, model: str = "gpt-4o-mini", runtime: dict | None = None):
+    def __init__(self, model: str = "gpt-4o-mini", runtime: dict | None = None,
+                 role: str | None = None):
         self.model = model
         self.runtime = runtime or {}
+        self.role = role
 
     def complete(self, system: str, user: str, *, json_schema: dict | None = None) -> str:
         raise NotImplementedError("wire the openai client; return the text (or JSON string)")

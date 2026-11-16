@@ -15,6 +15,9 @@ what a good query looks like for its own evidence shape.
 """
 from __future__ import annotations
 
+import json as _json
+
+import config
 from nodes._render import render_evidence
 from nodes._surface import active_surface, evidence_as_dict, namespace_for
 from schemas.diagnosis import (
@@ -31,24 +34,58 @@ def _fallback_query(ev) -> str:
     return f"{title}\n{body}".strip()
 
 
-def generate_diagnosis(state: dict, llm=None, retriever=None) -> dict:
-    ev = state["evidence"]
-    surface = active_surface(state)
+# Multi-query retrieval: passages per query, and the most kept in total. The cap
+# is set by the JUDGE's context (8k tokens on mac_max), which reads every passage
+# again; at <= PROMPT_SNIPPET_CHARS each (nodes/_render.py) 8 passages fit with room.
+PER_QUERY_K = 3
+MAX_HITS = 8
 
-    if surface is not None and hasattr(surface, "build_query"):
-        ev_dict = evidence_as_dict(ev)
-        query = surface.build_query(ev_dict) or _fallback_query(ev)
-    else:
-        query = _fallback_query(ev)
 
-    if retriever is None:
-        import config
-        retriever = config.get_retriever()
+def merge_hits(results: list[list[dict]], limit: int = MAX_HITS) -> list[dict]:
+    """Several queries' hits -> one list: round-robin by rank, deduplicated.
 
+    Round-robin so every query (every changed file) gets its best passage in
+    before any gets a second. A chunk found by several queries keeps its HIGHEST
+    retriever score -- its relevance to the part of the change it fits best,
+    still the retriever's own cosine, never a model's (T17).
+    """
+    best: dict[str, dict] = {}
+    order: list[str] = []
+    for rank in range(max((len(r) for r in results), default=0)):
+        for hits in results:
+            if rank < len(hits):
+                h = hits[rank]
+                if h["id"] not in best:
+                    order.append(h["id"])
+                    best[h["id"]] = h
+                elif h.get("score", 0) > best[h["id"]].get("score", 0):
+                    best[h["id"]] = {**best[h["id"]], "score": h["score"]}
+    return [best[i] for i in order[:limit]]
+
+
+def _retrieve(state: dict, ev, surface, retriever) -> list[dict]:
+    """Evidence for the diagnosis: per changed file when the surface can say how
+    (code review), else one query for the whole change."""
+    ev_dict = evidence_as_dict(ev) if surface is not None else {}
     # G1: always namespaced when the tenant declares a codebase. A retriever that
     # cannot honour a namespace must REFUSE rather than silently retrieve across
     # codebases -- see adapters/retriever_hybrid.py.
-    hits = retriever.retrieve(query, k=5, namespace=namespace_for(state))
+    namespace = namespace_for(state)
+    queries = surface.build_queries(ev_dict) if hasattr(surface, "build_queries") else []
+    if queries:
+        return merge_hits([retriever.retrieve(q, k=PER_QUERY_K, namespace=namespace)
+                           for q in queries])
+    query = (surface.build_query(ev_dict) if hasattr(surface, "build_query") else "") \
+        or _fallback_query(ev)
+    return retriever.retrieve(query, k=5, namespace=namespace)
+
+
+def generate_diagnosis(state: dict, llm=None, retriever=None) -> dict:
+    ev = state["evidence"]
+    surface = active_surface(state)
+    if retriever is None:
+        retriever = config.get_retriever()
+    hits = _retrieve(state, ev, surface, retriever)
 
     # Resolved from config exactly like `retriever` above, and like `entailer`,
     # `source` and `sink` elsewhere. This used to fall through to a hardcoded stub
@@ -63,7 +100,6 @@ def generate_diagnosis(state: dict, llm=None, retriever=None) -> dict:
     # in-node stub bypassed entirely, and which is exactly where the first live
     # model failed.
     if llm is None:
-        import config
         llm = config.get_llm("diagnosis")
 
     # The TENANT's prompt, resolved and pinned by resolve_tenant (T6). Read from
@@ -115,7 +151,6 @@ def _parse_diagnosis(raw: str, hits: list[dict]) -> Diagnosis:
       most useful half of the model's output was read and thrown away while
       anyone reading the prompt would assume it was used.
     """
-    import json as _json
 
     # A malformed response must ESCALATE, not crash the node. The graph has no
     # failure edges (G9), so an exception here kills the run -- and a killed run

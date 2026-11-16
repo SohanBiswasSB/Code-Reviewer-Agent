@@ -15,7 +15,7 @@ KV_RESERVE_GB = 0.5
 
 
 @adapter("platform", "cpu")
-class CpuPlatform:
+class CpuPlatform(base.PlatformBase):
     name = "cpu"
     profiles = ("portable",)
 
@@ -37,5 +37,3 @@ class CpuPlatform:
             "memory": accounting,
         }
 
-    def models(self, profile: str = base.DEFAULT_PROFILE) -> dict:
-        return base.resolve(profile, self.profiles).as_dict()

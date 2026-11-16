@@ -116,6 +116,7 @@ policy_version, prompt_version      # already pinned into state by resolve_tenan
 retrieved[]  {id, score}            # THE highest-value field -- see below
 checks[]     {check, step, status, message, file, line}   # pre-push detectors
 gates        {min_relevance_score, min_entailment_score, severity_allowlist, allowed_actions}
+                                    # EFFECTIVE bars: independent_review.effective_gates()
 runtime      {platform, profile, models{role: id}, entailer, model_server}
 diagnosis    {summary, severity, citations[], findings_count,
               findings[] {severity, file, line, issue, suggestion, grounded, citation_ids},
@@ -166,6 +167,21 @@ from the audit store.
 - **Run history is traces joined with audit, by `run_id`.** A run that crashed
   mid-graph writes no audit record (G9), and listing audit records alone hid
   exactly the run worth looking at.
+
+## Activity log — `var/activity/` (built 2026-11-16)
+
+One JSON record per OPERATION -- graph node, LLM call, query embedding, approval
+decision, API request, ingest job -- success or failure, with exception type,
+message and full traceback on failure. A port of the Masterclass `Logger` design:
+same record fields, same derived severity, same masking rules (secret keys ->
+`[REDACTED]`, PII keys masked) applied on the way in, plus this service's InputGuard
+over error text and tracebacks. Daily JSONL files; `CRA_ACTIVITY_LEVEL` gates the
+minimum severity written. Shown, filterable by severity / operation / text /
+correlation id / window, on the monitor's Activity log panel.
+
+Distinct from the audit record (one row per RUN: what was decided) and the trace
+(timing per node). Retention is not automated yet -- the same open question as
+`var/` generally.
 
 ## Layer 3 — log-review reports
 
@@ -248,7 +264,10 @@ Two consequences worth taking:
 **The audit store holds evidence-derived text.** T12 is now closed — the
 `InputGuard` redacts secrets and PII before any model call, so the diagnosis it
 quotes was produced from sanitised evidence, and `build_record` stores the
-guard's **counts only**, never a redacted value.
+guard's **counts only**, never a redacted value. `guard.judge` holds the same counts for the judge's
+DIAGNOSIS_UNDER_REVIEW block -- model output built from untrusted evidence, where
+injection phrasing the model carried forward shows up. It was discarded until
+2026-11-16.
 
 **But the checkpoint is a different store, and it is NOT redacted.** The guard
 runs on the way into a prompt, not on the way into state, so `_raw` and

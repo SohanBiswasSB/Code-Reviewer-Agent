@@ -24,6 +24,7 @@ time: a fixture convenient enough to construct by hand stopped resembling the
 real input, and nothing was red because nothing ran this file.
 """
 import os
+import sys
 
 # Offline, like eval/harness.py. This script exists to show that POLICY decides,
 # so it must not need a model server. Since 2026-09-11 `independent_review`
@@ -71,19 +72,43 @@ def run(tenant: str, cited_score: float):
     return cb["name"], cb["vcs"], cb["repo"], review
 
 
-def show(header: str, cited_score: float) -> None:
+TENANTS = ("project_a", "project_b")
+
+
+def show(header: str, cited_score: float, expect: str) -> list[str]:
+    """Print each tenant's decision and WHY; return what did not match `expect`."""
     print(header)
-    for tenant in ("project_a", "project_b"):
+    wrong = []
+    for tenant in TENANTS:
         name, vcs, repo, review = run(tenant, cited_score)
         print(f"  {name:12} [{vcs}:{repo:18}] -> {review.decision}")
         # Print WHY, not just the verdict. A gate that only says "escalated"
         # makes the human redo the diagnosis to find out what tripped.
         for failure in review.failures:
             print(f"               · {failure}")
+        if review.decision != expect:
+            wrong.append(f"{tenant}: expected {expect}, got {review.decision}")
+    return wrong
 
 
-threshold = store.policy("project_a", "code_review")["min_relevance_score"]
-show(f"GROUNDED diagnosis (cited score 0.50 >= {threshold}):", 0.50)
-print()
-show(f"UNGROUNDED diagnosis (cited score 0.22 < {threshold}):"
-     "  <-- shared escalate-to-human", 0.22)
+def main() -> int:
+    """Exit non-zero unless the demo shows its own point.
+
+    It used to print and exit 0 whatever happened, so `check.py` could only catch
+    a crash -- the "nothing ran it" defect this file was rewritten for, one level
+    up: a demo whose output nobody checks can drift into showing the opposite of
+    its claim while the gate stays green.
+    """
+    threshold = store.policy("project_a", "code_review")["min_relevance_score"]
+    wrong = show(f"GROUNDED diagnosis (cited score 0.50 >= {threshold}):", 0.50, "approve")
+    print()
+    wrong += show(f"UNGROUNDED diagnosis (cited score 0.22 < {threshold}):"
+                  "  <-- shared escalate-to-human", 0.22, "escalate_to_human")
+    if wrong:
+        print(f"\nDEMO DOES NOT HOLD: {wrong}")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

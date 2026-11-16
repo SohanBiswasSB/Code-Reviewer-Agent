@@ -19,6 +19,7 @@ import os
 import threading
 from datetime import UTC, datetime
 
+from datadir import data_dir as _data_dir
 from registry import adapter
 
 SCHEMA_VERSION = 1
@@ -31,7 +32,7 @@ _LOCK = threading.Lock()
 
 
 def data_dir() -> str:
-    return os.getenv("CRA_DATA_DIR", DEFAULT_DATA_DIR)
+    return str(_data_dir())
 
 
 def _default(obj):

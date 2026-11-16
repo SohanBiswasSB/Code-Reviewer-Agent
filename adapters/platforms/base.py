@@ -72,10 +72,15 @@ class ModelSet:
     weights_gb: dict[str, float] = field(default_factory=dict)
     embedding: str = EMBEDDING_MODEL
     reranker: str = RERANKER_MODEL
+    # The quantisation `weights_gb` was computed at. A property of the MODELS, so
+    # a platform reads it rather than guessing from the profile's name.
+    quant: str = "4bit"
 
     def as_dict(self) -> dict:
+        """role -> model id. Sizing and quantisation are not roles."""
         d = asdict(self)
         d.pop("weights_gb")
+        d.pop("quant")
         return d
 
     @property
@@ -180,6 +185,7 @@ STUDIO = ModelSet(
     judge="gemma-4-12b",                      # Google family -> independent of Qwen
     utility="qwen3-1.7b",
     weights_gb={"diagnosis": 25.0, "judge": 7.0, "utility": 1.1},
+    quant="6bit",
 )
 
 PROFILES: dict[str, ModelSet] = {
@@ -190,6 +196,16 @@ PROFILES: dict[str, ModelSet] = {
 }
 
 DEFAULT_PROFILE = "portable"
+
+
+class PlatformBase:
+    """What every platform shares. `models()` was the same three lines in all four."""
+
+    profiles: tuple[str, ...] = ()
+
+    def models(self, profile: str = DEFAULT_PROFILE) -> dict:
+        """role -> model id for `profile`; raises if this platform cannot hold it."""
+        return resolve(profile, self.profiles).as_dict()
 
 
 def resolve(profile: str, supported: tuple[str, ...]) -> ModelSet:

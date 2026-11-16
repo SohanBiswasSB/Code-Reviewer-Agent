@@ -8,7 +8,7 @@ enforced by refusal, and the multi-tenant path was inert.
 
     dense   EmbeddingGemma cosine over the namespace's index      (adapters/embed_lmstudio)
     sparse  Okapi BM25 over the same namespace's chunk texts       (tools/bm25)
-    fuse    Reciprocal Rank Fusion, for ORDER only                 (tools/retrieval)
+    fuse    Reciprocal Rank Fusion, for ORDER only                 (tools/fusion)
     gate    the dense COSINE, computed for every fused candidate
 
 ## The two-number contract is kept exactly (T21)
@@ -36,24 +36,15 @@ An index that is simply NOT BUILT returns `[]`: that is the truthful answer to
 from __future__ import annotations
 
 from registry import adapter
-from tools.bm25 import BM25, tokenize
-from tools.retrieval import reciprocal_rank_fusion
+from tools.bm25 import BM25
+from tools.bm25 import FILE as BM25_FILE
+from tools.fusion import reciprocal_rank_fusion
 
 # How many candidates each backend contributes before fusion. Wider than k so a
 # chunk ranked 6th by dense and 2nd by BM25 can still win -- that is the point of
 # fusing. Also the candidate pool a reranker (T13) will narrow.
 WIDE_MIN = 20
 WIDE_FACTOR = 4
-
-
-def bm25_text(meta: dict) -> str:
-    """What BM25 indexes for a chunk: its location as well as its body.
-
-    The path and qualified name are the most specific words a code chunk has --
-    `payments/webhooks.py::verify_signature` says more than the body's `self`,
-    `return` and `if`. A query naming a module should be able to reach it.
-    """
-    return f"{meta.get('path', '')} {meta.get('name', '')}\n{meta.get('text', '')}"
 
 
 @adapter("retriever", "indexed")
@@ -102,11 +93,25 @@ class IndexedRetriever:
                 f"on that noise. Rebuild: python -m tools.ingest --tenant <tenant>")
 
     def _sparse(self, namespace: str, fingerprint: str):
+        """BM25 for one namespace: in memory, else the saved statistics, else
+        built from the chunks -- and then saved, so the next PROCESS loads it.
+
+        Building costs ~1.4 s on the Masterclass index and every CLI review is a
+        new process, so without the saved copy each review paid it again. The
+        file is keyed by the index fingerprint: a rebuilt index never reuses the
+        old statistics.
+        """
         cached = self._bm25.get(namespace)
         if cached and cached[0] == fingerprint:
             return cached[1], cached[2]
         metas = self.index.documents(namespace)
-        bm25 = BM25([tokenize(bm25_text(m)) for m in metas])
+        sidecar = getattr(self.index, "sidecar", None)
+        path = sidecar(namespace, BM25_FILE) if callable(sidecar) else None
+        bm25 = BM25.load(path, fingerprint) if path else None
+        if bm25 is None or bm25.n != len(metas):
+            bm25 = BM25.for_chunks(metas)
+            if path:
+                bm25.save(path, fingerprint)
         self._bm25[namespace] = (fingerprint, bm25, metas)
         return bm25, metas
 

@@ -39,7 +39,11 @@ import sys
 import time
 
 import config
+from app.activity import WARNING, ActivityLogger, capture_library_logs, log_event
 from app.live import IngestProgress
+from tools.bm25 import BM25
+from tools.bm25 import FILE as BM25_FILE
+from tools.chunk_text import embed_text
 from tools.chunking import chunk_file
 from tools.codebase import codebase_root
 
@@ -93,6 +97,9 @@ def iter_files(root: pathlib.Path, include: list[str] | None,
     for base in roots:
         if not base.exists():
             print(f"  ! {base} does not exist, skipping", file=sys.stderr)
+            log_event("job", "ingest.include_missing", severity=WARNING,
+                      message=f"{base} does not exist, skipped",
+                      metadata={"path": str(base)})
             continue
         for p in base.rglob("*"):
             if not p.is_file() or p.suffix not in INDEX_SUFFIXES:
@@ -107,20 +114,6 @@ def iter_files(root: pathlib.Path, include: list[str] | None,
                 continue
             found.append(p)
     return sorted(found)
-
-
-def embed_text(chunk: dict) -> str:
-    """What is EMBEDDED for a chunk: its location, then its body.
-
-    A function body alone is often generic -- `if not user: return None` could be
-    anywhere. Prefixing the path and qualified name gives the embedding the
-    context a reader would have from the file tab (the "contextual retrieval"
-    idea the old skeleton listed as #4, without paying an LLM call per chunk).
-
-    Only the embedding sees this. The stored `text` -- what a citation shows a
-    human and what the entailment check reads -- stays exactly the source.
-    """
-    return f"{chunk.get('path', '')} :: {chunk.get('name', '')}\n{chunk['text']}"
 
 
 def build(tenant: str, include: list[str] | None, dry_run: bool,
@@ -161,10 +154,32 @@ def build(tenant: str, include: list[str] | None, dry_run: bool,
     # prints "\r embedded 3424/17622" is invisible to anyone not tailing a log.
     live = IngestProgress(tenant, namespace)
     try:
-        return _build(live, tenant, namespace, root, codebase, include, dry_run, limit)
-    except BaseException as e:
+        # One activity record for the whole job: its ~550 embedding batches roll
+        # up here (adapters/embed_lmstudio.py logs query embeddings only).
+        with ActivityLogger("job", "ingest", tenant=tenant,
+                            metadata={"namespace": namespace, "dry_run": dry_run}) as alog:
+            code = _build(live, tenant, namespace, root, codebase, include, dry_run, limit)
+            for key in ("files", "chunks", "redacted", "elapsed_s"):
+                if live.data.get(key) is not None:
+                    alog.add_metadata(key, live.data[key])
+            return code
+    except KeyboardInterrupt:
+        live.end("interrupted")
+        raise
+    except Exception as e:
+        # Recorded so the monitor shows WHY, then re-raised unchanged.
         live.end("error", error=f"{type(e).__name__}: {e}"[:300])
         raise
+
+
+def _save_bm25(index, namespace: str) -> None:
+    """Write the BM25 statistics beside the vectors, keyed by the new fingerprint.
+    An index without a `sidecar` location simply has none; the retriever builds
+    them in memory instead."""
+    sidecar = getattr(index, "sidecar", None)
+    if callable(sidecar):
+        BM25.for_chunks(index.documents(namespace)).save(
+            sidecar(namespace, BM25_FILE), index.stats(namespace).get("fingerprint", ""))
 
 
 def _build(live, tenant, namespace, root, codebase, include, dry_run, limit) -> int:
@@ -229,6 +244,10 @@ def _build(live, tenant, namespace, root, codebase, include, dry_run, limit) -> 
                 "include": include or [], "exclude": exclude}
     live.phase("writing")
     written = index.upsert(namespace, chunks, manifest=manifest)
+    # The BM25 statistics, saved beside the vectors so a review loads them
+    # instead of re-tokenising the whole corpus in every new process.
+    live.phase("bm25")
+    _save_bm25(index, namespace)
     print(f"indexed   : {written} chunks in {time.time() - started:.1f}s")
     print(f"stats     : {index.stats(namespace)}")
     live.end("finished", chunks=written)
@@ -247,6 +266,7 @@ def main() -> None:
     ap.add_argument("--dry-run", action="store_true",
                     help="chunk and redact, but do not embed or write")
     args = ap.parse_args()
+    capture_library_logs()
     raise SystemExit(build(args.tenant, args.include, args.dry_run,
                            args.limit, args.surface, args.root))
 

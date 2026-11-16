@@ -76,6 +76,34 @@ def test_one_pathological_line_cannot_bloat_the_window():
     assert len(raw["candidates"][0]["samples"][0]["text"]) <= MAX_LINE_CHARS
 
 
+def test_many_short_objects_never_buffer_the_whole_day():
+    """Each stream flushed only at WINDOW_LINES, so objects shorter than that all
+    stayed buffered to EOF -- 252 MB for 2M lines. The global cap bounds it, and
+    every line still reaches the detector exactly once, at its own offset."""
+    from adapters import source_s3logs as s3
+    state = {"yielded": 0, "detected": 0, "worst": 0}
+    seen: dict[str, list[int]] = {}
+
+    class Spy:
+        def detect(self, window):
+            state["detected"] += len(window["lines"])
+            state["worst"] = max(state["worst"], state["yielded"] - state["detected"]
+                                 + len(window["lines"]))
+            seen.setdefault(window["ref"], []).append(window["start"])
+            return []
+
+    def reader():
+        for obj in range(40):
+            for _ in range(s3.WINDOW_LINES - 1):
+                state["yielded"] += 1
+                yield "api", f"obj-{obj}", "line"
+
+    S3LogSource().gather("2026-09-10", reader=reader, detector=Spy())
+    assert state["detected"] == state["yielded"] == 40 * (s3.WINDOW_LINES - 1)
+    assert state["worst"] <= s3.MAX_BUFFERED_LINES, state["worst"]
+    assert all(starts == sorted(starts) for starts in seen.values()), "offsets stay ordered"
+
+
 def test_the_digest_is_stable_and_content_addressed():
     """The natural idempotency key for G7: re-running a day is detectable."""
     lines = ["2026-09-10 ERROR boom", "2026-09-10 INFO fine"]

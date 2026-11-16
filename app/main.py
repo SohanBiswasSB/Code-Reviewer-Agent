@@ -14,7 +14,14 @@ from __future__ import annotations
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from langgraph.types import Command
+
+import config
+from app import activity
+from app.deps import get_graph, open_checkpointer, set_graph
+from app.doctor import run_checks
+from app.graph import build_graph
 
 
 @asynccontextmanager
@@ -26,9 +33,8 @@ async def lifespan(app: FastAPI):
     what returns the connections. Building the graph lazily per request could
     not do either -- see app/deps.py.
     """
-    from app.deps import open_checkpointer, set_graph
-    from app.graph import build_graph
 
+    activity.capture_library_logs()
     async with open_checkpointer() as saver:
         set_graph(build_graph(checkpointer=saver))
         try:
@@ -39,6 +45,28 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Code Reviewer Agent (plug-and-play)", lifespan=lifespan)
 
+CORRELATION_HEADER = "X-Correlation-Id"
+
+
+@app.middleware("http")
+async def activity_middleware(request: Request, call_next):
+    """One `request` record per call, correlated; the id is echoed on the response.
+
+    The Masterclass CorrelationIdMiddleware's contract: accept an inbound
+    X-Correlation-Id or mint one, bind it for everything logged downstream, and
+    echo it so a caller can quote it when reporting a problem.
+    """
+    cid = request.headers.get(CORRELATION_HEADER) or str(uuid.uuid4())
+    with activity.correlation(cid), activity.ActivityLogger(
+            "request", f"{request.method} {request.url.path}",
+            metadata={"client": request.client.host if request.client else None}) as alog:
+        response = await call_next(request)
+        alog.set_response(response.status_code)
+        if response.status_code >= 500:
+            alog.record_error(message=f"HTTP {response.status_code}", failure_source="internal")
+    response.headers[CORRELATION_HEADER] = cid
+    return response
+
 
 @app.get("/healthz")
 def healthz():
@@ -48,20 +76,13 @@ def healthz():
 @app.get("/registered")
 def registered():
     """What is plugged into THIS deployment: adapters, surfaces, platform, models."""
-    import config
     return config.registered()
 
 
 @app.get("/doctor")
 def doctor():
-    """The same checks as `python -m app.doctor`, over HTTP."""
-    from app.doctor import Report, _check_lmstudio, _check_local_stack, _check_platform
-    r = Report()
-    models = _check_platform(r)
-    _check_local_stack(r)
-    if models:
-        _check_lmstudio(r, models)
-    return r.as_dict()
+    """The same checks as `python -m app.doctor`, minus the gate suite, over HTTP."""
+    return run_checks(gates=False).as_dict()
 
 
 @app.post("/run/{surface}")
@@ -77,7 +98,6 @@ async def run_surface(surface: str, body: dict):
     /approve with the thread_id) or "ended" (the run finished without needing a
     human, which for `human_review` and `escalate_to_human` is the whole point).
     """
-    import config
 
     if surface not in config.enabled_surfaces():
         raise HTTPException(404, f"surface '{surface}' is not served by this deployment")
@@ -90,7 +110,6 @@ async def run_surface(surface: str, body: dict):
     # any caller may run any tenant, which is a real gap and not a stub: see
     # docs/ARCHITECTURE_GAPS.md G3. resolve_tenant enforces enabled_surfaces,
     # which is a different (and lesser) check.
-    from app.deps import get_graph
 
     thread_id = body.get("thread_id") or str(uuid.uuid4())
     cfg = {"configurable": {"thread_id": thread_id}}
@@ -146,9 +165,7 @@ async def approve(body: dict):
         raise HTTPException(422, "body.thread_id is required")
     approved = body.get("approved") is True
 
-    from langgraph.types import Command
 
-    from app.deps import get_graph
 
     cfg = {"configurable": {"thread_id": thread_id}}
     graph = get_graph()
@@ -157,6 +174,9 @@ async def approve(body: dict):
     if not snapshot.next:
         raise HTTPException(409, f"thread '{thread_id}' is not awaiting approval")
 
+    activity.log_event("approval", "approval.granted" if approved else "approval.denied",
+                       severity=activity.INFO if approved else activity.WARNING,
+                       metadata={"thread_id": thread_id, "via": "api"})
     try:
         state = await graph.ainvoke(Command(resume=approved), config=cfg)
     except PermissionError as e:
@@ -175,7 +195,6 @@ async def approve(body: dict):
 @app.get("/runs/{thread_id}")
 async def run_status(thread_id: str):
     """What is this run waiting on? Useful after a restart, to find pending gates."""
-    from app.deps import get_graph
     snapshot = await get_graph().aget_state({"configurable": {"thread_id": thread_id}})
     if snapshot.created_at is None:
         raise HTTPException(404, f"no such thread '{thread_id}'")

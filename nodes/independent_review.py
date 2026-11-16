@@ -73,29 +73,27 @@ def _entailment(claim: str, cited_ids: list[str], retrieved: list[dict],
     return score >= min_score, score
 
 
-def independent_review(state: dict, judge_llm=None, entailer=None) -> dict:
-    diag = state["diagnosis"]
-    # The Retriever PORT returns dicts, so that is the only shape a node ever
-    # sees -- tools/retrieval.py's Snippet stays behind its adapter. "score"
-    # is the calibrated relevance, never the rank-fusion value (T21).
-    retrieved_list = list(state["_retrieved"])
-    retrieved = {s["id"]: s["score"] for s in retrieved_list}
+def effective_gates(pol: dict) -> dict:
+    """The bars the gate compares against: the tenant policy's value, else the
+    module default. The ONE place this fallback lives -- the audit record calls it
+    too, so the bars a record reports are by construction the bars that applied."""
+    return {
+        "min_relevance_score": pol.get("min_relevance_score", MIN_RELEVANCE_SCORE),
+        "min_entailment_score": pol.get("min_entailment_score", MIN_ENTAILMENT_SCORE),
+        "severity_allowlist": sorted(pol.get("severity_allowlist", SEVERITY_ALLOWLIST)),
+        "allowed_actions": sorted(pol.get("allowed_actions", ALLOWED_ACTIONS)),
+    }
 
-    # Guardrails come from the TENANT'S resolved policy (state["_policy"]), not
-    # from hardcoded constants -- each codebase plugs in its own thresholds and
-    # allowlists. Falls back to the module defaults when no policy is attached
-    # (offline eval).
-    pol = state.get("_policy") or {}
-    min_score = pol.get("min_relevance_score", MIN_RELEVANCE_SCORE)
-    min_entail = pol.get("min_entailment_score", MIN_ENTAILMENT_SCORE)
-    severity_allowlist = set(pol.get("severity_allowlist", SEVERITY_ALLOWLIST))
-    allowed_actions = set(pol.get("allowed_actions", ALLOWED_ACTIONS))
 
-    # 1) judge EXPLAINS (free text only). Fresh call, never saw the 1st model's CoT.
-    # Resolved from config like every other provider (see generate_diagnosis for
-    # why this was not the case until 2026-09-11). Offline callers set
-    # LLM_PROVIDER=stub -- `eval/harness.py` does, because the gate suite must be
-    # model-free to stay byte-identical across machines.
+def _judge(state: dict, diag, retrieved_list: list[dict], judge_llm) -> tuple[str, dict]:
+    """Step 1: the judge EXPLAINS -- free text only, from a fresh call that never
+    saw the diagnosis model's reasoning. Returns (reasoning, guard report).
+
+    Resolved from config like every other provider (see generate_diagnosis for
+    why this was not the case until 2026-09-11). Offline callers set
+    LLM_PROVIDER=stub -- `eval/harness.py` does, because the gate suite must be
+    model-free to stay byte-identical across machines.
+    """
     if judge_llm is None:
         judge_llm = config.get_llm("judge")
     # The TENANT's judge prompt, pinned by resolve_tenant (T6).
@@ -107,50 +105,82 @@ def independent_review(state: dict, judge_llm=None, entailer=None) -> dict:
         )
     # T18: the judge receives the SAME retrieved evidence, because its prompt
     # instructs it to verify citation ids against RETRIEVED. Given only the
-    # diagnosis it could not perform that check, so its reasoning about
-    # grounding was necessarily invented — and shown to a human approver as
-    # though it were real.
-    judge_turn, _ = render_for_judge(
+    # diagnosis it could not perform that check, so its reasoning about grounding
+    # was necessarily invented -- and shown to a human approver as though real.
+    # The guard's report on the DIAGNOSIS block is kept, not discarded: it is
+    # where injection phrasing the model carried forward from the evidence shows
+    # up, and invariant 6 says the report reaches state and the audit record.
+    judge_turn, judge_guard = render_for_judge(
         diag, retrieved_list, tenant=state.get("tenant") or "_default")
-    reasoning = judge_llm.complete(system, judge_turn)
+    return judge_llm.complete(system, judge_turn), judge_guard
 
-    # 2) code DECIDES — booleans from real data, never parsed from the llm.
-    failures: list[str] = []
 
+def _groundedness(cited_ids: list[str], retrieved: dict[str, float],
+                  min_score: float) -> tuple[bool, list[str]]:
+    """Every cited id was really retrieved AND its RETRIEVER score clears the bar.
+    The score is the retriever's own, never the model's (T17)."""
+    ok = bool(cited_ids) and all(
+        cid in retrieved and retrieved[cid] >= min_score for cid in cited_ids)
+    if ok:
+        return True, []
+    if not cited_ids:
+        return False, ["no citations"]
+    failures = []
+    phantom = [c for c in cited_ids if c not in retrieved]
+    weak = [c for c in cited_ids if c in retrieved and retrieved[c] < min_score]
+    if phantom:
+        failures.append(f"citations not retrieved: {phantom}")
+    if weak:
+        failures.append(f"citations below relevance {min_score}: {weak}")
+    return False, failures
+
+
+def _approved_action(state: dict, diag, action_type: str, review_text: str) -> dict:
+    """The action a human will approve: built HERE, once, and posted verbatim
+    (invariant 4). The model's judged text, then the code-computed checklist."""
+    return {
+        "type": action_type,
+        "comment": "\n\n".join(p for p in (
+            review_text, render_checklist(state.get("_checks") or [])) if p),
+        "label": diag.proposed_label,
+    }
+
+
+def independent_review(state: dict, judge_llm=None, entailer=None) -> dict:
+    """The judge explains; Python decides. Four booleans over real data, never a
+    verdict parsed out of model output (invariant 1)."""
+    diag = state["diagnosis"]
+    # The Retriever PORT returns dicts, so that is the only shape a node ever
+    # sees. "score" is the calibrated relevance, never the rank-fusion value (T21).
+    retrieved_list = list(state["_retrieved"])
+    retrieved = {s["id"]: s["score"] for s in retrieved_list}
+    # The TENANT'S thresholds and allowlists, with module defaults for offline eval.
+    bars = effective_gates(state.get("_policy") or {})
+
+    reasoning, judge_guard = _judge(state, diag, retrieved_list, judge_llm)
+
+    # Step 2: code DECIDES -- booleans from real data, never parsed from the llm.
     cited_ids = [c.snippet_id for c in diag.citations]
-    groundedness_ok = bool(diag.citations) and all(
-        cid in retrieved and retrieved[cid] >= min_score for cid in cited_ids
-    )
-    if not groundedness_ok:
-        if not diag.citations:
-            failures.append("no citations")
-        else:
-            phantom = [c for c in cited_ids if c not in retrieved]
-            weak = [c for c in cited_ids
-                    if c in retrieved and retrieved[c] < min_score]
-            if phantom:
-                failures.append(f"citations not retrieved: {phantom}")
-            if weak:
-                failures.append(
-                    f"citations below relevance {min_score}: {weak}")
+    groundedness_ok, failures = _groundedness(cited_ids, retrieved,
+                                              bars["min_relevance_score"])
 
-    risk_ok = diag.severity in severity_allowlist
+    risk_ok = diag.severity in bars["severity_allowlist"]
     if not risk_ok:
-        failures.append(f"severity {diag.severity!r} not in {sorted(severity_allowlist)}")
+        failures.append(f"severity {diag.severity!r} not in {bars['severity_allowlist']}")
 
     action_type = _action_type(state, diag)
-    permission_ok = action_type in allowed_actions
+    permission_ok = action_type in bars["allowed_actions"]
     if not permission_ok:
-        failures.append(f"action {action_type!r} not in {sorted(allowed_actions)}")
+        failures.append(f"action {action_type!r} not in {bars['allowed_actions']}")
 
-    if entailer is None:
-        entailer = config.get_entailer()
     # The text the gate judges is the text that will be posted: comment AND
     # findings, rendered once. Checking only `proposed_comment` would let findings
     # reach the page without ever being judged.
     review_text = render_review(diag)
+    min_entail = bars["min_entailment_score"]
     entailment_ok, entail_score = _entailment(
-        review_text, cited_ids, retrieved_list, entailer, min_entail)
+        review_text, cited_ids, retrieved_list,
+        entailer if entailer is not None else config.get_entailer(), min_entail)
     if not entailment_ok:
         failures.append(
             f"claim not entailed by its cited passages (score {entail_score} < {min_entail})")
@@ -163,14 +193,8 @@ def independent_review(state: dict, judge_llm=None, entailer=None) -> dict:
         entailment_ok=entailment_ok,
         failures=failures,
     )
-    out = {"review": review}
+    out = {"review": review,
+           "_guard": {**(state.get("_guard") or {}), "judge": judge_guard}}
     if review.decision == "approve":
-        out["proposed_action"] = {
-            "type": action_type,
-            # The model's judged text, then the code-computed checklist. Built
-            # here, once, and posted verbatim (invariant 4).
-            "comment": "\n\n".join(p for p in (
-                review_text, render_checklist(state.get("_checks") or [])) if p),
-            "label": diag.proposed_label,
-        }
+        out["proposed_action"] = _approved_action(state, diag, action_type, review_text)
     return out

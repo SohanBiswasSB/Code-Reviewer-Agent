@@ -40,18 +40,25 @@ run would use when no audit record says so.
 from __future__ import annotations
 
 import argparse
+import bisect
 import errno
 import json
 import os
 import pathlib
 import statistics
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import config
-from adapters.llm_lmstudio import base_url
+from adapters.llm_lmstudio import base_url, resolves_to
+from app import activity, live
+from app.graph import STAGE_PLAN
+from datadir import data_dir
+from errors import CONFIG_ERRORS
 
 HOST = "127.0.0.1"
 RECENT_RUNS = 20
@@ -68,9 +75,13 @@ def page() -> str:
         return PAGE_PATH.read_text(encoding="utf-8")
     except OSError:
         return PAGE
+
+
 TRACE_TAIL = 4000          # trace rows read for history and duration estimates
+AUDIT_TAIL = RECENT_RUNS * 4   # audit records read PER TENANT
 ORPHAN_GAP_S = 5.0         # a span with no run_id belongs to the run that follows it
 STALE_S = 900              # an unaudited, error-free run older than this was killed
+SERVER_TTL_S = 5.0         # how long one answer from LM Studio's model list is reused
 
 # What each role is FOR, in one line. The page shows these next to the model, so
 # "3 loaded of 14" turns into "the thing that writes the review is up".
@@ -91,29 +102,75 @@ LM_STUDIO_ROLES = ("diagnosis", "judge", "utility", "embedding")
 
 
 def _data_dir() -> pathlib.Path:
-    return pathlib.Path(os.getenv("CRA_DATA_DIR", "var"))
+    return data_dir()
 
 
-def _read_json(path: pathlib.Path) -> dict:
+# ── reading var/ ─────────────────────────────────────────────────────────────
+# The page polls once a second. The first version re-read and re-parsed EVERY
+# trace and audit file on every poll, so its cost grew with history: measured on
+# a synthetic year of traces, 224 ms per poll. Two fixes, both here:
+#   · files are read NEWEST first and reading stops once the tail is full, so a
+#     year of history costs what the last day costs;
+#   · parsed rows are cached per file by (mtime, size). A past day's trace file
+#     and a past month's audit file never change, so a poll re-parses only the
+#     one file currently being appended to.
+_ROWS: dict[pathlib.Path, tuple[int, int, list[dict]]] = {}
+
+
+def _rows(path: pathlib.Path) -> list[dict]:
+    """Every parseable JSON line of one file, cached until the file changes."""
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-
-
-def _tail_jsonl(paths: list[pathlib.Path], limit: int) -> list[dict]:
-    rows: list[dict] = []
-    for p in sorted(paths):
+        st = path.stat()
+        hit = _ROWS.get(path)
+        if hit and hit[:2] == (st.st_mtime_ns, st.st_size):
+            return hit[2]
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    rows = []
+    for line in text.splitlines():
         try:
-            lines = p.read_text(encoding="utf-8").splitlines()
-        except OSError:
+            rows.append(json.loads(line))
+        except ValueError:
             continue
-        for line in lines[-limit:]:
-            try:
-                rows.append(json.loads(line))
-            except ValueError:
-                continue
-    return rows[-limit:]
+    _ROWS[path] = (st.st_mtime_ns, st.st_size, rows)
+    return rows
+
+
+def _newest_rows(paths: list[pathlib.Path], limit: int) -> list[dict]:
+    """The last `limit` rows across date-named files, oldest first.
+
+    Files are named by date (`2026-11-16.jsonl`, `2026-11.jsonl`), so name order
+    is time order, and reading stops at the first file that fills the tail.
+    """
+    chunks, n = [], 0
+    for p in sorted(paths, key=lambda q: q.name, reverse=True):
+        chunk = _rows(p)[-(limit - n):]
+        chunks.append(chunk)
+        n += len(chunk)
+        if n >= limit:
+            break
+    return [r for c in reversed(chunks) for r in c]
+
+
+def _trace_rows() -> list[dict]:
+    return _newest_rows(list((_data_dir() / "traces").glob("*.jsonl")), TRACE_TAIL)
+
+
+def _recent_audits() -> dict[str, dict]:
+    """Recent audit records across ALL tenants, by run_id.
+
+    Read per tenant, then merged. The first version tailed every tenant's files
+    in path order and kept the last N rows overall, so the alphabetically last
+    tenant's records pushed every other tenant's out of the window -- measured:
+    with two tenants, ten finished runs of the first were shown as "Stopped".
+    """
+    root = _data_dir() / "audit"
+    rows: list[dict] = []
+    for d in (root.iterdir() if root.is_dir() else ()):
+        if d.is_dir():
+            rows += _newest_rows(list(d.glob("*.jsonl")), AUDIT_TAIL)
+    return {r["run_id"]: r for r in rows if r.get("run_id")}
 
 
 def _parse_ts(ts) -> datetime | None:
@@ -124,9 +181,26 @@ def _parse_ts(ts) -> datetime | None:
 
 
 # ── models ───────────────────────────────────────────────────────────────────
+_SERVER: dict[str, tuple[float, dict]] = {}
+
+
 def server_models() -> dict:
-    """Everything LM Studio has on disk, and which of it is LOADED, via its REST API."""
+    """Everything LM Studio has on disk, and which of it is LOADED, via its REST API.
+
+    Reused for SERVER_TTL_S. Asked on every 1/s poll, an unreachable Studio host
+    over the tailnet blocked each poll for the full 1.5 s timeout (measured), so
+    the page lagged most when the thing it reports on was down.
+    """
     root = base_url().rsplit("/v1", 1)[0]
+    hit = _SERVER.get(root)
+    if hit and time.monotonic() < hit[0]:
+        return hit[1]
+    value = _fetch_server_models(root)
+    _SERVER[root] = (time.monotonic() + SERVER_TTL_S, value)
+    return value
+
+
+def _fetch_server_models(root: str) -> dict:
     try:
         with urllib.request.urlopen(f"{root}/api/v0/models", timeout=1.5) as resp:
             data = json.loads(resp.read().decode("utf-8")).get("data", [])
@@ -137,11 +211,6 @@ def server_models() -> dict:
         "quantization": m.get("quantization"), "format": m.get("compatibility_type"),
         "context": m.get("loaded_context_length") or m.get("max_context_length"),
     } for m in data]}
-
-
-def _same_model(a: str, b: str) -> bool:
-    """`qwen3-4b` (a profile id) and `qwen/qwen3-4b` (LM Studio's id) are one model."""
-    return bool(a and b) and (a == b or a.split("/")[-1] == b.split("/")[-1])
 
 
 def _runtime(recent: list[dict]) -> dict:
@@ -156,7 +225,8 @@ def _runtime(recent: list[dict]) -> dict:
                 "entailer": os.getenv("ENTAILER", "lexical"),
                 "models": config.get_models(), "model_server": base_url(),
                 "source": "shell"}
-    except Exception as e:                    # noqa: BLE001 -- a view must not crash on config
+    except CONFIG_ERRORS as e:
+        # An unresolvable profile is SHOWN as an error on the page, not a crash.
         return {"source": "shell", "error": f"{type(e).__name__}: {e}"[:200], "models": {}}
 
 
@@ -164,10 +234,16 @@ def model_table(server: dict, runtime: dict) -> list[dict]:
     """One row per role: which model, where it runs, what it does, is it ready."""
     assigned = runtime.get("models") or {}
     on_server = server.get("models") or []
+    by_id = {m["id"]: m for m in on_server}
+    # The ADAPTER'S matcher, not a copy: it is strict on purpose (T26), and a
+    # looser monitor-side copy reported "ready" for ids the adapter refuses.
+    def served(model_id: str):
+        return by_id.get(resolves_to(model_id, list(by_id))) if model_id else None
+
     rows = []
     for role in ("diagnosis", "judge", "embedding", "utility"):
         want = assigned.get(role) or ""
-        hit = next((m for m in on_server if _same_model(m["id"], want)), None)
+        hit = served(want)
         if not server.get("reachable"):
             state, note = "unknown", "model server not reachable"
         elif hit is None:
@@ -197,9 +273,9 @@ def model_table(server: dict, runtime: dict) -> list[dict]:
                  "state": "ready",
                  "note": ("ENTAILER=lexical: cheap but strict on paraphrase; "
                           "ENTAILER=cross_encoder is stronger") if ent == "lexical" else ""})
-    used = [m for m in assigned.values() if m]
+    used = {h["id"] for h in (served(m) for m in assigned.values() if m) if h}
     for m in on_server:
-        if m["state"] == "loaded" and not any(_same_model(m["id"], u) for u in used):
+        if m["state"] == "loaded" and m["id"] not in used:
             rows.append({"role": "(none)", "does": "Loaded in LM Studio but not used by "
                          "this profile -- it only holds memory.", "model": m["id"],
                          "where": f"LM Studio · {server.get('url')}", "state": "extra",
@@ -218,8 +294,7 @@ def models() -> dict:
 # ── history ──────────────────────────────────────────────────────────────────
 def estimates(rows: list[dict] | None = None) -> dict[str, float]:
     """Median ms per stage over recent SUCCESSFUL spans -- the 'what is left' basis."""
-    if rows is None:
-        rows = _tail_jsonl(list((_data_dir() / "traces").glob("*.jsonl")), TRACE_TAIL)
+    rows = _trace_rows() if rows is None else rows
     by_stage: dict[str, list[float]] = {}
     for r in rows:
         if r.get("status") == "ok" and str(r.get("span", "")).startswith("node."):
@@ -250,24 +325,35 @@ def _group_spans(rows: list[dict]) -> dict[str, list[dict]]:
     return by_run
 
 
-def _retries_within(span: dict, retry_rows: list[dict]) -> list[dict]:
-    """The model-call retries that happened INSIDE this node span.
+RETRY_FIELDS = ("attempt", "of", "reason", "wait_s", "role", "model", "error", "ts")
 
-    `llm.retry` rows come from the adapter, which knows its role but not the run,
-    so they are placed by time: a retry belongs to the node whose span encloses
-    it. Runs are sequential on one machine, so the enclosing node is unambiguous.
+
+class _RetryIndex:
+    """`llm.retry` rows sorted by time, timestamps parsed ONCE per poll.
+
+    Retries come from the adapter, which knows its role but not the run, so they
+    are placed by time: a retry belongs to the stage whose span encloses it. The
+    first version re-parsed every retry timestamp for every span of every run
+    (~200k parses per poll at a year of history); this bisects instead.
     """
-    end = _parse_ts(span.get("ts"))
-    if end is None or not retry_rows:
-        return []
-    start = end.timestamp() - float(span.get("duration_ms") or 0) / 1000
-    out = []
-    for r in retry_rows:
-        t = _parse_ts(r.get("ts"))
-        if t is not None and start <= t.timestamp() <= end.timestamp():
-            out.append({k: r.get(k) for k in (
-                "attempt", "of", "reason", "wait_s", "role", "model", "error", "ts")})
-    return out
+
+    def __init__(self, trace_rows: list[dict]):
+        pairs = sorted((t.timestamp(), r) for r in trace_rows
+                       if r.get("span") == "llm.retry" and (t := _parse_ts(r.get("ts"))))
+        self.keys = [k for k, _ in pairs]
+        self.rows = [r for _, r in pairs]
+
+    def between(self, start: float, end: float) -> list[dict]:
+        lo, hi = bisect.bisect_left(self.keys, start), bisect.bisect_right(self.keys, end)
+        return [{k: r.get(k) for k in RETRY_FIELDS} for r in self.rows[lo:hi]]
+
+    def within(self, span: dict) -> list[dict]:
+        """The retries inside one node span (which records its END and duration)."""
+        end = _parse_ts(span.get("ts"))
+        if end is None or not self.keys:
+            return []
+        stop = end.timestamp()
+        return self.between(stop - float(span.get("duration_ms") or 0) / 1000, stop)
 
 
 def retry_command(run: dict, runtime: dict) -> str:
@@ -288,31 +374,39 @@ def retry_command(run: dict, runtime: dict) -> str:
     return " ".join([*env, "python -m app.review", args])
 
 
-def runs(trace_rows: list[dict] | None = None) -> list[dict]:
-    """Every recent run, newest first: each stage it went through and how that
-    went, plus the audit record (verdict, checks, findings) when it wrote one."""
-    if trace_rows is None:
-        trace_rows = _tail_jsonl(list((_data_dir() / "traces").glob("*.jsonl")), TRACE_TAIL)
-    audits = {a.get("run_id"): a for a in _tail_jsonl(
-        list((_data_dir() / "audit").glob("*/*.jsonl")), RECENT_RUNS * 4) if a.get("run_id")}
+def runs(trace_rows: list[dict] | None = None, live: list[dict] | None = None,
+         retries: _RetryIndex | None = None) -> list[dict]:
+    """The RECENT_RUNS newest runs: each stage it went through and how that went,
+    plus the audit record (verdict, checks, findings) when it wrote one."""
+    trace_rows = _trace_rows() if trace_rows is None else trace_rows
+    live = jobs() if live is None else live
+    retries = retries or _RetryIndex(trace_rows)
+    audits = _recent_audits()
     # In flight -> shown under "Now running" instead. A snapshot that stopped
     # updating long ago is a killed process, and must not hide its run forever.
-    live_ids = {j.get("run_id") for j in jobs() if j.get("status") in ("running", "waiting")
+    live_ids = {j.get("run_id") for j in live if j.get("status") in ("running", "waiting")
                 and (j.get("age_s") or 0) < STALE_S}
     now = datetime.now(UTC)
     grouped = _group_spans(trace_rows)
-    retry_rows = [r for r in trace_rows if r.get("span") == "llm.retry"]
     for rid in audits:                          # audited but trace rotated away
         grouped.setdefault(rid, [])
+
+    def last_seen(rid: str) -> str:
+        spans = grouped[rid]
+        return (audits.get(rid) or {}).get("recorded_at") or (spans[-1].get("ts") if spans else "")
+
+    # Pick the runs to SHOW before building any of them: building every run in
+    # the window to keep 20 was most of the poll's cost at scale.
+    shown = sorted((rid for rid in grouped if rid not in live_ids),
+                   key=last_seen, reverse=True)[:RECENT_RUNS]
     out = []
-    for rid, spans in grouped.items():
-        if rid in live_ids:
-            continue                            # shown under "Now running"
+    for rid in shown:
+        spans = grouped[rid]
         audit = audits.get(rid) or {}
         first = spans[0] if spans else audit
         steps = [{"name": s["span"][5:], "status": s.get("status"),
                   "duration_ms": s.get("duration_ms"), "ended_at": s.get("ts"),
-                  "error": s.get("error"), "retries": _retries_within(s, retry_rows)}
+                  "error": s.get("error"), "retries": retries.within(s)}
                  for s in spans]
         err = next((s for s in steps if s["status"] == "error"), None)
         ended = audit.get("recorded_at") or (spans[-1].get("ts") if spans else None)
@@ -320,6 +414,14 @@ def runs(trace_rows: list[dict] | None = None) -> list[dict]:
             run_status = audit.get("outcome") or "ended"
         elif err:
             run_status = "crashed"
+        elif spans and spans[-1].get("status") == "suspended":
+            # Paused at the approval gate. That writes NO audit record (it is not
+            # an outcome yet), so without this the page called a run that passed
+            # all four checks "In progress", then "Stopped".
+            snap = _snapshot_for(rid)
+            run_status = "abandoned" if snap.get("status") == "abandoned" \
+                else "awaiting_approval"
+            audit = _provisional_record(snap)
         else:
             age = (now - _parse_ts(ended)).total_seconds() if _parse_ts(ended) else 0
             run_status = "incomplete" if age > STALE_S else "in_progress"
@@ -339,8 +441,34 @@ def runs(trace_rows: list[dict] | None = None) -> list[dict]:
                        if k.endswith("_ok")},
             "failures": (audit.get("review") or {}).get("failures") or [],
         })
-    out.sort(key=lambda r: r.get("ended_at") or "", reverse=True)
-    return out[:RECENT_RUNS]
+    return out
+
+
+def _snapshot_for(run_id: str) -> dict:
+    """The live snapshot of one run, however old (jobs() skips stale ones)."""
+    for p in (_data_dir() / "live").glob("run-*.json"):
+        snap = live.read_json(p)
+        if snap.get("run_id") == run_id:
+            return snap
+    return {}
+
+
+def _provisional_record(snap: dict) -> dict:
+    """What a run that stopped at approval DID compute, from its live snapshot:
+    the four checks, the decision and the retrieved passages -- ids and scores
+    only, never model text (app/live.py). Marked provisional: it is not an audit
+    record, because the run has no outcome yet."""
+    rec: dict = {"provisional": True}
+    for st in snap.get("stages") or []:
+        d = st.get("detail") or {}
+        if "checks" in d:
+            rec["review"] = {**d["checks"], "failures": d.get("failures") or []}
+            rec["decision"] = d.get("decision")
+        if "retrieved" in d:
+            rec["retrieved"] = d["retrieved"]
+        if "route" in d:
+            rec["route"] = d["route"]
+    return rec if len(rec) > 1 else {}
 
 
 def jobs() -> list[dict]:
@@ -348,7 +476,15 @@ def jobs() -> list[dict]:
     out = []
     now = datetime.now(UTC)
     for p in (_data_dir() / "live").glob("*.json"):
-        snap = _read_json(p)
+        # A run snapshot untouched for STALE_S is a finished or killed run; the
+        # page drops it anyway, so do not parse thousands of them per poll.
+        # Ingest snapshots (one per tenant) are always kept.
+        try:
+            if p.name.startswith("run-") and time.time() - p.stat().st_mtime > STALE_S:
+                continue
+        except OSError:
+            continue
+        snap = live.read_json(p)
         if not snap:
             continue
         try:
@@ -362,8 +498,10 @@ def jobs() -> list[dict]:
 
 def status() -> dict:
     """Everything the page shows, in one response."""
-    trace_rows = _tail_jsonl(list((_data_dir() / "traces").glob("*.jsonl")), TRACE_TAIL)
-    recent = runs(trace_rows)
+    trace_rows = _trace_rows()
+    live = jobs()                     # once per poll; runs() used to read it again
+    retries = _RetryIndex(trace_rows)
+    recent = runs(trace_rows, live, retries)
     m = models()
     runtime = _runtime(recent)
     srv = m.pop("_server")
@@ -371,14 +509,13 @@ def status() -> dict:
     m["runtime"] = runtime
     for r in recent:
         r["retry_command"] = retry_command(r, runtime)
-    live = jobs()
-    _attach_live_retries(live, [r for r in trace_rows if r.get("span") == "llm.retry"])
+    _attach_live_retries(live, retries)
     return {"now": datetime.now(UTC).isoformat(), "data_dir": str(_data_dir().resolve()),
             "models": m, "estimates": estimates(trace_rows), "jobs": live,
-            "recent": recent}
+            "recent": recent, "stage_plan": STAGE_PLAN}
 
 
-def _attach_live_retries(live: list[dict], retry_rows: list[dict]) -> None:
+def _attach_live_retries(live: list[dict], retries: _RetryIndex) -> None:
     """Retries for stages still in flight, so a 3-minute diagnosis that is on its
     second attempt says so while it happens, not only after it finishes."""
     now = datetime.now(UTC)
@@ -389,13 +526,34 @@ def _attach_live_retries(live: list[dict], retry_rows: list[dict]) -> None:
                 continue
             end = start + timedelta(milliseconds=float(st["duration_ms"])) \
                 if st.get("duration_ms") is not None else now
-            st["retries"] = [
-                {k: r.get(k) for k in ("attempt", "of", "reason", "wait_s", "role", "ts")}
-                for r in retry_rows if (t := _parse_ts(r.get("ts"))) and start <= t <= end]
+            st["retries"] = retries.between(start.timestamp(), end.timestamp())
+
+
+def activity_view(query: str) -> dict:
+    """`/api/activity`: the activity log, filtered by the page's controls.
+
+    Every parameter is clamped or whitelisted -- the page is read-only and a query
+    string is caller input. Unknown values are ignored rather than echoed back.
+    """
+    params = urllib.parse.parse_qs(query)
+
+    def one(key: str) -> str | None:
+        vals = params.get(key)
+        return vals[0][:200] if vals and vals[0] else None
+
+    try:
+        hours = min(max(float(one("hours") or 24), 0.25), 24 * 31)
+    except ValueError:
+        hours = 24.0
+    sev = one("severity")
+    return activity.query(hours=hours,
+                          severity=sev if sev in ("DEBUG", "INFO", "WARNING", "ERROR") else None,
+                          operation_type=one("type"), q=one("q"),
+                          correlation_id=one("cid"), limit=300)
 
 
 class Handler(BaseHTTPRequestHandler):
-    """`/` is the page, `/api/status` its data. Nothing else, and no writes."""
+    """`/` is the page; `/api/status` and `/api/activity` its data. No writes."""
 
     def do_GET(self):  # noqa: N802 -- the http.server naming contract
         """Serve the page or the status JSON; 404 everything else."""
@@ -403,6 +561,10 @@ class Handler(BaseHTTPRequestHandler):
             body, kind = page().encode("utf-8"), "text/html; charset=utf-8"
         elif self.path == "/api/status":
             body, kind = json.dumps(status(), default=str).encode("utf-8"), "application/json"
+        elif self.path.split("?", 1)[0] == "/api/activity":
+            query = self.path.split("?", 1)[1] if "?" in self.path else ""
+            body = json.dumps(activity_view(query), default=str).encode("utf-8")
+            kind = "application/json"
         else:
             self.send_error(404)
             return

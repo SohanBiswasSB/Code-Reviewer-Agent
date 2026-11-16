@@ -27,6 +27,7 @@ from openai import OpenAI
 
 from adapters.llm_lmstudio import with_retry
 from adapters.platforms import base
+from app.activity import ActivityLogger
 from registry import adapter
 
 # EmbeddingGemma's documented task prefixes. A model without them is unharmed --
@@ -35,6 +36,16 @@ _PREFIX = {
     "query": "task: search result | query: ",
     "passage": "title: none | text: ",
 }
+
+
+class _NoSpan:
+    """Stand-in context for calls that roll up into a parent record."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
 
 
 @adapter("embedder", "lmstudio")
@@ -65,9 +76,16 @@ class LMStudioEmbedder:
         prefix = _PREFIX.get(kind, "")
         # An ingest is thousands of these; one transient failure must not cost
         # the whole build.
-        resp = with_retry(lambda: self._get_client().embeddings.create(
-            model=self.model, input=[prefix + t for t in texts]),
-            what="embedding", role="embedding", model=self.model)
+        # A review embeds one query: worth a record. An ingest embeds ~550
+        # batches: those roll up into the ingest job's own record instead of
+        # flooding the log (tools/ingest.py).
+        span = ActivityLogger("external_api", "embed.query", target_service="lmstudio",
+                              metadata={"model": self.model, "texts": len(texts)}) \
+            if kind == "query" else None
+        with span or _NoSpan():
+            resp = with_retry(lambda: self._get_client().embeddings.create(
+                model=self.model, input=[prefix + t for t in texts]),
+                what="embedding", role="embedding", model=self.model)
         vectors = [d.embedding for d in resp.data]
         got = len(vectors[0])
         if got != self.dims:

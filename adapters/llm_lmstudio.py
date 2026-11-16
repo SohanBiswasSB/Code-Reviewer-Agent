@@ -34,6 +34,8 @@ import urllib.request
 import openai
 from openai import OpenAI
 
+from adapters.tracer_jsonl import hash_text, prompts_enabled
+from app.activity import WARNING, ActivityLogger, log_event
 from registry import adapter
 
 DEFAULT_BASE_URL = "http://localhost:1234/v1"
@@ -74,6 +76,10 @@ DEFAULT_BACKOFF_S = (5.0, 15.0)     # long enough for LM Studio to reload a cras
 
 def transient_reason(e: BaseException) -> str | None:
     """Why `e` is worth another attempt, or None if it must propagate now."""
+    if isinstance(e, ConnectionError):
+        # From `available_models()` -- the model-id lookup, which is stdlib
+        # urllib (see module docstring), not the openai client.
+        return "could not reach the model server to resolve the model id"
     if isinstance(e, openai.APITimeoutError):
         return "the model server timed out"
     if isinstance(e, openai.APIConnectionError):
@@ -97,14 +103,22 @@ def _announce_retry(what: str, role, model, next_attempt: int, total: int, why: 
                     error: BaseException, wait: float, sleep) -> None:
     """Say so on stderr and in the trace, then wait. A retry nobody can see is how
     a flaky server stays flaky: the run "just took longer"."""
+    # Terminal notice for the person watching, AND a record in the activity log
+    # -- before this the retry existed only on a stderr nobody kept.
     print(f"[retry] {what} ({role or '-'}, {model}): {why}. "
           f"Attempt {next_attempt} of {total} in {wait:g}s.", file=sys.stderr, flush=True)
+    log_event("external_api", f"retry.{what}", severity=WARNING, exception=error,
+              failure_source="external", message=why,
+              metadata={"role": role, "model": model, "attempt": next_attempt,
+                        "of": total, "wait_s": wait})
     try:
         # Function-level: `config` imports `adapters`, so this is circular at
         # module level.
         import config
         tracer = config.get_tracer()
-    except Exception:                     # noqa: BLE001 -- observability is best-effort
+    except (LookupError, ValueError, ImportError):
+        # No tracer configured (registry miss) or config unresolvable: the retry
+        # still happens and is still announced on stderr.
         tracer = None
     if tracer is None:
         sleep(wait)
@@ -116,18 +130,19 @@ def _announce_retry(what: str, role, model, next_attempt: int, total: int, why: 
 
 
 def with_retry(call, *, what: str, role: str | None = None, model: str | None = None,
-               sleep=time.sleep):
+               sleep=None):
     """Run `call()`; on a TRANSIENT failure wait and try again, up to the policy.
 
     Anything not in `transient_reason` propagates on the first attempt, and the
     last transient one propagates unchanged once attempts run out -- the caller
     sees the real error, never a wrapper that hides its type.
     """
+    sleep = sleep or time.sleep           # resolved per call, so it can be patched
     retries, waits = retry_policy()
     for attempt in range(retries + 1):
         try:
             return call()
-        except openai.OpenAIError as e:
+        except (openai.OpenAIError, ConnectionError) as e:
             why = transient_reason(e)
             if why is None or attempt == retries:
                 raise
@@ -229,9 +244,10 @@ DEFAULT_TEMPERATURE = {
 def _temperature_for(role: str | None) -> float:
     """Per-role temperature: CRA_TEMPERATURE_<ROLE>, else CRA_TEMPERATURE, else the default.
 
-    Per role rather than one global knob because the roles genuinely differ: the
-    diagnosis model needs a nudge off greedy decoding to terminate, and the judge
-    does not. A single `CRA_TEMPERATURE` would have forced one compromise on both.
+    Per role so the roles CAN differ when a model needs it -- every default is
+    0.0 today (see DEFAULT_TEMPERATURE for why the diagnosis role went back to
+    greedy decoding), but a diagnosis model that only terminates with sampling
+    noise can be given it without touching the judge.
     """
     if role:
         specific = os.getenv(f"CRA_TEMPERATURE_{role.upper()}")
@@ -243,12 +259,30 @@ def _temperature_for(role: str | None) -> float:
     return DEFAULT_TEMPERATURE.get(role or "", 0.0)
 
 
+def _trace_call(role, model, prompt_sha: str, system: str, user: str):
+    """A trace span per model call: role, model, prompt HASH -- and the prompt
+    text only under CRA_TRACE_PROMPTS=1 (docs/DATA_STORAGE.md, Layer 2).
+
+    The hash alone answers "did the same prompt produce a different result",
+    which is most of what a prompt trace is for. The text is sanitised already
+    (T12) but stays opt-in: a durable verbatim copy of every prompt is a larger
+    surface than a hash.
+    """
+    # Function-level: `config` imports the adapters, so this is circular at
+    # module level (same as `_announce_retry`).
+    import config
+    attrs = {"role": role, "model": model, "prompt_sha": prompt_sha}
+    if prompts_enabled():
+        attrs.update(system_prompt=system, user_prompt=user)
+    return config.get_tracer().span("llm.call", **attrs)
+
+
 @adapter("llm", "lmstudio")
 class LMStudioLLM:
     """One bound local model.
 
-    Temperature is PER ROLE, and the diagnosis default is non-zero. See
-    `_temperature_for` -- that default reverses an earlier decision, on evidence.
+    Temperature is PER ROLE and 0.0 for every role by default; see
+    DEFAULT_TEMPERATURE for the measurement that settled it.
     """
 
     def __init__(self, model: str, runtime: dict | None = None, role: str | None = None):
@@ -297,7 +331,6 @@ class LMStudioLLM:
         is what stops a provider adapter from quietly becoming a decision-maker.
         """
         kwargs: dict = {
-            "model": self.resolved_model(),
             "messages": [
                 {"role": "system", "content": system},
                 # The untrusted material (diff, log lines, issue text) arrives in
@@ -317,9 +350,33 @@ class LMStudioLLM:
                     "strict": True,
                 },
             }
-        resp = with_retry(lambda: self._get_client().chat.completions.create(**kwargs),
-                          what="completion", role=self.role, model=kwargs["model"])
-        return resp.choices[0].message.content or ""
+        # The model-id lookup is INSIDE the retried call. It is a network round
+        # trip too, and for the judge it happens minutes into a run, right after
+        # the diagnosis: outside the retry, one busy moment of LM Studio there
+        # threw the whole run away (and, with no failure edges, its record).
+        # One activity record per call: which model, how long, how many tokens,
+        # and -- when it fails after its retries -- the error and traceback.
+        # Prompt TEXT is never logged: it carries evidence.
+        prompt_sha = hash_text(f"{system}\n{user}")
+        with ActivityLogger("external_api", f"chat.{self.role or 'llm'}",
+                            target_service="lmstudio",
+                            metadata={"model": self.model, "temperature": self.temperature,
+                                      "max_tokens": self.max_tokens,
+                                      "structured": json_schema is not None,
+                                      "prompt_chars": len(system) + len(user),
+                                      "prompt_sha": prompt_sha}) as alog, \
+                _trace_call(self.role, self.model, prompt_sha, system, user):
+            resp = with_retry(
+                lambda: self._get_client().chat.completions.create(
+                    model=self.resolved_model(), **kwargs),
+                what="completion", role=self.role, model=self.model)
+            alog.add_metadata("resolved_model", self._resolved)
+            usage = getattr(resp, "usage", None)
+            if usage is not None:
+                alog.add_metadata("prompt_tokens", getattr(usage, "prompt_tokens", None))
+                alog.add_metadata("completion_tokens", getattr(usage, "completion_tokens", None))
+            alog.add_metadata("finish_reason", getattr(resp.choices[0], "finish_reason", None))
+            return resp.choices[0].message.content or ""
 
     def __repr__(self) -> str:  # shows up in doctor output and tracebacks
         return f"LMStudioLLM(model={self.model!r}, base_url={self.base_url!r})"
