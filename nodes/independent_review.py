@@ -10,7 +10,9 @@ three steps and only two were implemented:
 Steps 1 and 2 together prove only that a real, on-topic snippet was cited. They
 cannot catch a claim that overreaches what its passage supports — and a citation
 is exactly what makes such a claim look trustworthy. That is the most common RAG
-failure, and it was ungated.
+failure, and it was ungated. Since 2026-11-17 step 3 is scored PER CLAIM: the
+comment and each finding against its own premise, the lowest score deciding
+(see `entailment_claims`), rather than the whole review against every passage.
 
 `risk_ok` and `permission_ok` are unchanged.
 
@@ -88,6 +90,7 @@ def entailment_claims(diag, evidence, retrieved: list[dict]) -> list[tuple[str, 
     hunks = split_diff(diff) if diff else {}
 
     def premise(ids, *extra):
+        """The cited passages' text, each id once, in citation order, then `extra`."""
         parts = [text[i] for i in dict.fromkeys(ids) if i in text]
         return " ".join(p for p in (*parts, *extra) if p)
 
@@ -186,6 +189,7 @@ def _groundedness(cited_ids: list[str], retrieved: dict[str, float],
     The score is the retriever's own, never the model's (T17). `min_score` is one
     bar, or a bar per id when hits carry different kinds of score (T13)."""
     def bar(cid: str) -> float:
+        """This id's bar; an id with no per-hit bar gets 1.0, the strictest."""
         return min_score.get(cid, 1.0) if isinstance(min_score, dict) else min_score
 
     ok = bool(cited_ids) and all(
@@ -218,7 +222,14 @@ def _approved_action(state: dict, diag, action_type: str, review_text: str) -> d
 
 def independent_review(state: dict, judge_llm=None, entailer=None) -> dict:
     """The judge explains; Python decides. Four booleans over real data, never a
-    verdict parsed out of model output (invariant 1)."""
+    verdict parsed out of model output (invariant 1).
+
+    Reads `diagnosis`, `_retrieved`, `evidence`, `_checks`, the pinned `_policy`
+    and `_prompts["judge"]`. Writes `review` (the booleans, `failures` and the
+    judge's `reasoning`) and the judge's half of `_guard`; on `approve` only,
+    also `proposed_action`, built once here and posted verbatim (invariant 4).
+    `judge_llm` and `entailer` are injectable for tests.
+    """
     diag = state["diagnosis"]
     # The Retriever PORT returns dicts, so that is the only shape a node ever
     # sees. "score" is the calibrated relevance, never the rank-fusion value (T21).
@@ -243,8 +254,9 @@ def independent_review(state: dict, judge_llm=None, entailer=None) -> dict:
     if not permission_ok:
         failures.append(f"action {action_type!r} not in {bars['allowed_actions']}")
 
-    # The text the gate judges is the text that will be posted: comment AND
-    # findings, rendered once. Checking only `proposed_comment` would let findings
+    # The text that will be posted: comment AND findings, rendered once. The gate
+    # judges that same comment and those same findings, each as its own claim
+    # (`entailment_claims`). Checking only `proposed_comment` would let findings
     # reach the page without ever being judged.
     review_text = render_review(diag)
     entailment_ok, _, entail_failures = _entailment(

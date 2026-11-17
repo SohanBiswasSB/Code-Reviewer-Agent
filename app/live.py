@@ -142,6 +142,10 @@ class IngestProgress:
     """Phase and progress of one `tools.ingest` run, rewritten as it goes."""
 
     def __init__(self, tenant: str, namespace: str):
+        """Write the `starting` snapshot at once, so the monitor shows the job immediately.
+
+        One file per TENANT, not per run: a new ingest overwrites the last one's.
+        """
         self.path = live_dir() / f"ingest-{_safe(tenant)}.json"
         self.started = time.time()
         self.data = {"kind": "ingest", "id": f"ingest-{tenant}", "tenant": tenant,

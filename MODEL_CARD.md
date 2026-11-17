@@ -44,18 +44,27 @@ that — `groundedness_ok` fails and the run escalates — so the system stays
 proves nothing. Escalation rate must be monitored as a quality signal, not
 treated as success.
 
-**The relevance thresholds are currently uncalibrated.** `min_relevance_score`
-values of 0.35/0.40 in `tenants/*/policy.json` were calibrated for an embedder
+**The relevance bar is measured but interim; entailment is not yet measured.** The
+original `min_relevance_score` values (0.35/0.40) were calibrated for an embedder
 this project no longer uses, and the embedder has changed **three times** since
 (`text-embedding-3-small` truncated, then nomic, then bge-m3, now
 EmbeddingGemma-300m). Each is a different vector space whose cosine scores do not
-distribute the same way, so those numbers are not merely stale — they never
-described the space the gate now measures in.
+distribute the same way, so those numbers never described the space the gate now
+measures in.
 
-This is not hypothetical. The first live run scored its one real citation at
+This was not hypothetical. The first live run scored its one real citation at
 **0.2 against a 0.35 threshold**, and entailment at **0.24 against 0.25** — so the
-verdict turned on two uncalibrated constants, one of them by a hundredth. **Until re-measured (TODO T10), they do not mean what they
-say**, and `app.doctor` says so on every run.
+verdict turned on two uncalibrated constants, one of them by a hundredth.
+
+`tools.calibrate` then measured EmbeddingGemma on the Masterclass index (305
+per-file queries): cosines sit in ~0.7–0.9, so a 0.40 bar could never fail. The
+real tenants (`masterclass`, `milesone`, `_template`) now use **0.75**, set as an
+interim value from that measurement. It keeps over 90% of same-file evidence and
+rejects roughly the bottom quarter of other-file passages. "Same file" is only a proxy
+for "relevant", so treat 0.75 as a measured starting point, not a validated one. The
+placeholder tenants (`_default`, `project_a`, `project_b`) still carry the old values.
+`min_entailment_score` (0.25) has too few recorded findings to measure yet; every
+audited review adds to the sample.
 
 **The judge shares a training distribution even when it shares no weights.**
 Using a different model family (Gemma judging Qwen) mitigates self-preference

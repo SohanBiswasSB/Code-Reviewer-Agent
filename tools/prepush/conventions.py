@@ -156,6 +156,9 @@ def check_postman(change: Change, config: dict) -> list[dict]:
 
 
 def _postman_structure(change: Change, collection: str, pm: dict) -> list[dict]:
+    """Every request in the changed collection has an example response, a
+    description, and a failure example (status >= 300) unless the tenant's
+    `no_failure_example_ok` names it. Flags capped at MAX_REPORTED."""
     try:
         data = json.loads(change.content_for(collection) or "{}")
     except ValueError:
@@ -164,6 +167,7 @@ def _postman_structure(change: Change, collection: str, pm: dict) -> list[dict]:
     bad = []
 
     def walk(items):
+        """Recurse through folders (`item` lists), recording each request's gaps."""
         for it in items or []:
             if "item" in it:
                 walk(it["item"])
@@ -193,7 +197,9 @@ def _head(change: Change) -> str | None:
 
 
 def _author(change: Change) -> str:
-    head = _head(change)
+    """The change's git author: the head commit's, or for staged work (no commit
+    yet) whoever `git config user.name` says is committing."""
+    head =_head(change)
     out = _git(change.root, "log", "-1", "--format=%an", head) if head else \
         _git(change.root, "config", "user.name")
     return (out or "").strip()

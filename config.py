@@ -1,10 +1,14 @@
 """Resolve plugins from env -> the only place providers are chosen.
 
-    LLM_PROVIDER=openai  RETRIEVER=indexed  CHECKPOINTER=postgres
+    LLM_PROVIDER=openai  RETRIEVER=indexed  RERANKER=none
     SURFACES=code_review,log_review
     TENANT_STORE=fs
-    CRA_PLATFORM=auto    # auto | cuda | mac | cpu   -> HOW to run
+    CRA_PLATFORM=auto    # auto | cuda | mac | cpu | studio -> HOW to run
     CRA_PROFILE=portable # portable | mac_resident | mac_max | studio -> WHICH models
+
+`studio` is never auto-detected; it has to be named. The one provider NOT chosen
+here is the checkpointer: `app/deps.py` picks Postgres when DATABASE_URL is set
+and MemorySaver (development only, and it warns) otherwise.
 
 Importing this module imports adapters/ and surfaces/ so every @adapter/@surface
 decorator has run before anything asks the registry for a plug.
@@ -48,6 +52,12 @@ _SHARED_LOCK = threading.Lock()
 
 
 def _shared(cls, *env_keys: str):
+    """The one process-wide instance of `cls` for the current values of `env_keys`.
+
+    `env_keys` must be every env var the class's constructor reads; one left out
+    would hand back an instance built for the old setting. Double-checked under
+    a lock so two threads starting reviews at once do not both pay the load.
+    """
     key = (cls, *(os.getenv(k) for k in env_keys))
     inst = _SHARED.get(key)
     if inst is None:
@@ -87,7 +97,7 @@ def get_llm(role: str = "diagnosis"):
     # it. There used to be an `except TypeError` retry without `role`, which also
     # swallowed a TypeError raised INSIDE a constructor and silently dropped the
     # role -- a bug that looked like a working fallback.
-    return cls(model=model_id, runtime=get_platform().runtime(get_profile()), role=role)
+    return cls(model=model_id, role=role)
 
 
 def assert_judge_is_independent() -> None:
@@ -142,12 +152,20 @@ def get_reranker():
 
 
 def get_source(name: str):
-    """name comes from the active Surface (surface.source_name), not from env."""
+    """A fresh EvidenceSource registered as `name`.
+
+    Callers pass `source_name_for(surface)`: the surface's own choice, unless
+    `CRA_SOURCE_<SURFACE>` overrides it on this machine.
+    """
     return registry.get_adapter("source", name)()
 
 
 def get_sink(name: str):
-    """name comes from the active Surface (surface.sink_name), not from env."""
+    """A fresh ActionSink registered as `name`.
+
+    Callers pass `sink_name_for(surface)`: the surface's own choice, unless
+    `CRA_SINK_<SURFACE>` overrides it on this machine.
+    """
     return registry.get_adapter("sink", name)()
 
 
@@ -253,10 +271,10 @@ def get_audit_sink():
 def get_tracer():
     """Spans per graph node and per LLM call, plus retries (T23). Append-only JSONL.
 
-    ON by default, unlike most debugging tooling. The reason is specific: the
-    first live model runs are imminent, and a trace that has to be switched on
-    after something looks wrong is a trace you do not have for the run that went
-    wrong. T21 is the standing example.
+    ON by default, unlike most debugging tooling. The reason is specific: it was
+    switched on just before the first live model runs, because a trace that has
+    to be switched on after something looks wrong is a trace you do not have for
+    the run that went wrong. T21 is the standing example.
     """
     return registry.get_adapter("tracer", os.getenv("CRA_TRACE", "jsonl"))()
 

@@ -398,13 +398,13 @@ function renderKpis(recent){
 
 /* ── model server ──────────────────────────────────────────────────────── */
 const MSTATE={ready:["Ready","b-ok"],not_loaded:["Not loaded","b-warn"],missing:["Missing","b-err"],
- unknown:["Unknown","b-idle"],unused:["Not used yet","b-idle"],extra:["Loaded, unused","b-idle"]};
+ unknown:["Unknown","b-idle"],unused:["Not used yet","b-idle"],off:["Off","b-idle"],extra:["Loaded, unused","b-idle"]};
 function renderModels(m){
  const t=document.getElementById("mtable");t.replaceChildren();
  const th=el("thead"),hr=el("tr");for(const c of["Role","What it does","Model","Where it runs","Status"])hr.append(el("th",null,c));th.append(hr);
  const tb=el("tbody");
  for(const r of m.table||[]){
-  const tr=el("tr",["extra","unused"].includes(r.state)?"dim":null),[lbl,cls]=MSTATE[r.state]||[r.state,"b-idle"],[ic,tc]=ROLEICO[r.role]||ROLEICO["(none)"];
+  const tr=el("tr",["extra","unused","off"].includes(r.state)?"dim":null),[lbl,cls]=MSTATE[r.state]||[r.state,"b-idle"],[ic,tc]=ROLEICO[r.role]||ROLEICO["(none)"];
   const role=el("td"),rd=el("div","role");rd.append(iconBox(ic,tc),el("span",null,r.role));role.append(rd);
   const st=el("td");st.append(badge(lbl,cls));if(r.note)st.append(el("div","note",r.note));
   tr.append(role,el("td","sm",r.does),el("td","mono",r.model),el("td","sm mute",r.where),st);tb.append(tr)}

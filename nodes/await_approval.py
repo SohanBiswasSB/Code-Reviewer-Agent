@@ -1,4 +1,4 @@
-"""The human-in-the-loop gate. Builds `proposed_action` ONCE, then suspends.
+"""The human-in-the-loop gate. Fixes `proposed_action`, then suspends.
 
 `interrupt(payload)` does not "show a modal and wait for a click" — it suspends
 the graph mid-run and persists state to the checkpointer. The pause is real
@@ -9,8 +9,12 @@ pending approval.
 
 Two properties this node is responsible for:
 
-**The action is built once, here, and never recomputed.** `execute` posts
-`state["proposed_action"]` verbatim. If the action were rebuilt after approval
+**The action is built once, before the suspend, and never recomputed.** On the
+AI path `independent_review` builds it (`_approved_action`, on `approve` only)
+and this node passes it through untouched; on the deterministic path, which has
+no gate before this one, it is built here. Either way the payload a human
+approves is the one in state, and `execute` posts `state["proposed_action"]`
+verbatim. If the action were rebuilt after approval
 there would be a window in which what executes differs from what a human signed
 off on — and it is exactly the kind of drift nobody notices until it matters.
 

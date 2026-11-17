@@ -14,6 +14,12 @@ from nodes._audit import write
 
 
 def _outcome(state: dict) -> str:
+    """Which terminal this run reached, read from what earlier nodes wrote.
+
+    `executed` if a sink returned a result, `escalated` if the gate said so,
+    `human_review` if classify routed there, else `ended`. Checked in that order,
+    so a run that executed is never labelled by an earlier step.
+    """
     if state.get("result") is not None:
         return "executed"
     review = state.get("review")
@@ -25,4 +31,10 @@ def _outcome(state: dict) -> str:
 
 
 def audit(state: dict, sink=None) -> dict:
+    """Write the run record for a normal terminal edge (invariant 9, G6).
+
+    Reads the whole state; writes only `_audit` (whether the record persisted,
+    and its run id). A failed write is reported there, not raised -- see
+    `nodes._audit.write`. `sink` is injectable for tests.
+    """
     return write(state, _outcome(state), sink=sink)

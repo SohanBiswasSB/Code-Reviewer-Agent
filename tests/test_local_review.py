@@ -15,6 +15,7 @@ from adapters.action_sinks import ReviewFileSink
 from adapters.source_git_local import MAX_DIFF_CHARS, GitLocalSource, GitTargetError
 from app import review
 from registry import adapter
+from schemas.evidence import CodeChange
 from surfaces.code_review import CodeReviewSurface
 
 
@@ -114,6 +115,17 @@ def test_the_surface_normalizes_it_unchanged(repo):
     assert ev["touched_areas"] == ["auth"]
     assert ev["has_failing_ci"] is False
     assert CodeReviewSurface().classify(ev) == "ai_investigation"
+
+
+def test_the_typed_code_change_accepts_what_the_surface_really_produces(repo):
+    """CodeChange forbids extra keys, so any key the surface adds without declaring
+    it here would make adopting the model reject every review. It already drifted
+    once (`revision`, which the pre-push checks read)."""
+    ev = CodeReviewSurface().normalize(gather(repo, "staged"))
+    typed = CodeChange.model_validate(ev)
+    assert typed.revision["diff_args"] and typed.touched_areas == ["auth"]
+    # The GitHub-shaped input (no revision) still fits too.
+    assert CodeChange.model_validate(CodeReviewSurface().normalize({"files": []})).revision == {}
 
 
 # ── the sink ─────────────────────────────────────────────────────────────────

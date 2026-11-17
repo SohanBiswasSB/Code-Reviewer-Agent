@@ -45,10 +45,9 @@ _SNIPPET = re.compile(r"^- id=(?P<id>\S+) relevance=(?P<score>\S+) :: (?P<text>.
 class StubLLM:
     """Offline stand-in. `LLM_PROVIDER=stub`, or injected directly in a test."""
 
-    def __init__(self, model: str = "stub", runtime: dict | None = None,
-                 role: str | None = None):
+    def __init__(self, model: str = "stub", role: str | None = None):
+        """Same constructor shape as the real adapters, so `config.get_llm` builds it."""
         self.model = model
-        self.runtime = runtime or {}
         self.role = role
         # Resolved the same way the real adapter does, so the stub is a faithful
         # stand-in rather than a thing with its own settings. A test asserting

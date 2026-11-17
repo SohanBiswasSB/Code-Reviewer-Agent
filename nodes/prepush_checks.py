@@ -2,7 +2,8 @@
 
 The reviewer's design bet is "detectors find, the LLM explains, code decides".
 These are the detectors for a CODE change: N+1 queries, new warning-silencers,
-missing docstrings, an import of a file git does not track, and -- per tenant --
+long or non-ASCII added lines, new HTTP handlers without a docstring, an import
+of a file git does not track, and -- per tenant --
 whether the change carries the artefacts that codebase's own pre-push ritual
 expects (doc files, Postman collection, tracker row, commit message).
 
@@ -35,7 +36,12 @@ from tools.codebase import codebase_root
 
 
 def prepush_checks(state: dict) -> dict:
-    """Run the change checks for surfaces that declare them; others get none."""
+    """Run the change checks for surfaces that declare them; others get none.
+
+    Reads `evidence` (its files and git revision) and the pinned `_policy` (the
+    codebase root and the `prepush` conventions); writes only `_checks`, a list
+    of result dicts. Never routes and never decides: see the module docstring.
+    """
     surface = active_surface(state)
     if surface is None or not getattr(surface, "runs_change_checks", False):
         return {"_checks": []}

@@ -44,6 +44,7 @@ TERMINAL_OUTCOMES = frozenset({"executed", "denied", "escalated", "human_review"
 
 
 def _parse_ts(value: str | None) -> datetime | None:
+    """An ISO timestamp as an aware datetime (naive read as UTC); None if unparseable."""
     if not value:
         return None
     try:
@@ -84,6 +85,13 @@ def expired_threads(records, keep_days: int, now: datetime | None = None) -> lis
 
 
 async def prune(keep_days: int, apply: bool) -> dict:
+    """Evict (or, without `apply`, list) expired threads, re-checking each one live.
+
+    Candidates come from the audit store; the checkpointer then has the final
+    say. A thread still parked at the gate is KEPT and reported, a thread already
+    gone is reported as absent, and every deletion -- real or dry-run -- is logged
+    as an activity event. Returns the counts and rows `main` prints.
+    """
 
     candidates = expired_threads(iter_records(), keep_days)
     deleted, kept_pending, missing = [], [], []
@@ -116,6 +124,7 @@ async def prune(keep_days: int, apply: bool) -> dict:
 
 
 def main() -> int:
+    """CLI entry point; see the module docstring. Always returns 0 -- KEPT rows are not errors."""
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--keep-days", type=int, default=30)
     ap.add_argument("--apply", action="store_true",

@@ -20,6 +20,13 @@ from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
 
 class TriageState(TypedDict, total=False):
+    """Every channel a run carries: the request, what is pinned at start, the gate.
+
+    `total=False` because a run fills it in stage by stage. A key a node returns
+    but that is not declared here is dropped without an error (see the module
+    docstring), and every non-primitive value must be in `CHECKPOINT_TYPES`.
+    """
+
     # ── request ──────────────────────────────────────────────────────────────
     tenant: str                 # which codebase is executing (resolves prompts + policy)
     surface: Literal["code_review", "log_review", "issue_triage"]

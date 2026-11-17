@@ -18,7 +18,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from app.activity import ActivityLogger, capture_library_logs, log_dir
 
@@ -31,7 +31,9 @@ def expired(keep_days: int, today: date | None = None) -> list:
     Anything not named like a day file is left alone."""
     if keep_days < 1:
         raise ValueError("--keep-days must be at least 1: today's file is being written")
-    cutoff = (today or date.today()) - timedelta(days=keep_days)
+    # UTC, because `app.activity.emit` names day files by the UTC date. Local
+    # `date.today()` was a day off around midnight wherever the offset is non-zero.
+    cutoff = (today or datetime.now(UTC).date()) - timedelta(days=keep_days)
     out = []
     for path in sorted(log_dir().glob("*.jsonl")):
         m = DAY_FILE.match(path.name)

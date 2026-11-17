@@ -240,8 +240,9 @@ var/reports/<tenant>/<YYYY-MM-DD>.{json,md}
 Rooted at `CRA_DATA_DIR` (default `./var`). Chosen over Postgres for the first
 implementation, deliberately:
 
-- **Stdlib only**, so it works before `requirements-local.txt` — the same rule
-  that keeps `doctor` and the gate suite runnable on a bare machine.
+- **No storage dependency.** The module itself imports only the stdlib, so a record
+  needs no database or driver. (Reaching it through the `adapters` package does
+  import every adapter's libraries, which are all in `requirements.txt`.)
 - **Append-only is closer to immutable** than a table anything can `UPDATE`.
 - **It can exist before the first live model call.** Waiting for Postgres means
   the first real diagnoses go unrecorded, which is the T21 mistake a second time:

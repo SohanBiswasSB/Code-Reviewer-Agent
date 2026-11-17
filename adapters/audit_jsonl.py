@@ -23,7 +23,6 @@ from datadir import data_dir as _data_dir
 from registry import adapter
 
 SCHEMA_VERSION = 1
-DEFAULT_DATA_DIR = "var"
 
 # One process may run several graph threads concurrently. A single line written
 # with one write() call is atomic enough on POSIX for typical record sizes, but
@@ -32,6 +31,7 @@ _LOCK = threading.Lock()
 
 
 def data_dir() -> str:
+    """`CRA_DATA_DIR` as a string, resolved at call time (see datadir.py)."""
     return str(_data_dir())
 
 
@@ -57,9 +57,11 @@ class JsonlAuditSink:
     """var/audit/<tenant>/<YYYY-MM>.jsonl, one JSON object per line."""
 
     def __init__(self, root: str | None = None):
+        """`root` overrides `CRA_DATA_DIR` (tests point it at a temp dir)."""
         self.root = root or data_dir()
 
     def path_for(self, tenant: str, when: datetime | None = None) -> str:
+        """The month file a record for `tenant` lands in; `when` defaults to now (UTC)."""
         when = when or datetime.now(UTC)
         # Sanitised: a tenant name reaches this from a request body, and a
         # tenant called "../../etc" must not choose where the file lands.
@@ -68,6 +70,13 @@ class JsonlAuditSink:
         return os.path.join(self.root, "audit", safe, f"{when:%Y-%m}.jsonl")
 
     def record(self, run: dict) -> None:
+        """Append one record for a finished run (the `AuditSink` port, G6).
+
+        Stamps `schema_version` and `recorded_at` ahead of the caller's keys (which
+        win on a clash), serialises odd values via `_default`, and appends one line
+        under `_LOCK`. Never rewrites an earlier line. Write failures (a full disk,
+        an unwritable directory) are not caught here; they reach the caller.
+        """
         run = {"schema_version": SCHEMA_VERSION,
                "recorded_at": datetime.now(UTC).isoformat(),
                **run}
@@ -89,6 +98,7 @@ class NullAuditSink:
     """
 
     def record(self, run: dict) -> None:
+        """Discard the record."""
         return None
 
 

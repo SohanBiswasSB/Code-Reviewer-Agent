@@ -21,6 +21,15 @@ from nodes._surface import active_surface, evidence_as_dict
 
 
 def classify(state: dict) -> dict:
+    """Pick the route from validated evidence, by rule. Zero LLM calls.
+
+    Reads `evidence` (and the surface from `_surface` / `_surface_name`); writes
+    only `route`: `deterministic`, `ai_investigation` or `human_review`. Rule-based
+    on purpose: what reaches a model, and what reaches the approval gate without
+    one, must not be a model's decision. With no surface active, the built-in
+    issue-triage rules apply, and anything they do not match goes to a human
+    (invariant 12: an ambiguous route goes to `human_review`).
+    """
     surface = active_surface(state)
     if surface is not None and hasattr(surface, "classify"):
         return {"route": surface.classify(evidence_as_dict(state["evidence"]))}

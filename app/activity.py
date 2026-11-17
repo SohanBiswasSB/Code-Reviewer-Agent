@@ -34,6 +34,12 @@ and trace stores) and its admin page (`python -m app.monitor`, "Activity log").
 The audit record is ONE immutable row per run: what was decided. A trace span is
 timing per node. An activity row is per OPERATION, success or failure, with the
 error and traceback when there is one -- "what happened, and what went wrong".
+
+## Storage and retention
+
+One file per UTC day, `<CRA_DATA_DIR>/activity/YYYY-MM-DD.jsonl`. Nothing here
+deletes a day: `python -m jobs.prune_activity` does, dry run by default, and it
+never touches the audit store.
 """
 from __future__ import annotations
 
@@ -198,6 +204,12 @@ class ActivityLogger:
                  target_service: str | None = None, correlation_id: str | None = None,
                  parent_log_id: str | None = None, tenant: str | None = None,
                  run_id: str | None = None, metadata: dict | None = None):
+        """Describe the operation; nothing is timed or written until `start`/`complete`.
+
+        The correlation id falls back to the one bound by `correlation()`, then to
+        a fresh uuid, so a span logged outside any request or run is still
+        findable on its own. `metadata` is masked here, on the way in.
+        """
         self.log_id = str(uuid.uuid4())
         self.operation_type, self.operation_name = operation_type, operation_name
         self.target_service, self.parent_log_id = target_service, parent_log_id
@@ -295,6 +307,7 @@ class ActivityLogger:
         return self.start()
 
     def __exit__(self, exc_type, exc, tb) -> bool:
+        """Record an escaping exception (unless already recorded), write, and re-raise it."""
         if exc is not None and not self.is_error:
             self.record_error(exc)
         self.complete()
@@ -304,8 +317,10 @@ class ActivityLogger:
 def activity_log(operation_type: str, operation_name: str | None = None, **span_kw):
     """Decorator: run the function inside a span; record and RE-RAISE on error."""
     def wrap(fn):
+        """Bind the decorator to `fn`; the span is named after it unless one was given."""
         @functools.wraps(fn)
         def inner(*args, **kwargs):
+            """One span per call (`functools.wraps` replaces this with `fn`'s docstring)."""
             with ActivityLogger(operation_type, operation_name or fn.__qualname__, **span_kw):
                 return fn(*args, **kwargs)
         return inner
@@ -392,6 +407,11 @@ class ActivityHandler(logging.Handler):
     """
 
     def emit(self, record: logging.LogRecord) -> None:
+        """One library record -> one `library` event, severity mapped from its level.
+
+        `failure_source` is `external` because these records come from dependencies,
+        not from this service's own code; an attached exception travels with it.
+        """
         exc = record.exc_info[1] if record.exc_info else None
         log_event("library", record.name, severity=_LOG_LEVEL.get(record.levelno, WARNING),
                   message=record.getMessage(), exception=exc, failure_source="external",

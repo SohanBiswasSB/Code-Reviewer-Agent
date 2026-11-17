@@ -87,6 +87,7 @@ class ReportSink:
     """
 
     def __init__(self, root: str | None = None):
+        """`root` overrides `CRA_DATA_DIR` (tests point it at a temp dir)."""
         self.root = root or str(data_dir())
 
     def path_for(self, tenant: str, target: str, ext: str) -> str:
@@ -95,6 +96,11 @@ class ReportSink:
                             f"{safe_part(target, 'undated')}.{ext}")
 
     def _render_md(self, report: dict) -> str:
+        """The human-readable twin of the `.json` report, built from the same dict.
+
+        Rendered from the stored report rather than from `action` and `context`
+        separately, so the two artefacts cannot disagree about what was approved.
+        """
         cites = report.get("citations") or []
         lines = [
             f"# Daily log review — {report['target']}",
@@ -167,6 +173,7 @@ class ReviewFileSink:
     SUBDIR = "reviews"
 
     def __init__(self, root: str | None = None):
+        """`root` overrides `CRA_DATA_DIR`, as for `ReportSink`."""
         self.root = root or str(data_dir())
 
     def path_for(self, tenant: str, target: str, run_id: str | None) -> str:

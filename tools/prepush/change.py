@@ -130,6 +130,7 @@ class Change:
         return bool(self.revision.get("diff_args")) and (self.root / ".git").exists()
 
     def _memo(self, key, fn):
+        """`fn()` once per `key` for this change; later calls return the cached value."""
         if key not in self._cache:
             self._cache[key] = fn()
         return self._cache[key]
@@ -140,7 +141,8 @@ class Change:
     # calls and ~1.4 s, against 4 calls now. Results are byte-identical to the
     # per-file calls; a file the batch could not split still falls back to one.
     def _diffs(self) -> dict[str, str]:
-        args = self.revision.get("diff_args") or []
+        """Every changed file's diff from ONE git call, as {path: chunk}; {} if unreadable."""
+        args =self.revision.get("diff_args") or []
         # --no-renames: a per-path diff can never pair a rename, a multi-path one
         # can, so without it the batched chunk would differ from the per-file one.
         return self._memo("diffs", lambda: split_diff(
@@ -148,7 +150,13 @@ class Change:
             if args and self.files else {})
 
     def _blobs(self, side: str) -> dict[str, str | None]:
-        ref = self.revision.get("new_ref" if side == "new" else "base_ref")
+        """Every changed file's content on one side (`new` or base) from ONE
+        `cat-file --batch`, as {path: text, or None if absent on that side}.
+
+        A path containing a newline is left out, since it cannot be written to the
+        batch's line-based input; `content_for` / `base_for` fall back for it.
+        """
+        ref =self.revision.get("new_ref" if side == "new" else "base_ref")
         safe = [f for f in self.files if "\n" not in f]
         return self._memo(("blobs", side), lambda: {
             spec[len(ref):]: text
@@ -184,6 +192,7 @@ class Change:
         """The parsed module (None if it does not parse). Parsed once per side:
         the N+1 scan and the docstring check used to parse each file separately."""
         def parse():
+            """The module for `side`, or None on a SyntaxError."""
             try:
                 return ast.parse(self.content_for(path) or "" if side == "new"
                                  else self.base_for(path))
@@ -227,6 +236,8 @@ def _cfg(config: dict, key: str) -> dict:
 
 
 def _skip_path(path: str, config: dict) -> bool:
+    """True if any directory in `path` is in the tenant's `skip_dirs` (default:
+    `.claude`, `migrations`, `Parked`)."""
     parts = set(pathlib.PurePosixPath(path).parts)
     return bool(parts & set(config.get("skip_dirs", [".claude", "migrations", "Parked"])))
 

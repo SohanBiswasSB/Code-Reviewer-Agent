@@ -70,6 +70,7 @@ async def activity_middleware(request: Request, call_next):
 
 @app.get("/healthz")
 def healthz():
+    """Liveness only: the process answers. Model server and tenants are `/doctor`'s job."""
     return {"ok": True}
 
 

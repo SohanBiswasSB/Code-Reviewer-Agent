@@ -8,8 +8,10 @@ somewhere unrelated. Now malformed provider JSON raises at the edge.
 **Checkpoint serialisation (T15).** LangGraph warned on every state type that
 "deserializing unregistered type ... will be blocked in a future version". On a
 stricter release that makes **every paused run unresumable** — catastrophic for a
-design whose safety property is a durable pause. Pydantic models are a type
-LangGraph's serialiser handles natively.
+design whose safety property is a durable pause. Being Pydantic is NOT enough on
+its own: the fix that closed T15 was registration. Every model here is listed in
+`app.state.CHECKPOINT_TYPES`, and a model added without that entry does not
+raise -- it comes back from a checkpoint as a plain dict.
 
 The computed properties stay properties: `has_failing_ci` and
 `is_information_sparse` are derived facts, not stored fields, and the eval suite
@@ -23,6 +25,7 @@ SPARSE_BODY_CHARS = 140  # bodies shorter than this with no repro are "informati
 
 
 class CheckRun(BaseModel):
+    """One CI check on the change. Only `conclusion == "failure"` routes anything."""
     model_config = ConfigDict(extra="ignore")
 
     name: str
@@ -30,6 +33,7 @@ class CheckRun(BaseModel):
 
 
 class LinkedPR(BaseModel):
+    """A pull request linked to an issue, by number and state."""
     model_config = ConfigDict(extra="ignore")
 
     number: int
@@ -54,21 +58,35 @@ class IssueEvidence(BaseModel):
 
     @property
     def has_failing_ci(self) -> bool:
+        """Any check concluded "failure". `classify` routes on this first."""
         return any(c.conclusion == "failure" for c in self.check_runs)
 
     @property
     def is_information_sparse(self) -> bool:
+        """A body under SPARSE_BODY_CHARS that names no repro steps.
+
+        A crude keyword test ("repro", "steps to reproduce"). In the built-in
+        issue-triage rules (`classify`, when no surface classifies) a sparse issue
+        with green CI goes to `ai_investigation`; the eval suite pins that.
+        """
         body = (self.body or "").strip()
         has_repro = "repro" in body.lower() or "steps to reproduce" in body.lower()
         return len(body) < SPARSE_BODY_CHARS and not has_repro
 
 
 class CodeChange(BaseModel):
-    """A proposed change, as the code_review surface normalises it.
+    """A proposed change, as the code_review surface normalises it -- in intent.
 
-    Was a bare dict. Typed now for the same two reasons as above — and because
-    `classify` routes on `touched_areas` and `has_failing_ci`, so a typo in
-    either key would silently route everything to `human_review`.
+    Typed for the same two reasons as above, and because `classify` routes on
+    `touched_areas` and `has_failing_ci`, so a typo in either key would silently
+    route everything to `human_review`.
+
+    NOT YET BUILT by the surface: `CodeReviewSurface.normalize` still returns a
+    plain dict. It had drifted from that dict -- it lacked `revision`, so adopting
+    it under `extra="forbid"` would have rejected every local review. `revision`
+    is declared now, and `tests/test_local_review.py` validates the surface's
+    real output against this model so the two cannot drift apart again. It is
+    registered in `app.state.CHECKPOINT_TYPES` all the same.
     """
     model_config = ConfigDict(extra="forbid")
 
@@ -82,6 +100,9 @@ class CodeChange(BaseModel):
     touched_areas: list[str] = Field(default_factory=list)
     has_failing_ci: bool = False
     is_trivial: bool = False
+    # Where the diff came from (`git_local`: diff_args, base/new refs, head, commit).
+    # The pre-push checks re-read files at exactly this revision; {} for GitHub.
+    revision: dict = Field(default_factory=dict)
 
 
 # ── log review (Layer 0: a BOUNDED window, never the day's lines) ────────────

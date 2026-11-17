@@ -42,6 +42,12 @@ _DELTA_HEADER = "\n\n---\n# TENANT OVERLAY (applies on top of the org contract a
 
 
 def _deep_merge(base: dict, over: dict) -> dict:
+    """`over` on top of `base`: nested dicts merge key by key, anything else replaces.
+
+    So a tenant overrides one value (`code_review.min_relevance_score`) without
+    restating the rest of `_default`'s surface block. Lists replace rather than
+    extend. Neither input is mutated.
+    """
     out = dict(base)
     for k, v in (over or {}).items():
         nested = isinstance(v, dict) and isinstance(base.get(k), dict)
@@ -51,11 +57,15 @@ def _deep_merge(base: dict, over: dict) -> dict:
 
 @adapter("tenant", "fs")
 class FsTenantStore:
+    """The `TenantStore` port over a `tenants/` directory (module docstring)."""
+
     def __init__(self, root: str | None = None):
+        """`root` overrides TENANTS_DIR (default `tenants`, relative to the cwd)."""
         self.root = root or os.getenv("TENANTS_DIR", "tenants")
 
     # ── prompts ──────────────────────────────────────────────────────────────
     def _read_prompt(self, tenant: str, surface: str, node: str) -> str | None:
+        """One prompt file's text, or None when that tenant has none for this node."""
         path = os.path.join(self.root, tenant, "prompts", surface, f"{node}.md")
         if not os.path.exists(path):
             return None
@@ -96,6 +106,7 @@ class FsTenantStore:
 
     # ── policy ───────────────────────────────────────────────────────────────
     def _raw_policy(self, tenant: str) -> dict:
+        """A tenant's `policy.json` as written, or {} when it has none."""
         path = os.path.join(self.root, tenant, "policy.json")
         if not os.path.exists(path):
             return {}
@@ -103,6 +114,14 @@ class FsTenantStore:
             return json.load(f)
 
     def policy(self, tenant: str, surface: str) -> dict:
+        """One surface's policy for `tenant`, deep-merged over `_default`.
+
+        Returns that surface's block plus two tenant-level keys copied in:
+        `enabled_surfaces` (which `resolve_tenant` enforces) and `codebase` (the
+        repo binding retrieval namespaces on, G1). A tenant with no file gets
+        `_default`'s values. Validation is not done here; `schemas/policy.py`
+        checks the result at run start (G11).
+        """
         merged = _deep_merge(self._raw_policy(DEFAULT), self._raw_policy(tenant))
         pol = dict(merged.get(surface, {}))
         pol["enabled_surfaces"] = merged.get("enabled_surfaces", [])

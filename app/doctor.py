@@ -9,12 +9,16 @@ inside a graph run, as a confusing provider error. Checking up front turns
 
 Two design rules:
 
-  · **Stdlib only.** This must run before `requirements-local.txt` is installed,
-    because "the dependency is missing" is one of the things it reports.
+  · **Stdlib at import time.** The module imports only the stdlib plus the
+    stdlib-only `errors` and `schemas.policy`, so `python -m app.doctor` always
+    starts. The checks themselves import `config`, which imports every adapter --
+    and since the imports-at-top rule moved openai, sentence-transformers and
+    torch into `requirements.txt`, a machine without that file installed fails
+    with an ImportError from `_check_platform` rather than a report line.
   · **FAIL vs WARN is meaningful.** FAIL means the agent cannot run at all and
     the exit code is non-zero (so CI can gate on it). WARN means degraded but
-    usable — a missing reranker costs retrieval precision; a missing model
-    server costs everything.
+    usable -- a tenant whose index is not built is a WARN (its runs escalate,
+    safely); an unreachable model server costs everything.
 
 It also prints the memory arithmetic behind the residency verdict, because
 adapters/platforms/mac.py is currently REASONED rather than measured. The first
@@ -76,6 +80,7 @@ class Report:
 
 
 def _check_host(r: Report) -> None:
+    """OS, CPU architecture and Python version: the context for every other line."""
     r.add(OK, "host", f"{_platform.system()} {_platform.machine()} / "
                       f"python {_platform.python_version()}")
 
@@ -150,7 +155,13 @@ def _check_lmstudio(r: Report, models: dict) -> None:
 
 
 def _check_local_stack(r: Report) -> None:
-    """The pip side: the client needed to CALL a model, and the reranker."""
+    """The pip side: the client needed to CALL a model, and the reranker's library.
+
+    Both now come with `requirements.txt` and are imported by `config`, which
+    `_check_platform` loads first -- so in practice these report OK. The reranker
+    is also OFF by default (T13, on measurement), so its absence no longer costs
+    a default run anything.
+    """
     if importlib.util.find_spec("openai"):
         r.add(OK, "openai client", "installed")
     else:
@@ -191,6 +202,8 @@ def _check_tenants(r: Report) -> None:
                        if k not in pol]
             if missing:
                 r.add(WARN, f"policy: {t}/{surface}", f"no {missing} (inherits _default)")
+            _check_relevance_bar(r, f"{t}/{surface}", pol.get("min_relevance_score"),
+                                 base)
             for node in ("diagnosis", "judge"):
                 try:
                     store.prompt(t, surface, node)
@@ -198,9 +211,26 @@ def _check_tenants(r: Report) -> None:
                     r.add(FAIL, f"prompt: {t}/{surface}/{node}",
                           "missing, and no _default fallback")
 
-    r.add(WARN, "threshold calibration",
-          f"min_relevance_score values predate {base.EMBEDDING_MODEL} "
-          f"({base.EMBEDDING_DIMS} dims) -- re-measure before trusting the gate (T10)")
+
+
+def _check_relevance_bar(r: Report, where: str, bar, base) -> None:
+    """Can this policy's relevance bar fail at all, for the pinned embedder?
+
+    This used to be one blanket WARN that every bar predated the embedder. That
+    stopped being true when the real tenants moved to a measured 0.75, and a
+    warning that is always on teaches people to ignore it. Now each bar is checked
+    against the floor `tools.calibrate` measured: below it, the relevance half of
+    groundedness passes nearly every hit, which is T21's shape -- a gate that cannot fail.
+    """
+    if not isinstance(bar, int | float):
+        return                      # absent: inherits _default, checked there
+    floor = base.MEASURED_COSINE_FLOOR
+    if bar < floor:
+        r.add(WARN, f"relevance bar: {where}",
+              f"{bar} is below {base.EMBEDDING_MODEL}'s measured cosine floor (~{floor}), "
+              f"so it rejects almost nothing -- measure with `python -m tools.calibrate`")
+    else:
+        r.add(OK, f"relevance bar: {where}", f"{bar} (at or above the measured floor {floor})")
 
 
 def _check_indexes(r: Report) -> None:

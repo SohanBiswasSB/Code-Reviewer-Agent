@@ -93,6 +93,7 @@ class Recorder:
         self.fails: list[str] = []
 
     def check(self, kind: str, name: str, expected: str, got: str) -> None:
+        """Record and print one check; anything but an exact string match is a failure."""
         self.ran.append(name)
         ok = got == expected
         print(f"[{kind:9}] {name:42} expect={expected:17} got={got:17} {'OK' if ok else 'FAIL'}")
@@ -110,12 +111,18 @@ def _decision(state: dict) -> str:
 
 # ── classify(): routing precedence + Surface delegation ──────────────────────
 def gate_classify(rec: Recorder) -> None:
+    """Each CLASSIFY_TASKS state must route exactly as expected (precedence, delegation)."""
     for name, state, expected in CLASSIFY_TASKS:
         rec.check("classify", name, expected, classify(state)["route"])
 
 
 # ── independent_review(): the booleans, under real policies ──────────────────
 def gate_booleans(rec: Recorder) -> None:
+    """The four booleans on hand-supplied scores: each GATE_TASKS case, its exact decision.
+
+    A task with `policy=None` leaves `_policy` unset, so the node's module defaults
+    are what that task pins.
+    """
     for name, diagnosis, retrieved, policy, expected in GATE_TASKS:
         state = {"diagnosis": diagnosis, "_retrieved": retrieved, "_prompts": _STUB_PROMPTS}
         if policy is not None:
@@ -125,6 +132,12 @@ def gate_booleans(rec: Recorder) -> None:
 
 # ── the Surface's own normalize -> classify chain (T5 regression) ────────────
 def gate_pipeline(rec: Recorder) -> None:
+    """A raw payload through the code_review Surface's OWN normalize, then classify (T5).
+
+    Hand-built evidence pins `classify` but not the normaliser feeding it -- the
+    gap through which code_review once received issue-shaped evidence and routed
+    everything to human_review with every test green.
+    """
     for name, raw, expected in SURFACE_PIPELINE_TASKS:
         state = {"_surface": CodeReviewSurface(), "_raw": raw}
         state.update(normalize_evidence(state))
@@ -170,6 +183,7 @@ def guard_problems(clean: str, report: dict, expect: dict) -> list[str]:
 
 
 def gate_guard(rec: Recorder) -> None:
+    """Each GUARD_TASKS input must sanitise CLEAN; otherwise the problems are the result."""
     guard = RegexInputGuard(fence_markers=FENCE_MARKERS)
     for name, raw, expect in GUARD_TASKS:
         clean, report = guard.sanitize(raw, tenant="_default")
@@ -179,6 +193,11 @@ def gate_guard(rec: Recorder) -> None:
 
 # ── a malformed model response escalates rather than killing the run ─────────
 def gate_parse(rec: Recorder) -> None:
+    """Malformed model output must ESCALATE through the real `_parse_diagnosis`, not crash.
+
+    Run under a policy that allowlists every severity, so no single boolean can
+    carry the result alone (the note on PARSE_GATE_TASKS in eval/tasks.py).
+    """
     hits = [{"id": "iss-1", "score": 0.9,
              "text": "OAuth callback returns 500 when state param missing; "
                      "fix in the auth middleware."}]
@@ -202,6 +221,7 @@ class FakeSink:
     # per-tenant sinks. Accepted and ignored -- this fake asserts on the ACTION,
     # which is the thing that must survive approval verbatim.
     def emit(self, action, *, target, identity=None, context=None):
+        """Record the call and echo the action back in a sink's result shape."""
         self.calls.append((action, target, identity))
         return {"comment": {"body": action["comment"]}, "label": action.get("label")}
 
@@ -217,6 +237,7 @@ def _expect_refusal(rec: Recorder, name: str, approved) -> None:
 
 
 def gate_execute(rec: Recorder) -> None:
+    """`execute`'s own guard: refuse every non-True `approved`, post an approval verbatim."""
     # Refuses without approval -- checked IN THE NODE, so a future shortcut edge
     # straight to execute still cannot bypass the gate. And approval must not be
     # inferrable from a truthy-ish value.
@@ -239,6 +260,7 @@ def gate_label_partial_success(rec: Recorder) -> None:
     github_client.post_comment = lambda url, body, token=None: {"body": body}
 
     def label_403(url, label, token=None):
+        """Stand-in for `add_label` that fails the way a missing-permission 403 does."""
         raise RuntimeError("403 needs triage/write access")
 
     github_client.add_label = label_403
@@ -259,6 +281,12 @@ SECTIONS = (gate_classify, gate_booleans, gate_pipeline, gate_retrieval, gate_gu
 
 
 def run() -> int:
+    """Run every section; return 0 only if every check passed, else 1.
+
+    Also called in-process by `app.doctor` (output captured), so it returns a code
+    rather than exiting. A duplicate check name fails the suite outright: two
+    checks reporting as one would let a failure hide behind a pass.
+    """
     rec = Recorder()
     for section in SECTIONS:
         section(rec)

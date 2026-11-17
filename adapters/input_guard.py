@@ -30,6 +30,15 @@ adapter does not pretend otherwise.** It does two honest things instead:
      A rising `injection_suspected` count is a signal; a regex that claimed to
      have removed the problem would be a lie.
 
+## Where it runs (more places than the title says)
+
+Not only before a model call. `fetch_evidence` runs it over the whole payload
+before anything is written to state (`nodes/_render.py::guard_payload`, T25: the
+checkpoint keeps every super-step, so redacting later would still leave the secret
+on disk); `tools/ingest.py` runs it over every chunk before it is embedded and
+stored in the index; and a crash record's error text passes through it
+(`nodes/_audit.py::write_failure`).
+
 ## What the report may contain
 
 **Never the redacted value.** The report goes into the audit record, so putting
@@ -123,6 +132,8 @@ class RegexInputGuard:
     """
 
     def __init__(self, patterns=None, hints=None, fence_markers=()):
+        """`patterns` / `hints` replace the module tables (tests); `fence_markers`
+        are the delimiters to neutralise, supplied by `nodes/_render.py`."""
         self.patterns = [(name, re.compile(pat, re.DOTALL))
                          for name, pat in (patterns or PATTERNS)]
         self.hints = [(name, re.compile(pat, re.MULTILINE))
@@ -130,7 +141,14 @@ class RegexInputGuard:
         self.fence_markers = tuple(fence_markers)
 
     def sanitize(self, text: str, *, tenant: str = "_default") -> tuple[str, dict]:
-        """Return (cleaned text, report). The report never carries a redacted value."""
+        """Return (cleaned text, report). The report never carries a redacted value.
+
+        The `InputGuard` port. Order: redact, then neutralise fence markers, then
+        count injection hints over the CLEANED text. The report is always the same
+        shape -- `tenant`, `redacted` (category -> distinct values),
+        `total_redactions`, `injection_suspected`, `fence_forgery` -- including
+        for empty input.
+        """
         if not text:
             return "", {"tenant": tenant, "redacted": {}, "total_redactions": 0,
                         "injection_suspected": {}, "fence_forgery": 0}
@@ -141,6 +159,11 @@ class RegexInputGuard:
         seen: dict[str, dict[str, str]] = {}
 
         def replace(category: str, match: re.Match) -> str:
+            """The placeholder for this match, reusing the number of an equal value.
+
+            Counts DISTINCT values per category, which is what the report's
+            `redacted` field means.
+            """
             value = match.group(0)
             bucket = seen.setdefault(category, {})
             if value not in bucket:
@@ -192,5 +215,6 @@ class NullInputGuard:
         self.fence_markers = tuple(fence_markers)
 
     def sanitize(self, text: str, *, tenant: str = "_default") -> tuple[str, dict]:
+        """The text unchanged, with a zero report marked `"guard": "null"`."""
         return text, {"tenant": tenant, "redacted": {}, "total_redactions": 0,
                       "injection_suspected": {}, "fence_forgery": 0, "guard": "null"}

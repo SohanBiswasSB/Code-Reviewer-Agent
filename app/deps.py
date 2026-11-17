@@ -26,24 +26,19 @@ from contextlib import asynccontextmanager
 
 from app.activity import WARNING, log_event
 
-# Read straight from the environment. Anything platform- or model-related lives
-# in config.py / adapters/platforms instead -- this is only external services.
-_SETTING_KEYS = (
-    "OPENAI_API_KEY", "GITHUB_TOKEN", "PINECONE_INDEX", "DATABASE_URL",
-    "LMSTUDIO_BASE_URL", "MIN_RELEVANCE_SCORE", "CRA_DATA_DIR",
-)
-
 _MEMORY_WARNING = (
     "No DATABASE_URL: using MemorySaver. Paused approvals will NOT survive a "
     "restart, and nothing is ever evicted. Development only."
 )
 
 
-def settings() -> dict:
-    return {k: os.getenv(k) for k in _SETTING_KEYS}
-
-
 def _memory_saver():
+    """The development checkpointer: MemorySaver with the T15 serde, announced loudly.
+
+    Every in-memory saver comes through here, so the "approvals are not durable"
+    warning cannot be skipped by one of its two callers (`open_checkpointer`
+    without DATABASE_URL, and `get_graph`).
+    """
     from langgraph.checkpoint.memory import MemorySaver
 
     from app.state import checkpoint_serde

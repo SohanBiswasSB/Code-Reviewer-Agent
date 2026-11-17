@@ -106,7 +106,9 @@ def chunk_python(source: str, path: str) -> list[dict]:
     covered: set[int] = set()
 
     def emit(name: str, start: int, end: int, kind: str) -> None:
-        body = "\n".join(lines[start - 1:end])
+        """Append the chunk(s) for lines `start`..`end`, split into `#n` pieces
+        only when over MAX_CHARS; a body under MIN_CHARS is dropped."""
+        body ="\n".join(lines[start - 1:end])
         if len(body.strip()) < MIN_CHARS:
             return
         pieces = [body] if len(body) <= MAX_CHARS else _split_oversized(body, MAX_CHARS)

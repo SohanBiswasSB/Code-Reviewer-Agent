@@ -100,6 +100,12 @@ def _target_names(node) -> str:
 
 
 def _bounded(it) -> bool:
+    """True if the iterable's size is fixed in the source, not by the data.
+
+    A literal collection, a CONSTANT_NAME (or `x.CONSTANT`), `range` over literals,
+    and `enumerate` / `.items()` / `.keys()` / `.values()` over any of those. A
+    round trip inside such a loop runs a fixed number of times, so it is not N+1.
+    """
     if isinstance(it, (ast.Tuple, ast.List, ast.Set, ast.Dict)):
         return True
     if isinstance(it, ast.Name) and RE_CONST.match(it.id):
@@ -156,6 +162,7 @@ class _Module:
     """Per-module index: which local functions do a round trip (and of what kind)."""
 
     def __init__(self, tree: ast.Module):
+        """Classify every local def by its own calls, then by what it calls."""
         self.defs = _local_defs(tree)
         self.kind: dict[str, str | None] = {}
         callees: dict[str, set[str]] = {}
@@ -196,11 +203,16 @@ class _LoopVisitor(ast.NodeVisitor):
     """Finds round trips inside `n`-shaped loops, following module-local helpers."""
 
     def __init__(self, index: _Module):
+        """Empty loop stack; `found` collects (line, loop line, kind, how) per hit."""
         self.index, self.loops, self.cls = index, [], None
         self.local_containers: set[str] = set()
         self.found: list[tuple[int, int, str, str]] = []   # line, loop line, kind, how
 
     def _in_loop(self, node, it, target, inside):
+        """Visit `inside` with this loop pushed, shaped by its iterable and target.
+
+        The iterable is visited BEFORE the push: it is evaluated once, not per row.
+        """
         self.visit(it)
         self.loops.append((node.lineno, loop_shape(it, target)))
         for n in inside:
@@ -208,11 +220,13 @@ class _LoopVisitor(ast.NodeVisitor):
         self.loops.pop()
 
     def visit_For(self, node):  # noqa: N802 -- ast.NodeVisitor naming
+        """A `for` (or `async for`) loop: shaped by what it iterates."""
         self._in_loop(node, node.iter, node.target, [node.target, *node.body, *node.orelse])
 
     visit_AsyncFor = visit_For  # noqa: N815
 
     def visit_While(self, node):  # noqa: N802
+        """A `while` loop: `bounded` if its test reads like a retry/poll, else `n`."""
         shape = "bounded" if RE_RETRY.search(ast.unparse(node.test)) else "n"
         self.loops.append((node.lineno, shape))
         for n in [node.test, *node.body, *node.orelse]:
@@ -220,6 +234,11 @@ class _LoopVisitor(ast.NodeVisitor):
         self.loops.pop()
 
     def _comp(self, node):
+        """A comprehension is a loop too, shaped by its FIRST generator.
+
+        The first iterable is visited outside the loop (evaluated once); later
+        iterables, the conditions and the element run per row, so inside it.
+        """
         gens = node.generators
         self.visit(gens[0].iter)
         self.loops.append((node.lineno, loop_shape(gens[0].iter, gens[0].target)))
@@ -236,11 +255,13 @@ class _LoopVisitor(ast.NodeVisitor):
     visit_ListComp = visit_SetComp = visit_DictComp = visit_GeneratorExp = _comp  # noqa: N815
 
     def visit_ClassDef(self, node):  # noqa: N802
+        """Track the enclosing class, so `self.m()` resolves to `Class.m`."""
         outer, self.cls = self.cls, node.name
         self.generic_visit(node)
         self.cls = outer
 
     def visit_FunctionDef(self, node):  # noqa: N802
+        """A def starts with an empty loop stack and its own local containers."""
         saved, self.loops = self.loops, []        # a def inside a loop is not "in loop"
         saved_local, self.local_containers = self.local_containers, _containers(node)
         self.generic_visit(node)
@@ -249,6 +270,7 @@ class _LoopVisitor(ast.NodeVisitor):
     visit_AsyncFunctionDef = visit_FunctionDef  # noqa: N815
 
     def visit_Call(self, node):  # noqa: N802
+        """Record a round trip made directly, or via a local helper, in a per-row loop."""
         # ANY per-row loop on the stack, not just the innermost: a query inside
         # a bounded inner loop still runs once per row of the outer one.
         loop = next((lp for lp in reversed(self.loops) if lp[1] == "n"), None)

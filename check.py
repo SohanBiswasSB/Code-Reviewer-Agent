@@ -1,7 +1,8 @@
-"""Run locally exactly what CI used to run, in the same order.
+"""Run locally exactly what CI used to run: the same steps, reported in the same order.
 
-    python check.py            # stop at the first failing step
-    python check.py --all      # run every step, then summarise
+    python check.py            # gate suite first (stop if it fails), then the rest in parallel
+    python check.py --all      # carry on even past a failing gate suite, then summarise
+    python check.py --serial   # after the gates, one step at a time, stopping at a failure
     python check.py --list     # show the steps without running them
 
 CI is commented out (see .github/workflows/ci.yml) because this project is being
@@ -126,6 +127,11 @@ def _status(code: int, blocking: bool) -> str:
 
 
 def _list() -> int:
+    """Print each step's label, env overrides and command, for `--list`; returns 0.
+
+    The interpreter path is dropped from the command so the line reads as
+    something you could type, and non-blocking steps (doctor) are marked as such.
+    """
     for label, argv, env_overrides, blocking in STEPS:
         flag = "" if blocking else "   (never fails the check)"
         prefix = " ".join(f"{k}={v}" for k, v in env_overrides.items())
@@ -170,6 +176,12 @@ def _run(args) -> list:
 
 
 def _summary(results: list, wall: float) -> int:
+    """Print the per-step table and the verdict; return the process exit code.
+
+    Only a blocking FAIL makes it 1. A NOTE (doctor without LM Studio) is printed
+    with the reason it is expected, so the laptop's normal state does not read as
+    a broken check.
+    """
     print(f"\n(wall clock {wall:.1f}s)")
     print("-" * 68)
     for status, label, elapsed in results:

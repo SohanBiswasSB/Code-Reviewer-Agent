@@ -25,20 +25,34 @@ KV_RESERVE_GB = 1.0         # 8k context at q8_0 KV
 
 @adapter("platform", "cuda")
 class CudaPlatform(base.PlatformBase):
+    """The 6 GB GTX 1060 desktop: `portable` only, swapping models through VRAM."""
+
     name = "cuda"
-    # 6 GB cannot hold mac_max's ~19 GB of weights, let alone studio's ~33 GB.
+    # 6 GB cannot hold mac_max's ~13 GB of weights, let alone studio's ~33 GB.
     # Not offered.
     profiles = ("portable",)
 
     def runtime(self, profile: str = base.DEFAULT_PROFILE) -> dict:
+        """The `Platform` port's HOW-to-run half for `profile` on the CUDA desktop.
+
+        Every number follows from the module docstring's three hardware facts:
+        GGUF Q4_K_M, 8k context with a q8_0 KV cache, all layers offloaded, and
+        residency computed against a 5 GB VRAM budget (jit_swap for `portable`).
+        The reranker is pinned to cpu so it never contends for that VRAM. Raises
+        (via `base.resolve`) for any other profile rather than downgrading.
+        """
         models = base.resolve(profile, self.profiles)
         residency, accounting = base.plan_residency(models, VRAM_BUDGET_GB, KV_RESERVE_GB)
         cpus = os.cpu_count() or 8
         return {
             # NOT "cuda". LM Studio already owns all 6 GB for the diagnosis
             # model, so loading the 568M cross-encoder beside it risks an OOM
-            # mid-generation. Reranking a top-100 set on CPU costs a second or
-            # two, once per run, before any LLM call. Deliberate, not a TODO.
+            # mid-generation. Deliberate, not a TODO. This comment used to say
+            # CPU reranking cost "a second or two, once per run"; neither half
+            # holds now. Retrieval is per changed file, so a review reranks one
+            # top-100 pool per QUERY, and `tools.calibrate rerank` measured
+            # 13.5 s per query (TODO.md T13). The reranker is OFF by default, so
+            # this only matters with RERANKER=cross_encoder.
             "reranker_device": "cpu",
             "llm_backend": "cuda",        # LM Studio: llama.cpp CUDA runtime
             "quant": "Q4_K_M",            # GGUF; Pascal has no FP16 fast path

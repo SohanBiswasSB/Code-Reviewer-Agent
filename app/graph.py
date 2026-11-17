@@ -13,7 +13,9 @@
 
 Every terminal path passes through `audit`, which writes one immutable run record
 (G6). A DENIAL is the exception and is recorded by `await_approval` itself -- see
-the note on that edge below, and docs/DATA_STORAGE.md.
+the note on that edge below, and docs/DATA_STORAGE.md. A CRASH is the other: the
+graph has no failure edges, so `_traced` records the run as `failed` or
+`interrupted` before re-raising (G9).
 
 ## One approval gate, not two (T4)
 
@@ -73,9 +75,12 @@ def _traced(name, fn, tracer):
     concerns the same way it is free of provider concerns.
 
     The run's identity comes off state, so every span joins to the audit record
-    on `run_id`.
+    on `run_id`. The same wrapper writes the node's live status (app/live.py) and
+    its activity-log span, and on an exception records the run's failure audit
+    record (G9) before re-raising it unchanged.
     """
     def wrapped(state, *args, **kwargs):
+        """Run the node inside its span; an interrupt() pause is `waiting`, not an error."""
         # Live status (app/live.py) is the START half the trace lacks: a span row
         # is written when a node ENDS, so a 3-minute diagnosis was invisible
         # until it was over. Same single insertion point, same reason.

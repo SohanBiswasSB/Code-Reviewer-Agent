@@ -3,12 +3,16 @@ target-version = "py311"
 exclude = ["__pycache__", ".git"]
 
 [lint]
-select = ["E", "F", "I", "B", "UP", "W", "C4"]
+# D1xx: every public module, class and function carries a docstring (2026-11-17,
+# after a pass that closed 188 gaps). Tests are exempt -- their names are the doc.
+select = ["E", "F", "I", "B", "UP", "W", "C4",
+          "D100", "D101", "D102", "D103", "D104", "D106"]
 ignore = [
   "E731",   # lambda assignment: used intentionally in graph edge predicates
 ]
 
 [lint.per-file-ignores]
+"tests/**" = ["D"]
 # Adapters and surfaces are imported purely for their registration side effect.
 "adapters/__init__.py" = ["F401"]
 "adapters/platforms/__init__.py" = ["F401"]

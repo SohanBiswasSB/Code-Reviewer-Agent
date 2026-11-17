@@ -33,6 +33,16 @@ def normalize_issue(raw: dict) -> IssueEvidence:
 
 
 def normalize_evidence(state: dict) -> dict:
+    """Turn `_raw` into the validated `evidence` the rest of the graph reads.
+
+    Reads `_raw`, the active surface and the pinned `_policy`; writes only
+    `evidence`. `_raw` was already redacted by `fetch_evidence` (T25), so nothing
+    here sees an unredacted secret, and redaction does not belong here: by now
+    the fetch step's checkpoint would already hold the value. Where the
+    normaliser builds a Pydantic model (issues, log windows), malformed provider
+    data raises here, at the boundary, rather than deeper in the graph (T11);
+    code_review's normaliser returns a plain dict.
+    """
     raw = state["_raw"]
     surface = active_surface(state)
     normalizer = getattr(surface, "normalize", None) if surface else None

@@ -57,6 +57,8 @@ LARGE_MODEL_GB = 15.0       # diagnosis weights at/above this get the large rese
 
 @adapter("platform", "studio")
 class StudioPlatform(base.PlatformBase):
+    """The remote 64 GB Mac Studio; offers every profile. Never auto-detected."""
+
     name = "studio"
     # 64 GB holds every profile, including the two sized for the 24 GB laptop.
     # Kept available so `studio` can be A/B'd against them on one machine —
@@ -71,6 +73,13 @@ class StudioPlatform(base.PlatformBase):
         return KV_RESERVE_GB if big else KV_RESERVE_GB_SMALL
 
     def runtime(self, profile: str = base.DEFAULT_PROFILE) -> dict:
+        """The `Platform` port's HOW-to-run half for `profile`, split across two hosts.
+
+        Agent-side keys (`reranker_device`, `threads`) describe the machine running
+        the graph; the rest describe the Studio (module docstring). 32k context at
+        every profile, quant read from the profile's `quant`, KV reserve sized from
+        the diagnosis model's weights, residency computed against 48 GB.
+        """
         models = base.resolve(profile, self.profiles)
         kv_gb = self._kv_for(models)
         residency, accounting = base.plan_residency(models, MEMORY_BUDGET_GB, kv_gb)

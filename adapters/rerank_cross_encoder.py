@@ -94,6 +94,11 @@ class CrossEncoderReranker:
 
     def __init__(self, model: str | None = None, device: str | None = None,
                  max_length: int | None = None):
+        """Configure only; the ~2.3 GB model loads on the first `scores()` call.
+
+        `model` defaults to RERANKER_MODEL (env, else the pin), `device` to the
+        platform's `reranker_device`, `max_length` to RERANK_MAX_LENGTH (512).
+        """
         self.model = model or os.getenv("RERANKER_MODEL", RERANKER_MODEL)
         self._device = device
         self.max_length = max_length or int(os.getenv("RERANK_MAX_LENGTH",
@@ -101,6 +106,11 @@ class CrossEncoderReranker:
         self._encoder = None
 
     def _load(self) -> CrossEncoder:
+        """The cross-encoder, loaded once from the local HF cache only.
+
+        Raises ProviderError with the fetch command when the model is not cached,
+        never downloads it: a review must not start a 2.3 GB download.
+        """
         if self._encoder is None:
             try:
                 self._encoder = CrossEncoder(self.model, device=self._device or _device(),
@@ -126,7 +136,12 @@ class CrossEncoderReranker:
         return [round(float(s), 4) for s in out]
 
     def rerank(self, query: str, candidates: list[dict], top_n: int = 8) -> list[dict]:
-        """The candidates, best first, each a COPY carrying its `rerank` score."""
+        """The candidates, best first, each a COPY carrying its `rerank` score.
+
+        The `Reranker` port: at most `top_n` of `candidates`, input dicts never
+        mutated. It returns a score and an order, never a decision; turning
+        `rerank` into the gate's `score` is the retriever's job.
+        """
         scored = [{**c, "rerank": s} for c, s in
                   zip(candidates, self.scores(query, [passage_text(c) for c in candidates]),
                       strict=True)]

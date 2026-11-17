@@ -1,9 +1,12 @@
 """Apple Silicon. Calibrated for an M4 Pro (14-core) with 24 GB unified memory.
 
-NOT YET EXERCISED on the Mac — the numbers below come from the M4 Pro's known
-limits, not from measurement. Same honesty rule as docs/ROADMAP.md: represent
+The budget numbers below come from the M4 Pro's known limits, not from
+measurement. Same honesty rule as docs/ROADMAP.md: represent
 designed-but-unproven things as exactly that. `doctor` prints the arithmetic so
-the first real run either confirms it or shows exactly which figure was wrong.
+a real run either confirms it or shows exactly which figure was wrong. Real
+reviews have since run on this Mac (docs/DECISIONS.md §8), and one hit a Metal
+OOM with both LLMs loaded at LM Studio's `parallel 4` -- a load setting this
+arithmetic does not model; it was reloaded at `parallel 1`.
 
 Decisions specific to this machine:
   · MEMORY_BUDGET_GB = 18.0 of the 24. LM Studio's own guardrail lands near
@@ -12,11 +15,14 @@ Decisions specific to this machine:
   · MLX quants, not GGUF. Noticeably better prefill and decode on Apple Silicon.
     MLX does not exist on the CUDA box, which is precisely why the quant format
     lives here in runtime() and not in the shared model profile.
-  · Residency is COMPUTED, not declared. `mac_resident` (~12 GB hot) stays
-    loaded; `mac_max` (~18 GB hot) cannot co-reside with its judge and resolves
-    to jit_swap. Declaring "resident" for both was the bug this replaces.
-  · Context drops for mac_max — a 15.6 GB model plus a 32k KV cache would blow
-    the budget the weights already nearly fill.
+  · Residency is COMPUTED, not declared. Declaring "resident" for every profile
+    was the bug this replaces. Today all three profiles fit: `mac_resident`
+    (~12 GB hot) and `mac_max` (~11.9 GB hot, since its diagnosis model changed
+    to ministral-3-14b on 2026-09-11) both resolve to resident.
+  · Context drops only when the weights need it (`_context_for`): 32k when the
+    hot weights plus the 32k KV reserve fit the budget, else 16k. It used to
+    drop for mac_max by name, back when that profile carried a 15.6 GB model;
+    no current profile triggers it.
   · torch on `mps` for the reranker: unified memory means no VRAM contention
     with LM Studio at this size. Watch the libomp collision though — torch and
     another OpenMP-shipping wheel in one process abort on macOS.
@@ -35,6 +41,8 @@ KV_RESERVE_GB_LARGE = 2.0   # reduced-context profiles
 
 @adapter("platform", "mac")
 class MacPlatform(base.PlatformBase):
+    """Apple Silicon running LM Studio's MLX runtime locally, beside the agent."""
+
     name = "mac"
     profiles = ("portable", "mac_resident", "mac_max")
 
@@ -59,6 +67,12 @@ class MacPlatform(base.PlatformBase):
         return 16384, KV_RESERVE_GB_LARGE
 
     def runtime(self, profile: str = base.DEFAULT_PROFILE) -> dict:
+        """The `Platform` port's HOW-to-run half for `profile` on this Mac.
+
+        MLX 4-bit, f16 KV, context and residency both COMPUTED from the profile's
+        hot weights against the 18 GB budget, and the reranker on mps. Raises (via
+        `base.resolve`) for a profile this Mac does not offer (`studio`).
+        """
         models = base.resolve(profile, self.profiles)
         context, kv_gb = self._context_for(profile)
         residency, accounting = base.plan_residency(models, MEMORY_BUDGET_GB, kv_gb)

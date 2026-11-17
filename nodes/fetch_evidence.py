@@ -13,7 +13,13 @@ from nodes._surface import active_surface
 
 
 def fetch_evidence(state: dict, source=None) -> dict:
-    """`source` is injectable for tests; otherwise resolved from the surface."""
+    """Gather the target's raw payload and redact it before it enters state.
+
+    Reads `target`, `github_token`, `tenant` and the pinned `_policy` (its
+    `codebase`); writes `_raw` (already redacted, T25 / invariant 6) and the
+    evidence half of `_guard`. Raises ValueError with no active surface.
+    `source` is injectable for tests; otherwise resolved from the surface.
+    """
     target = state["target"]              # PR ref | issue url | YYYY-MM-DD
 
     if source is None:

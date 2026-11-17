@@ -1,3 +1,9 @@
+"""Hosted OpenAI behind the `LLM` port -- a deliberate, visible stub.
+
+`complete` raises `NotImplementedError` rather than returning anything: a stub
+that faked a reply would let a misconfigured LLM_PROVIDER=openai run the whole
+graph on invented output. The local LM Studio adapter is the one exercised.
+"""
 from registry import adapter
 
 
@@ -9,13 +15,13 @@ class OpenAILLM:
     swap stays a config change (LLM_PROVIDER=openai) rather than a code change.
     """
 
-    def __init__(self, model: str = "gpt-4o-mini", runtime: dict | None = None,
-                 role: str | None = None):
+    def __init__(self, model: str = "gpt-4o-mini", role: str | None = None):
+        """Same constructor shape as `LMStudioLLM`, so `config.get_llm` can build either."""
         self.model = model
-        self.runtime = runtime or {}
         self.role = role
 
     def complete(self, system: str, user: str, *, json_schema: dict | None = None) -> str:
+        """Not implemented; always raises `NotImplementedError`."""
         raise NotImplementedError("wire the openai client; return the text (or JSON string)")
 
 # @adapter("llm", "claude") -> drop in more, no core change.

@@ -86,7 +86,7 @@ python -m app.doctor          # tells you what this machine is missing
 
 | Path | Role |
 |---|---|
-| `ports/interfaces.py` | The contracts. Core imports **only** these, never a provider. |
+| `ports/interfaces.py` | The contracts. Core codes against these shapes and never imports a provider. |
 | `nodes/`, `app/graph.py` | The core graph. Holds the safety design. |
 | `adapters/` | Concrete providers, self-registering via `@adapter(kind, name)`. |
 | `surfaces/` | Capabilities (`code_review`, `log_review`) via `@surface(name)`. |
@@ -127,5 +127,5 @@ Scope cuts are represented in the schema and documented in the node docstrings, 
 - [docs/MULTI_TENANT.md](docs/MULTI_TENANT.md) — how a codebase plugs in
 - [docs/MILESONE_ADAPTATION.md](docs/MILESONE_ADAPTATION.md) — the two concrete surfaces
 - [docs/DECISIONS.md](docs/DECISIONS.md) — **cross-machine handoff**: what was decided and why, machine specs, model downloads, things discovered the hard way
-- [TODO.md](TODO.md) — the code-level worklist (T1–T13), with "done when" for each
+- [TODO.md](TODO.md) — the code-level worklist (T1–T28), with "done when" for each
 - [MODEL_CARD.md](MODEL_CARD.md) — scope limits and known failure modes

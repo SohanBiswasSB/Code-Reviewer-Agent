@@ -13,8 +13,12 @@ The default `Entailer`. Crude by design, and honest about it:
     ledger" cited against a snippet about an OAuth 500 -- scores near zero. A
     claim that paraphrases its passage scores high. What it cannot detect is a
     claim that reuses the passage's vocabulary while inverting its meaning; that
-    needs a real NLI model, and until one is wired this check is a floor rather
-    than a ceiling.
+    needs a real NLI model (`entail_cross_encoder`, opt-in via ENTAILER), and
+    while this scorer is the default the check is a floor rather than a ceiling.
+
+The caller decides what a claim and its passage are: entailment is scored PER
+CLAIM (`independent_review.entailment_claims`), each finding against its own
+citations plus its own file's diff, and the lowest claim decides.
 
 Score = the share of the claim's content words that appear in the passage. So it
 asks "is this claim talking about what the passage talks about", which is a
@@ -50,6 +54,8 @@ def content_words(text: str) -> set[str]:
 
 @adapter("entailer", "lexical")
 class LexicalEntailer:
+    """The default `Entailer`: content-word coverage of a claim by its premise."""
+
     def score(self, claim: str, passage: str) -> float:
         """Share of the claim's content words present in the passage, 0.0-1.0.
 

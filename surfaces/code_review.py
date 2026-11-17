@@ -1,4 +1,4 @@
-"""Code review: a PR diff in, a grounded review comment out.
+"""Code review: a diff in (a PR, or a local change via git_local), a grounded review out.
 
 This surface owns its own `normalize` because its evidence SHAPE differs from
 issue triage. Without it the graph handed this surface an `IssueEvidence` — which
@@ -48,6 +48,11 @@ def _touched_areas(files: list[str], areas: tuple[str, ...] = RISKY_AREAS) -> li
 
 
 def _is_trivial(files: list[str]) -> bool:
+    """True when every changed file is docs (by suffix or directory); False if none.
+
+    Recorded on the evidence as `is_trivial`, but no longer routes: `classify`
+    sends trivial and non-trivial unmatched changes alike to `human_review`.
+    """
     if not files:
         return False
     return all(
@@ -64,6 +69,16 @@ PER_FILE_QUERY_CHARS = 1500
 
 @surface("code_review")
 class CodeReviewSurface:
+    """Review a code change: route by path, retrieve per file, propose a comment.
+
+    Owns the code-review evidence shape (`normalize`), its rule-based route
+    (`classify`), its retrieval queries (`build_queries` / `build_query`) and the
+    permission it asks for (`action_type`). It never decides approval; that is
+    the gate's four booleans. Source and sink default to GitHub, and are chosen
+    per surface by `CRA_SOURCE_<SURFACE>` / `CRA_SINK_<SURFACE>` (local review
+    uses `git_local` and the review-file sink).
+    """
+
     name = "code_review"
     source_name, sink_name = "github", "pr_comment"
     # Node KEYS, resolved per tenant by the TenantStore -- not flat paths under
@@ -83,7 +98,9 @@ class CodeReviewSurface:
 
         A dict rather than a dataclass, for now, precisely because it must survive
         the checkpoint without adding another unregistered msgpack type (T15).
-        Becomes a Pydantic model under T11.
+        T11 added `schemas.evidence.CodeChange`, the typed form of this dict; a
+        test validates this method's output against it, so adopting it later is
+        a one-line change rather than a schema migration.
         """
         files = [f.get("filename", "") for f in raw.get("files", []) if isinstance(f, dict)]
         checks = raw.get("check_runs", []) or []
@@ -141,7 +158,7 @@ class CodeReviewSurface:
         return "\n".join(p for p in parts if p).strip()
 
     def classify(self, evidence: dict) -> str:
-        """Rule-based route. Precedence: failing CI, then risk, then triviality.
+        """Rule-based route. Precedence: failing CI, then risk, then a human.
 
         Failing CI wins because a red build has a cheap deterministic response and
         does not need an LLM to reach it -- the same precedence the issue-triage

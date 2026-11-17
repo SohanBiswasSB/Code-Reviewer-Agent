@@ -7,11 +7,14 @@ policy and the reachability failure mode are all different.
 
 Two things worth knowing about this file:
 
-  · `available_models()` uses **urllib from the stdlib, not the openai client**,
-    on purpose. `doctor` must be able to tell you "LM Studio is not running" or
-    "that model id is not loaded" in an environment where nothing from
-    requirements-local.txt is installed. A diagnostic that needs the dependency
-    it is diagnosing is not much of a diagnostic.
+  · `available_models()` uses **urllib from the stdlib, not the openai client**.
+    It was written so `doctor` could say "LM Studio is not running" or "that
+    model id is not loaded" with nothing from requirements-local.txt installed.
+    That no longer holds for this module: under the imports-at-top rule `openai`
+    moved to requirements.txt and is imported at the top of this file, and
+    `doctor` imports it through the `adapters` package. What the urllib path
+    still buys is a plain `ConnectionError` with an actionable message, which
+    `with_retry` classifies as transient when the lookup runs inside a model call.
 
   · **The model id SENT is the id LM Studio reports, resolved strictly (T26).**
     Profiles name models briefly (`qwen3-4b`); LM Studio's API rejects anything
@@ -44,6 +47,7 @@ PLACEHOLDER_KEY = "lm-studio"
 
 
 def base_url() -> str:
+    """`LMSTUDIO_BASE_URL` (default localhost:1234/v1), without a trailing slash."""
     return os.getenv("LMSTUDIO_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
 
 
@@ -285,9 +289,17 @@ class LMStudioLLM:
     DEFAULT_TEMPERATURE for the measurement that settled it.
     """
 
-    def __init__(self, model: str, runtime: dict | None = None, role: str | None = None):
+    def __init__(self, model: str, role: str | None = None):
+        """Bind one model id to one role; nothing touches the network yet.
+
+        `model` is the profile's id, resolved to LM Studio's own identifier on the
+        first call (`resolved_model`). `role` picks the temperature and labels every
+        trace, activity record and retry notice. (A `runtime` argument used to be
+        passed and stored here, and nothing ever read it; the context budget is
+        LM Studio's load setting, not this client's.) `CRA_MAX_TOKENS` (default
+        2048) caps the reply.
+        """
         self.model = model
-        self.runtime = runtime or {}
         self.role = role
         self.base_url = base_url()
         self.temperature = _temperature_for(role)
@@ -297,6 +309,7 @@ class LMStudioLLM:
         self._resolved: str | None = None
 
     def _get_client(self):
+        """The OpenAI-compatible client, built on first use with its retries OFF."""
         if self._client is None:
             # max_retries=0: the retry policy is `with_retry`, in one visible place.
             self._client = OpenAI(base_url=self.base_url, api_key=PLACEHOLDER_KEY,
@@ -329,6 +342,12 @@ class LMStudioLLM:
         turning it into a Diagnosis, and `independent_review` treats the judge's
         reply as opaque human-readable text. Keeping interpretation out of here
         is what stops a provider adapter from quietly becoming a decision-maker.
+
+        The `LLM` port. `json_schema` becomes a strict `response_format`, which
+        fixes the reply's structure and nothing about what goes inside a string.
+        Transient failures are retried by `with_retry`; an id that resolves to no
+        single served model raises `LookupError` on the first attempt. Returns ""
+        when the server sends no content.
         """
         kwargs: dict = {
             "messages": [

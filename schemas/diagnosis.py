@@ -13,6 +13,7 @@ SEVERITIES = ("low", "medium", "high", "critical")
 
 
 class Citation(BaseModel):
+    """A retrieved passage the diagnosis rests on, by snippet id."""
     model_config = ConfigDict(extra="forbid")
 
     snippet_id: str
@@ -41,6 +42,14 @@ class Finding(BaseModel):
 
 
 class Diagnosis(BaseModel):
+    """What the diagnosis model proposes: a summary, a severity, a comment, citations.
+
+    A PROPOSAL, never a verdict: the gate decides from it, and every field the
+    model asserts about itself is checked rather than trusted. `severity`
+    defaults to "high" so a diagnosis that never set one escalates (invariant
+    12). `citations[].score` is filled from the retriever's hits, never from the
+    model (T17; see `diagnosis_request_schema`).
+    """
     model_config = ConfigDict(extra="ignore")
 
     summary: str = ""
@@ -74,6 +83,11 @@ class ReviewResult(BaseModel):
 
     @property
     def decision(self) -> str:
+        """Return "approve" only if all four booleans hold, else "escalate_to_human".
+
+        Computed, so it cannot disagree with the booleans and cannot be written
+        by anyone -- the graph routes on it (`app/graph.py`).
+        """
         ok = (self.groundedness_ok and self.risk_ok
               and self.permission_ok and self.entailment_ok)
         return "approve" if ok else "escalate_to_human"

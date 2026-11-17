@@ -46,6 +46,8 @@ from tools.fusion import RRF_K, reciprocal_rank_fusion  # noqa: F401 -- re-expor
 
 @dataclass
 class Snippet:
+    """One demo hit, carrying BOTH numbers: `relevance` gates, `fusion` orders (T21)."""
+
     id: str
     text: str
     relevance: float          # calibrated similarity. THE GATE READS THIS.
@@ -119,8 +121,9 @@ def retrieve(query: str, k: int = 5) -> list[Snippet]:
     its `fusion` value (ordering only). See the module docstring for why those
     must not be the same number.
 
-    TODO T13: cross-encoder rerank of the fused top-N, whose calibrated score
-              should then supersede the dense relevance for gating.
+    No reranking here. T13's cross-encoder is built in the real path
+    (`adapters/retriever_indexed.py`), OFF by default on measurement; when on,
+    its score is what the gate reads there, against its own `min_rerank_score`.
     TODO: MMR de-dup so citations are not near-duplicates.
     """
     dense = [cid for cid, _ in _dense_search(query, k * 2)]

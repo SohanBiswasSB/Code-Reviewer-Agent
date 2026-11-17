@@ -1,6 +1,6 @@
 """Rendering evidence into the USER turn of a model call.
 
-Two rules, both load-bearing:
+Three rules, all load-bearing:
 
 **Untrusted material never enters the system turn.** System content is trusted
 operator instruction; a diff, a log line or an issue body is data. Putting
@@ -21,6 +21,11 @@ every fenced block before it is rendered -- escaping the markers, replacing
 secrets and PII with stable placeholders, and COUNTING instruction-like phrasing
 without rewriting it. See `adapters/input_guard.py` for why only the first two of
 those are things regex can honestly claim to do.
+
+The same guard also runs earlier, over the whole evidence payload before it
+enters STATE (`guard_payload`, T25), so the prompt pass mostly finds nothing
+left to redact in the diff; it stays because retrieved passages and the model's
+own output are fenced here too, and neither came through `fetch_evidence`.
 
 The guard's report travels back to the caller rather than being dropped, so it
 reaches `state["_guard"]`, the audit record and the trace. A redaction nobody can
@@ -102,6 +107,8 @@ def guard_payload(raw, guard=None, tenant: str = "_default"):
     report: dict = {}
 
     def walk(value, key=None):
+        """Sanitise every string under `value`, keeping its shape (dict, list,
+        tuple); a value under an IDENTIFIER_KEYS key is returned untouched."""
         if key in IDENTIFIER_KEYS:
             return value
         if isinstance(value, str):
@@ -159,7 +166,8 @@ def render_snippets(hits: list[dict]) -> str:
     The score is shown because the judge is asked to comment on grounding
     strength, and because a human reading the captured prompt should be able to
     see what the diagnosis had to work with. It is the retriever's own score —
-    a model-supplied one would be meaningless here (T17).
+    a model-supplied one would be meaningless here (T17). Each passage's text is
+    clipped to PROMPT_SNIPPET_CHARS here, in the prompt only.
     """
     if not hits:
         return "(nothing retrieved)"
@@ -178,6 +186,7 @@ PROMPT_SNIPPET_CHARS = 1500
 
 
 def _clip(text: str) -> str:
+    """`text` cut to PROMPT_SNIPPET_CHARS, with a marker saying it was cut."""
     if len(text) <= PROMPT_SNIPPET_CHARS:
         return text
     return text[:PROMPT_SNIPPET_CHARS] + " [...cut for the prompt]"
@@ -245,9 +254,12 @@ def render_review(diagnosis) -> str:
     `findings[]` -- so approving would have published a sentence ending in a colon,
     with every specific issue left behind in the audit record.
 
-    Built ONCE, and the same string is what the entailment check reads and what
-    `execute` posts (invariant 4). A finding the gate never judged must not reach
-    the page. With no findings the output is `proposed_comment` unchanged.
+    Built ONCE, and the same string is what `execute` posts (invariant 4). The
+    entailment check does not read this string: since 2026-11-17 it scores the
+    same comment and each of these findings as separate claims
+    (`independent_review.entailment_claims`), so every finding that reaches the
+    page has been judged on its own. With no findings the output is
+    `proposed_comment` unchanged.
 
     A finding the model itself marks ungrounded is still shown, labelled -- hiding
     it would make the review look more certain than the model was.

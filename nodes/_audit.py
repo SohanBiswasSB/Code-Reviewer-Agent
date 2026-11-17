@@ -1,6 +1,6 @@
 """Build and write the run record (G6). Shared by `audit` and `await_approval`.
 
-Two callers, because no single node observes every terminal outcome:
+Several callers, because no single node observes every terminal outcome:
 
   · `nodes/audit.py` sits on the three edges that reach END normally —
     human_review, escalate_to_human, and a completed execute.
@@ -9,8 +9,12 @@ Two callers, because no single node observes every terminal outcome:
     pinned by tests precisely to prove routing is not the mechanism. Routing
     denials past `execute` to reach an audit node would remove that defence in
     depth, so the node that *observes* the denial records it instead.
+  · `app/graph.py::_traced` calls `write_failure` for a run that CRASHED in any
+    node (G9, 2026-11-17), and `app/review.py` records a CLI run left at the
+    gate as `abandoned`.
 
-When G9 adds failure edges, both should collapse onto one terminal audit path.
+G9's failure EDGES are still open; when they land, these paths should collapse
+onto one terminal audit path.
 """
 from __future__ import annotations
 
@@ -33,8 +37,9 @@ def _runtime() -> dict:
 
     Recorded because the profile is env-driven: the monitor, a later shell or a
     teammate reading the record cannot reconstruct it, and a diagnosis cannot be
-    judged without knowing which model wrote it. Never raises -- a profile that
-    does not resolve must not be why the record is lost.
+    judged without knowing which model wrote it. A profile or platform that does
+    not resolve (`CONFIG_ERRORS`) is recorded, not raised -- it must not be why
+    the record is lost; any other exception is a bug and propagates.
     """
     try:
         out = {"platform": type(config.get_platform()).__name__,
@@ -42,6 +47,7 @@ def _runtime() -> dict:
                "llm_provider": os.getenv("LLM_PROVIDER", "lmstudio"),
                "retriever": os.getenv("RETRIEVER", "indexed"),
                "entailer": os.getenv("ENTAILER", "lexical"),
+               "reranker": os.getenv("RERANKER", "none"),
                "model_server": config.model_server()}
         out["models"] = config.get_models()
         if out["entailer"] == "cross_encoder":
@@ -166,10 +172,12 @@ def build_record(state: dict, outcome: str) -> dict:
 def write(state: dict, outcome: str, sink=None) -> dict:
     """Write one record. `sink` is injectable for tests.
 
-    Never raises. An audit failure must not destroy the run it is describing —
-    on the `executed` path the comment has already been posted, and throwing
-    would discard the fact that it happened, which is strictly worse than a
-    missing record. Same reasoning as PRCommentSink's partial-success handling.
+    Never raises for a failed WRITE (`WRITE_ERRORS`: disk or serialisation). An
+    audit failure must not destroy the run it is describing — on the `executed`
+    path the comment has already been posted, and throwing would discard the
+    fact that it happened, which is strictly worse than a missing record. Same
+    reasoning as PRCommentSink's partial-success handling. Anything outside that
+    family is a bug and propagates (errors.py: name the family).
 
     The failure is returned in the state channel rather than swallowed, so a run
     whose record did not persist says so instead of looking clean.

@@ -20,7 +20,9 @@ staged work, a local commit, a branch before it is pushed.
 `CodeReviewSurface.normalize` already reads, so the surface, `classify`, the
 gate and the prompts are untouched. A second evidence shape would mean a second
 `normalize` and a second set of ways for routing to go quietly inert, which is
-how log_review ended up unreachable three separate ways.
+how log_review ended up unreachable three separate ways. One extra key,
+`revision`, tells the pre-push checks where to read the FULL change, since
+`diff` is cut to a budget.
 
 `check_runs` is always empty: a local checkout has no CI. That makes the
 `deterministic` route unreachable from this source, which is honest -- that
@@ -35,8 +37,9 @@ See `pack_diff` for why path order was the wrong default.
 
 The TARGET comes from a caller, so it is refused if it looks like an option
 (`--output=...` would otherwise reach git as a flag) and is always passed as a
-list argument, never through a shell. The DIFF is evidence like any other and
-is sanitised and fenced by `nodes/_render.py` before a model sees it.
+list argument, never through a shell. The DIFF is evidence like any other: it is
+redacted by `fetch_evidence` before it is written to state (T25), then sanitised
+and fenced by `nodes/_render.py` before a model sees it.
 """
 from __future__ import annotations
 
@@ -109,6 +112,7 @@ class GitTargetError(ValueError):
 
 
 def _git(root, *args: str) -> str:
+    """Run git in `root` with list arguments, no shell; GitTargetError on non-zero exit."""
     proc = subprocess.run(["git", "-C", str(root), *args], capture_output=True,
                           text=True, check=False)
     if proc.returncode != 0:
@@ -128,11 +132,15 @@ class GitLocalSource:
     """A diff from the tenant's checkout, in the shape the code_review surface reads."""
 
     def gather(self, target: str, **opts) -> dict:
-        """Evidence for `target` (staged | <rev> | <a>..<b>) in the tenant's repo.
+        """Evidence for `target` (staged | <rev> | <a>..<b> | <a>...<b>) in the tenant's repo.
 
         The repo is the tenant's `codebase` binding resolved for this machine --
         the same `tools.codebase.codebase_root` ingest uses, so the diff and the index
         always describe the same checkout.
+
+        The `EvidenceSource` port. Raises GitTargetError (a ValueError) when there is
+        no checkout, a revision is option-shaped or unknown, or the target changes
+        nothing -- an empty review is refused rather than run.
         """
         codebase = opts.get("codebase") or {}
         root = codebase_root(codebase)

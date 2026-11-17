@@ -110,8 +110,9 @@ class LocalVectorIndex:
     """
 
     def __init__(self, root: pathlib.Path | None = None):
+        """`root` overrides `<CRA_DATA_DIR>/index`; nothing is read until a query."""
         self.root = pathlib.Path(root) if root else _root()
-        # namespace -> (vectors.npy mtime_ns, vectors, metas, id->row)
+        # namespace -> ((inode, size, mtime_ns) of vectors.npy, vectors, metas, id->row)
         self._cache: dict[str, tuple] = {}
 
     def _dir(self, namespace: str) -> pathlib.Path:
@@ -185,8 +186,8 @@ class LocalVectorIndex:
 
         Re-reading a .npy and parsing tens of thousands of JSON lines on every
         query would put a disk read on the critical path of every diagnosis. The
-        cache keys on the file's mtime, so a rebuild by another process (ingest
-        runs as its own command) is picked up without a restart.
+        cache keys on vectors.npy's inode, size and mtime, so a rebuild by another
+        process (ingest runs as its own command) is picked up without a restart.
         """
         d = self._dir(namespace)
         vec_path, meta_path = d / "vectors.npy", d / "chunks.jsonl"

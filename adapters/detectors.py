@@ -42,10 +42,20 @@ class SignalDetector:
     """
 
     def __init__(self, signals=None):
+        """`signals` replaces the table (same (name, severity, pattern) shape, same
+        first-match-wins order); patterns compile once, case-insensitive."""
         self.signals = [(name, sev, re.compile(pat, re.IGNORECASE))
                         for name, sev, pat in (signals or SIGNALS)]
 
     def detect(self, window: dict) -> list[dict]:
+        """The `Detector` port: one candidate per matching line, under its first signal.
+
+        Each hit is `{signal, severity, service, ref, line_no, text}`, where
+        `line_no` is `window["start"]` plus the line's offset, so a hit can be
+        located in its source object even though the caller streams in windows.
+        `text` is the line as given; the caller truncates before anything enters
+        state (adapters/source_s3logs.py).
+        """
         service = window.get("service", "")
         ref = window.get("ref", "")
         start = int(window.get("start", 0))

@@ -14,8 +14,12 @@ Two roles must never vary by machine, for correctness rather than taste:
   · EMBEDDING — a different embedder is a different vector space, so the index
     stops being portable AND every min_relevance_score in tenants/*/policy.json
     silently changes meaning.
-  · RERANKER  — runs in-process (sentence-transformers), not via LM Studio, so
-    it is CPU-identical everywhere by default. Keep it that way.
+  · RERANKER  — the same model id everywhere, for the same reason: a
+    `min_rerank_score` is measured against one model's scale. It runs
+    in-process (sentence-transformers), not via LM Studio, and only its DEVICE
+    varies -- `runtime()["reranker_device"]`, mps on mac/studio, cpu on
+    cuda/cpu. It is OFF by default (T13, on measurement; see
+    adapters/rerank_cross_encoder.py).
 """
 from __future__ import annotations
 
@@ -39,9 +43,11 @@ from dataclasses import asdict, dataclass, field
 #
 # Changed now for the same reason bge-m3 was: T10 is open, so there is no index to
 # re-embed and the corpus is four documents. This is the cheapest moment such a
-# change will ever have. Every tenant's min_relevance_score still needs
-# re-measuring -- owed since the shipped 0.35/0.40 were calibrated for
-# text-embedding-3-small@512 and mean nothing in any other space.
+# change will ever have. The shipped 0.35/0.40 min_relevance_score values were
+# calibrated for text-embedding-3-small@512 and mean nothing in any other space.
+# Since measured on this embedder (tools.calibrate, 2026-11-16): the real tenants
+# (masterclass, milesone, _template) now carry an interim 0.75; _default,
+# project_a and project_b still carry the old numbers.
 #
 # The id is FULLY QUALIFIED on purpose. `llm_lmstudio.resolves_to()` would match
 # the short form loosely, but T26 is exactly a case of loose matching binding a
@@ -49,6 +55,11 @@ from dataclasses import asdict, dataclass, field
 EMBEDDING_MODEL = "text-embedding-embeddinggemma-300m-qat"
 EMBEDDING_DIMS = 768         # MEASURED against the live server, not assumed
 EMBEDDING_GB = 0.25          # 300M at QAT 4-bit, 229 MB on disk; bge-m3 assumed 1.2
+# The cosine below which a relevance bar can never fail for THIS embedder:
+# `tools.calibrate relevance` (2026-11-16, Masterclass, 305 per-file queries) put
+# even OTHER-file passages at p10 0.727, so a bar under ~0.70 passes ~all of them.
+# Tied to EMBEDDING_MODEL: a new embedder means re-measuring this too.
+MEASURED_COSINE_FLOOR = 0.70
 RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"    # in-process cross-encoder, never an LM Studio call
 
 
@@ -87,9 +98,11 @@ class ModelSet:
     def hot_gb(self) -> float:
         """Weights that must be co-resident for a run to avoid a model swap.
 
-        diagnosis + judge only. `utility` is small and called at most once per
-        run, the embedder is ~100 MB, and the reranker is a separate in-process
-        cross-encoder that never competes for LM Studio's budget.
+        diagnosis + judge + the embedder (EMBEDDING_GB, ~0.25 GB): the embedder is
+        called for the review's queries in the same run, so it shares LM Studio's
+        budget. `utility` is left out (small, called at most once per run), and so
+        is the reranker, a separate in-process cross-encoder that never competes
+        for LM Studio's budget.
         """
         return (self.weights_gb.get("diagnosis", 0.0)
                 + self.weights_gb.get("judge", 0.0)
@@ -98,6 +111,7 @@ class ModelSet:
     def families_are_independent(self) -> bool:
         """Cheap structural check that the judge is not from the diagnosis family."""
         def fam(model_id: str) -> str:
+            """First `-`/`_` token of the id's last path part: `qwen/qwen3-4b` -> qwen3."""
             tail = model_id.split("/")[-1]
             return tail.split("-")[0].split("_")[0].lower()
         return fam(self.diagnosis) != fam(self.judge)
@@ -147,7 +161,7 @@ MAC_RESIDENT = ModelSet(
 # `maxLength` were both measured and both failed.
 #
 # Ministral wins on every axis that matters here, not just parseability:
-#   · 9.1 GB, so diagnosis+judge+embedder = 11.65 GB -> RESIDENT, not jit_swap
+#   · 9.1 GB, so diagnosis+judge+embedder = 11.87 GB -> RESIDENT, not jit_swap
 #   · therefore 32k context instead of the 16k a swapping profile has to accept
 #   · "mistral" is a genuinely different family from the qwen3-4b judge, rather
 #     than a string-comparison coincidence (see the note on qwen3.8-27b below)
@@ -168,7 +182,7 @@ MAC_MAX = ModelSet(
 )
 
 # The 64 GB Mac Studio used as a REMOTE inference host (adapters/platforms/studio.py).
-# Everything stays resident: ~33 GB of hot weights against a 48 GB budget leaves
+# Everything stays resident: ~32 GB of hot weights against a 48 GB budget leaves
 # room for a real 32k KV cache, so there is no diagnosis->judge swap at all.
 #
 # Qwen3-Coder-30B-A3B is the point of the profile. It is the model PORTABLE
@@ -178,8 +192,9 @@ MAC_MAX = ModelSet(
 #
 # 6-bit rather than 8-bit (~32 GB) deliberately: 32k of context is worth more
 # here than the last few points of quantisation quality, because render_evidence
-# puts the whole diff PLUS five retrieved snippets in the user turn. Revisit if
-# real diffs turn out to fit comfortably in 16k.
+# puts the whole diff PLUS up to eight retrieved snippets (generate_diagnosis
+# MAX_HITS) in the user turn. Revisit if real diffs turn out to fit comfortably
+# in 16k.
 STUDIO = ModelSet(
     diagnosis="qwen3-coder-30b-a3b",
     judge="gemma-4-12b",                      # Google family -> independent of Qwen

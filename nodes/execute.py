@@ -16,7 +16,13 @@ from nodes._surface import active_surface
 
 
 def execute(state: dict, sink=None) -> dict:
-    """`sink` is injectable for tests; otherwise resolved from the surface."""
+    """Post the approved action verbatim through the surface's sink.
+
+    Reads `approved`, `proposed_action`, `target`, `github_token` and run
+    metadata; writes only `result`. Raises PermissionError unless `approved is
+    True` (invariant 3), and ValueError with no active surface. `sink` is
+    injectable for tests; otherwise resolved from the surface.
+    """
     # `is not True` is exact on purpose: a truthy string, a 1, or a populated
     # dict is NOT an approval. Only a human's explicit True is.
     if state.get("approved") is not True:

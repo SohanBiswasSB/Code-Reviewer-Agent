@@ -80,7 +80,7 @@ Layered so the core never imports a provider:
 
 | Path | Role |
 |---|---|
-| `ports/interfaces.py` | The contracts (Protocols). Core imports **only** these. |
+| `ports/interfaces.py` | The contracts (Protocols). Core codes against these shapes and reaches providers only via `config.get_*()`; nothing imports a concrete adapter. |
 | `nodes/`, `app/graph.py` | The graph. Holds the safety design. |
 | `adapters/` | Concrete providers, self-registering via `@adapter(kind, name)`. |
 | `surfaces/` | Capabilities, self-registering via `@surface(name)`. |
@@ -90,7 +90,7 @@ Layered so the core never imports a provider:
 | `eval/` | Safety-gate regression suite, 100% bar, `pass^k`. Model-free. |
 | `tests/` | Unit tests. Deliberately separate from the gate suite. |
 | `adapters/platforms/` | The **only** code that knows about hardware. |
-| `app/doctor.py` | Environment check. Stdlib only, so it runs before setup does. |
+| `app/doctor.py` | Environment check. Stdlib at module level; the checks that import `config` need `requirements.txt` installed. |
 
 ## Invariants — do not weaken these
 
@@ -108,8 +108,10 @@ already failed once; the node docstrings carry the incident.
 3. **`execute` refuses without approval, checked in the node body** (`approved is not
    True`), not just in graph routing. Defence in depth: routing decides *whether* the
    node is reached; the guard re-establishes the precondition regardless of how.
-4. **The approved action is built once (in `await_approval`) and posted verbatim.**
-   Never recompute it after approval. Run metadata goes in `context`, never folded
+4. **The approved action is built once and posted verbatim.** On the AI path
+   `independent_review` builds it (on approve only); on the deterministic path
+   `await_approval` does. `await_approval` shows the human exactly that action and
+   passes it through unchanged. Never recompute it after approval. Run metadata goes in `context`, never folded
    into `action`.
 5. **`approved` is written only by `await_approval`, only from the resume value.**
    Not inferred, not defaulted, not derived from the judge's opinion.
@@ -192,7 +194,8 @@ rather than a tuning problem.
 
 **Thresholds are measured, not guessed.** `MIN_RELEVANCE_SCORE` and
 `MIN_ENTAILMENT_SCORE` are calibrated numbers; the shipped 0.35/0.40 were calibrated
-for a *different* embedder and are owed a re-measurement -- `python -m tools.calibrate`
+for a *different* embedder. The real tenants now use a measured interim 0.75;
+entailment is still owed its measurement -- `python -m tools.calibrate`
 measures both (relevance needs the embedder; entailment reads real findings from the
 audit store, so it gets better with every review run). Citation scores come from
 the retriever's own `hits`, never from the model (a model-supplied score would be
@@ -312,7 +315,8 @@ job is recorded in `var/activity/YYYY-MM-DD.jsonl` and shown on the monitor's
 **Activity log** panel. Never log prompt or evidence text -- counts and ids only.
 
 **Pre-push checks run on every code review** (`nodes/prepush_checks.py` ->
-`tools/change_checks.py`), modelled on the Masterclass `/prepush-ritual`: generic
+`tools/change_checks.py`, a facade over `tools/prepush/`: `change` reads the diff
+and blobs in four batched git calls, plus `n_plus_one`, `hygiene` and `conventions`), modelled on the Masterclass `/prepush-ritual`: generic
 checks always, convention checks where `code_review.prepush` in a tenant's policy
 declares them. Results are `pass` / `flag` / `skip` (skip always says why). They
 reach the prompt (fenced), the review (a code-generated checklist appended AFTER the
@@ -338,10 +342,10 @@ offline stub paths that model a *grounded* diagnosis so the pipeline runs end to
 without a model server.
 
 Scope cuts are owned explicitly, not hidden: `docs/ARCHITECTURE_GAPS.md` (G1–G17,
-prioritized P0–P2), `TODO.md` (T1–T24, each with a "done when"), and the node
+prioritized P0–P2), `TODO.md` (T1–T28, each with a "done when"), and the node
 docstrings. When closing one, update the tracker in the same change.
 
-## Current state — last updated 2026-11-16
+## Current state — last updated 2026-11-17
 
 Distilled from the session transcripts (`../chat-archive/`); `docs/DECISIONS.md` §8/§9 is
 the fuller narrative and the designated handoff. **Verify before relying on any of it** —
@@ -378,11 +382,13 @@ Both suites are green, so CI should pass.
 - `.env.example` was ignored by `.gitignore`'s `.env.*` while `TODO.md` called it done.
   Decided 2026-11-16: the ignore was wrong -- it holds names and defaults, no values --
   so `.gitignore` now has `!.env.example`, and the file was brought up to date.
-- `min_relevance_score` (0.35 / 0.40 in `tenants/*/policy.json`) is **uncalibrated**, and
-  the first live run showed why it matters: the one real citation scored **0.2 against the
-  0.35 bar**, and entailment landed at **0.24 against 0.25**. The verdict turned on two
-  constants calibrated for an embedder this project no longer uses — the embedder has
-  changed three times since. `doctor` warns. Re-measure once ingest (T10) exists.
+- `min_relevance_score` was shipped **uncalibrated** (0.35 / 0.40), and the first live
+  run showed why it matters: the one real citation scored **0.2 against the 0.35 bar**,
+  and entailment landed at **0.24 against 0.25**. The verdict turned on two constants
+  calibrated for an embedder this project no longer uses. **Since 2026-11-17 the real
+  tenants (`masterclass`, `milesone`, `_template`) use 0.75**, an interim value taken
+  from the measurement below; `_default`, `project_a` and `project_b` still carry the
+  old numbers. `min_entailment_score` (0.25) is still unmeasured.
 - **MEASURED 2026-11-16 (`tools.calibrate`, masterclass, 305 per-file queries from 40
   commits): the 0.40 relevance bar is INERT.** EmbeddingGemma packs cosines into
   ~0.7-0.9: same-file passages p10/median/p90 = 0.780/0.823/0.869, other-file
@@ -455,7 +461,7 @@ force. Fetch the real history and reset onto it instead.
 - `docs/DATA_STORAGE.md` — audit records, reports, trust boundary
 - `docs/DECISIONS.md` — cross-machine handoff: machine specs, model downloads, what
   was decided and why, things discovered the hard way. **Start here on a fresh clone.**
-- `TODO.md` — code-level worklist (T1–T24), each with a "done when"
+- `TODO.md` — code-level worklist (T1–T28), each with a "done when"
 - `MODEL_CARD.md` — scope limits and known failure modes
 - `../chat-archive/` — readable Claude Code session transcripts, kept **outside** this
   repo (2.7 MB of JSONL per session, and a much wider sensitive surface than the

@@ -53,6 +53,12 @@ class LMStudioEmbedder:
     """Batch text -> vectors via the OpenAI-compatible embeddings endpoint."""
 
     def __init__(self, model: str | None = None, dims: int | None = None):
+        """Defaults to the pinned `EMBEDDING_MODEL` / `EMBEDDING_DIMS` (platforms/base.py).
+
+        `config.get_embedder()` passes neither, and should not: the pin is what keeps
+        an index and its `min_relevance_score` meaningful. The client is created on
+        first use, against `LMSTUDIO_BASE_URL`.
+        """
         self.model = model or base.EMBEDDING_MODEL
         self.dims = dims or base.EMBEDDING_DIMS
         self.base_url = os.getenv("LMSTUDIO_BASE_URL", "http://localhost:1234/v1")
@@ -67,7 +73,13 @@ class LMStudioEmbedder:
     def embed(self, texts: list[str], *, kind: str = "passage") -> list[list[float]]:
         """Embed a batch. Raises on a dimensionality mismatch rather than returning junk.
 
-        The check is cheap and guards the thing that fails silently: a vector of
+        The `Embedder` port: one vector per input text, in order, `[]` for no texts.
+        `kind` picks the EmbeddingGemma task prefix ("query" or "passage"; anything
+        else is embedded unprefixed). The call goes through `with_retry`, so only
+        transient failures (connection, timeout, 5xx, 429, LM Studio's backend-crash
+        400) are retried; every other error propagates on the first attempt.
+
+        The dimensionality check is cheap and guards the thing that fails silently: a vector of
         the wrong width still produces a cosine, just a meaningless one, and the
         gate would threshold it without complaint.
         """

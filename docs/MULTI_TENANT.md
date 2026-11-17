@@ -11,10 +11,10 @@ tenants/
     policy.json                     # thresholds, allowlists, allowed actions, enabled surfaces
     prompts/<surface>/<node>.md     # diagnosis.md, judge.md, ...
   milesone/                         # tenant A — its own rules
-    policy.json                     # e.g. min_relevance_score 0.40, risky_areas incl. zoom/webhook
+    policy.json                     # e.g. min_relevance_score 0.75, risky_areas incl. zoom/webhook
     prompts/code_review/diagnosis.md
-  project_b/                        # tenant B — stricter
-    policy.json                     # min_relevance_score 0.55, severity_allowlist ["low"], comment-only
+  project_b/                        # tenant B — different rules
+    policy.json                     # its own risky_areas (concurrency, auth, payments); placeholder, no repo
     prompts/code_review/diagnosis.md
 ```
 

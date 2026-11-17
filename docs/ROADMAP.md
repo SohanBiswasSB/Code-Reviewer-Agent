@@ -4,8 +4,10 @@ Represent designed-but-not-built things in the SCHEMA and document each cut in t
 node docstring + this file. Honesty about scope reads stronger than vague confidence.
 
 - [ ] Real GitHub/GitLab client (currently stubbed, raises NotImplementedError)
-- [ ] Real vector index (retrieval.py runs on a tiny in-memory corpus)
-- [ ] Cross-encoder rerank + MMR (RRF fusion is real; rerank/MMR are TODOs)
+- [x] Real vector index  *(T10: `tools/ingest.py` builds a namespaced on-disk index;
+      `IndexedRetriever` is the default. Masterclass and MilesOne are indexed)*
+- [~] Cross-encoder rerank + MMR  *(T13: reranker built, OFF by default on measurement --
+      J 0.31 vs the cosine's 0.68; MMR still a TODO)*
 - [ ] `reject_retrieve_more` corrective-RAG loop (not wired)
 - [x] Prompt-injection input guard + adversarial eval class  *(GUARD_TASKS in eval/tasks.py)*
 - [ ] Multi-provider capability eval (OpenAI vs Claude vs local)
@@ -14,9 +16,9 @@ node docstring + this file. Honesty about scope reads stronger than vague confid
 
 ## Architecture gaps (from docs/ARCHITECTURE_GAPS.md — prioritized)
 P0 (must close):
-- [~] G1 tenant-scoped retrieval (namespace per codebase)   *(port + ENFORCEMENT done: an
-      adapter that cannot honour a namespace refuses. Remaining: a real namespaced ingest —
-      until then a tenant with a `codebase` binding cannot retrieve at all, only `_default`)*
+- [x] G1 tenant-scoped retrieval (namespace per codebase)   *(port + ENFORCEMENT: an
+      adapter that cannot honour a namespace refuses; T10's namespaced ingest is real, and
+      masterclass + milesone retrieve from their own index)*
 - [x] G2 graph dispatches through the active Surface          *(T5: source/query/classify/prompts/sink)*
 - [ ] G3 per-tenant credentials (secret ref) + API authN/Z    *(CredentialProvider port done)*
 - [x] G4 log-review detect→aggregate→sample pipeline  *(adapters/detectors.py + source_s3logs)*
@@ -26,9 +28,10 @@ P1 (before real use):
 - [x] G6 AuditSink: one immutable record per run              *(jsonl adapter; docs/DATA_STORAGE.md)*
 - [ ] G7 idempotency key -> no double-post on re-runs
 - [ ] G8 pin resolved prompt/policy (+version) into checkpointed state at run start
-- [ ] G9 failure edges: retry/backoff + fallback to human_review + dead-letter
+- [~] G9 failure edges: retry/backoff + fallback to human_review + dead-letter  *(retry with
+      backoff done; a crashed run writes a `failed` audit record. Failure EDGES still open)*
 - [ ] G10 corrective-RAG loop cap (max_retrieve_iters)
-- [ ] G11 validate policy schema; enforce enabled_surfaces    *(enforcement done; add schema check)*
+- [x] G11 validate policy schema; enforce enabled_surfaces    *(`schemas/policy.py`, 2026-11-17)*
 P2 (hardening):
 - [ ] G12 cost/token budgets + per-tenant rate limits
 - [ ] G13 Notifier + approver authorization                   *(port done)*
@@ -38,7 +41,7 @@ P2 (hardening):
 - [ ] G17 capability eval (diagnosis quality) alongside the safety-gate suite
 
 ## Accuracy track (best-practices, cost-no-object — from docs/BEST_PRACTICES.md)
-Retrieval: [ ] cross-encoder reranker (+ensemble) [ ] MMR [ ] contextual retrieval
+Retrieval: [~] cross-encoder reranker (+ensemble; built, off) [ ] MMR [ ] contextual retrieval
 [ ] multi-query+HyDE fusion [ ] AST/tree-sitter code chunking [ ] parent-doc expansion
 [ ] SPLADE sparse [ ] ensemble embeddings [ ] retrieval eval (hit@k/MRR/NDCG).
 Code review tools (ground truth): [ ] ruff/pylint [ ] mypy/pyright [ ] semgrep/bandit

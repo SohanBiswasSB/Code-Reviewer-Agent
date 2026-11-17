@@ -17,14 +17,18 @@ the reviewer, but there is nothing to approve. An approve-eligible run suspends 
 `await_approval`, and only what you type resumes it: `y` approves, anything else
 denies, and a denial is recorded by the gate itself. With no terminal attached
 the command refuses to decide rather than defaulting either way -- an approval
-nobody gave is precisely what `approved` exists to rule out.
+nobody gave is precisely what `approved` exists to rule out. That run is recorded
+as `abandoned` (G9), so its findings, citations and booleans still reach the
+audit store that `tools.calibrate` learns from.
 
 ## Why an in-memory checkpointer is right HERE
 
 `app/deps.py` warns that MemorySaver loses paused approvals on restart. In this
 command the paused run only has to live as long as the person at the prompt, and
 the resume happens in the same process. If the process dies, the run dies with
-it and nothing was written -- the safe direction.
+it and nothing is posted or written to `var/reviews/` -- the safe direction. (A
+crash or Ctrl-C inside a node still leaves a `failed` / `interrupted` audit
+record, written by `app/graph.py::_traced`.)
 """
 from __future__ import annotations
 

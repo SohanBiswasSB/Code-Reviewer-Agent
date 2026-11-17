@@ -55,6 +55,12 @@ CLAIM = "The OAuth callback returns a 500 when the state parameter is missing."
 
 
 def run(tenant: str, cited_score: float):
+    """Gate one identical diagnosis under `tenant`'s real code_review policy.
+
+    Only the policy varies between tenants; the claim, its citation and the
+    passage are fixed, and `cited_score` is both the citation's and the hit's
+    score. Returns (codebase name, vcs, repo, ReviewResult).
+    """
     diag = Diagnosis(
         summary="likely regression in the OAuth callback",
         severity="medium",

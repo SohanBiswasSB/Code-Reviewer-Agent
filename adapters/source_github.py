@@ -1,3 +1,9 @@
+"""The `github` EvidenceSource: an issue or PR, plus its CI check runs.
+
+A real adapter over a stubbed client: the four network calls in
+tools/github_client.py raise `NotImplementedError` until they are wired, so local
+review goes through `git_local` (adapters/source_git_local.py) instead.
+"""
 from registry import adapter
 from tools import github_client
 
@@ -13,6 +19,11 @@ class GitHubSource:
     """
 
     def gather(self, target: str, **opts) -> dict:
+        """The `EvidenceSource` port: the issue/PR at `target`, with `check_runs` filled.
+
+        `opts["token"]` is the caller's credential, passed through to both reads.
+        Raises whatever github_client raises -- today `NotImplementedError`.
+        """
         token = opts.get("token")
         raw = github_client.fetch_issue(target, token)
         # Populate check runs for REAL rather than hardcoding [] -- classify's

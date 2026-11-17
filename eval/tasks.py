@@ -225,8 +225,10 @@ RETRIEVAL_GATE_TASKS = [
 # (name, raw_model_response, expected_decision)
 #
 # The graph has no failure edges (G9), so an exception inside a node kills the
-# run -- and a killed run writes no audit record, breaking G6 at the moment a
-# record matters most. `_parse_diagnosis` used to do a bare `json.loads`.
+# run. A killed run used to write no audit record at all, breaking G6 at the
+# moment a record matters most; since G9's fix it leaves a `failed` record, but
+# bad model output should still end as an escalation a human can act on, not a
+# crash. `_parse_diagnosis` used to do a bare `json.loads`.
 #
 # These run under a policy that allowlists EVERY severity, deliberately. The
 # unparseable diagnosis closes three routes to approval independently (no

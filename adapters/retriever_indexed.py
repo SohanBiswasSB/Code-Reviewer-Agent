@@ -54,7 +54,8 @@ from tools.fusion import reciprocal_rank_fusion
 
 # How many candidates each backend contributes before fusion. Wider than k so a
 # chunk ranked 6th by dense and 2nd by BM25 can still win -- that is the point of
-# fusing. Also the candidate pool a reranker (T13) will narrow.
+# fusing. With a reranker on (T13, built, OFF by default) each backend is widened
+# to at least RERANK_CANDIDATES so the reranker has a full pool to narrow to k.
 WIDE_MIN = 20
 WIDE_FACTOR = 4
 # How many fused candidates the reranker rescores. Wide enough that a passage
@@ -65,9 +66,14 @@ _UNSET = object()
 
 @adapter("retriever", "indexed")
 class IndexedRetriever:
-    """The default Retriever: dense + BM25 over one namespace, cosine as the gate score."""
+    """The default Retriever: dense + BM25 over one namespace, cosine as the gate score.
+
+    With a reranker configured, the gate score is the rerank score instead, and
+    each hit says which via `score_kind` (module docstring).
+    """
 
     def __init__(self, embedder=None, index=None, reranker=_UNSET):
+        """All three are injectable; anything not given resolves from `config` on first use."""
         # Lazy, and injectable for tests -- the same shape as the nodes' provider
         # arguments. Resolving at construction would make `config.get_retriever()`
         # fail on a machine without the openai client even for callers that never
@@ -109,6 +115,11 @@ class IndexedRetriever:
         return self._reranker
 
     def _check_space(self, namespace: str, stats: dict) -> None:
+        """Refuse when the namespace's manifest names another embedder or width.
+
+        A ValueError naming both models and the rebuild command, because the
+        alternative is a cosine across two vector spaces that looks normal.
+        """
         built_by, dims = stats.get("model"), stats.get("dims")
         emb = self.embedder
         if built_by != emb.model or (dims and dims != emb.dims):
@@ -142,10 +153,16 @@ class IndexedRetriever:
         return bm25, metas
 
     def retrieve(self, query: str, k: int = 5, namespace: str | None = None) -> list[dict]:
-        """Top-k chunks of ONE codebase, each carrying its cosine as `score`.
+        """Top-k chunks of ONE codebase, each carrying its gate score as `score`.
 
-        Order comes from RRF over the dense and BM25 rankings; the number the gate
-        thresholds is always the cosine. See the module docstring for the refusals.
+        Reranker OFF (the default): order comes from RRF over the dense and BM25
+        rankings, and `score` is the cosine (`score_kind="cosine"`). Reranker ON:
+        the top RERANK_CANDIDATES fused hits are rescored and the best k returned
+        in rerank order, with `score` the rerank score (`score_kind="rerank"`) and
+        the cosine kept as `cosine`. Either way the gate reads `score` against the
+        bar for its kind. Each hit also carries `fusion`, `rank`, `path`, `name`
+        and line span. See the module docstring for the refusals; an unbuilt
+        namespace returns [].
         """
         if not namespace:
             raise ValueError(

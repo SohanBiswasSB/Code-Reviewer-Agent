@@ -47,6 +47,7 @@ def prompts_enabled() -> bool:
 
 
 def hash_text(text: str) -> str:
+    """`sha256:` plus 16 hex chars: enough to tell two prompts apart, not to read one."""
     return "sha256:" + hashlib.sha256((text or "").encode("utf-8", "replace")).hexdigest()[:16]
 
 
@@ -55,13 +56,16 @@ class JsonlTracer:
     """var/traces/<YYYY-MM-DD>.jsonl, one row per span."""
 
     def __init__(self, root: str | None = None):
+        """`root` overrides `CRA_DATA_DIR` (tests point it at a temp dir)."""
         self.root = root or str(data_dir())
 
     def path_for(self, when: datetime | None = None) -> str:
+        """The day file a span lands in; `when` defaults to now (UTC)."""
         when = when or datetime.now(UTC)
         return os.path.join(self.root, "traces", f"{when:%Y-%m-%d}.jsonl")
 
     def _write(self, row: dict) -> None:
+        """Append one row under `_LOCK`; unserialisable values fall back to `repr`."""
         path = self.path_for()
         line = json.dumps(row, default=repr, ensure_ascii=False) + "\n"
         with _LOCK:
@@ -75,7 +79,13 @@ class JsonlTracer:
 
         A tracing failure must not break the thing being traced — observability
         that can take down the system it observes is worse than none. The span is
-        best-effort; the wrapped exception always propagates unchanged.
+        best-effort; the wrapped exception always propagates unchanged. "Failure"
+        means the `WRITE_ERRORS` family (a full disk, an unserialisable value),
+        which costs the span silently; any other error from the write is a bug and
+        propagates, per the errors rule (errors.py).
+
+        Status is `ok`, `error` (with the exception named), or `suspended` for
+        LangGraph's interrupt exceptions -- the approval gate, not a failure.
         """
         started = time.perf_counter()
         status, error = "ok", None
@@ -116,4 +126,5 @@ class NullTracer:
 
     @contextlib.contextmanager
     def span(self, name: str, **attrs):
+        """Run the block; record nothing."""
         yield self

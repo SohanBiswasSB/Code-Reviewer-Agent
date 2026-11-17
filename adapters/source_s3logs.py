@@ -59,9 +59,15 @@ class S3LogSource:
     """
 
     def __init__(self, detector=None):
+        """`detector` is injectable for tests; otherwise resolved on first use."""
         self._detector = detector
 
     def detector(self):
+        """The injected Detector, else `config.get_detector()`.
+
+        `config` is imported inside the method because it is circular at module
+        level: config imports `adapters`, which imports this module.
+        """
         if self._detector is None:
             import config
             self._detector = config.get_detector()
@@ -80,6 +86,17 @@ class S3LogSource:
         )
 
     def gather(self, target: str, **opts) -> dict:
+        """The `EvidenceSource` port: one day of logs reduced to a LogWindow-shaped dict.
+
+        `opts["reader"]` is a zero-argument callable yielding (service, ref, line);
+        without it the stubbed S3 read raises `NotImplementedError`.
+        `opts["detector"]` overrides the detector for this call. Returns `date`,
+        `ref`, a sha256 `digest` of every line read, `line_count`, `services`,
+        per-signal `counts`, at most MAX_CANDIDATES `candidates` (most frequent
+        first, each with at most MAX_SAMPLES_PER_SIGNAL samples), and `truncated`,
+        which is True when any cap dropped something. Memory is bounded by
+        MAX_BUFFERED_LINES, never by the size of the day.
+        """
         reader = opts.get("reader") or (lambda: self._read(target, **opts))
         detector = opts.get("detector") or self.detector()
 
@@ -99,6 +116,12 @@ class S3LogSource:
         buffered = 0
 
         def flush(key: tuple[str, str]) -> None:
+            """Run the detector over one stream's buffer and fold its hits in.
+
+            Updates the running counts and capped samples, empties the buffer, and
+            advances that stream's start offset so the next window's line numbers
+            continue where this one stopped.
+            """
             nonlocal truncated, buffered
             lines = buffers.get(key)
             if not lines:

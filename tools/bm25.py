@@ -93,6 +93,12 @@ class BM25:
         return cls([tokenize(bm25_text(m)) for m in metas])
 
     def _init(self, terms, offsets, docs, tfs, lengths, k1, b) -> None:
+        """Set every attribute from the postings arrays, and derive IDF.
+
+        The one place an instance is filled in, shared by `__init__` (built from
+        a corpus) and `load` (read from `bm25.npz`), so a loaded index cannot
+        differ from a freshly built one in anything but how it got its arrays.
+        """
         self.k1, self.b = float(k1), float(b)
         self.terms = list(terms)
         self.vocab = {t: i for i, t in enumerate(self.terms)}
@@ -110,7 +116,8 @@ class BM25:
         return self._scores(query).tolist()
 
     def _scores(self, query: str) -> np.ndarray:
-        out = np.zeros(self.n, dtype=np.float32)
+        """`scores` as a float32 array, touching only each query term's postings."""
+        out =np.zeros(self.n, dtype=np.float32)
         if not self.n:
             return out
         norm = self.k1 * (1 - self.b + self.b * self.lengths / (self.avg_len or 1))

@@ -10,8 +10,10 @@ Two things this node stopped doing (T5):
     code. Grounding is the entire safety story, so that failure would be silent
     and total.
 
-The query now comes from the Surface (`build_query`), so each surface decides
-what a good query looks like for its own evidence shape.
+The queries now come from the Surface, so each surface decides what a good query
+looks like for its own evidence shape. A surface with `build_queries` (code
+review) gets one query per changed file plus the whole-change query, merged by
+`merge_hits` (2026-11-16); otherwise one `build_query` for the whole change.
 """
 from __future__ import annotations
 
@@ -29,6 +31,7 @@ from schemas.diagnosis import (
 
 
 def _fallback_query(ev) -> str:
+    """Title and body, for the built-in issue path or a surface with no query of its own."""
     title = getattr(ev, "title", "") or ""
     body = getattr(ev, "body", "") or ""
     return f"{title}\n{body}".strip()
@@ -47,7 +50,8 @@ def merge_hits(results: list[list[dict]], limit: int = MAX_HITS) -> list[dict]:
     Round-robin so every query (every changed file) gets its best passage in
     before any gets a second. A chunk found by several queries keeps its HIGHEST
     retriever score -- its relevance to the part of the change it fits best,
-    still the retriever's own cosine, never a model's (T17).
+    still the retriever's own number (the cosine, or the rerank score when T13's
+    reranker is on), never a model's (T17).
     """
     best: dict[str, dict] = {}
     order: list[str] = []
@@ -81,6 +85,21 @@ def _retrieve(state: dict, ev, surface, retriever) -> list[dict]:
 
 
 def generate_diagnosis(state: dict, llm=None, retriever=None) -> dict:
+    """Retrieve, then ask the diagnosis model to explain the change, citing passages.
+
+    Reads `evidence`, `_checks`, the pinned `_prompts["diagnosis"]` and `_policy`
+    (for the retrieval namespace), and the evidence half of `_guard`. Writes
+    `diagnosis`, `_retrieved` (the hits WITH the retriever's own scores, which the
+    gate reads) and the combined `_guard` report. Raises ValueError if
+    resolve_tenant did not pin a diagnosis prompt.
+
+    Protects grounding: retrieval is always namespaced to the tenant's codebase
+    (invariant 7, G1), evidence is fenced and guarded before the model sees it
+    (invariant 6), and citation scores come from the hits, never from the model
+    (T17). The model's output is parsed here and never decides anything; a
+    response that cannot be parsed becomes a diagnosis that cannot be approved
+    (`_unparseable`). `llm` and `retriever` are injectable for tests.
+    """
     ev = state["evidence"]
     surface = active_surface(state)
     if retriever is None:
@@ -140,7 +159,7 @@ def _parse_diagnosis(raw: str, hits: list[dict]) -> Diagnosis:
     responses would be one step away from making decisions, and the whole design
     rests on the model never doing that.
 
-    Two deliberate choices:
+    Three deliberate choices:
 
     · **Citation scores are looked up from `hits`, never taken from the model.**
       A model-supplied relevance score would be trivially gameable if anything

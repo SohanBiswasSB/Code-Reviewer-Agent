@@ -5,17 +5,22 @@
 
 Reads only what the agent already writes under CRA_DATA_DIR -- `live/` (stage
 starts and ends, ingest progress), `traces/` (every stage of every run, errors
-included) and `audit/` (the verdict, the four checks, the findings) -- plus LM
-Studio's model list. It starts nothing, changes nothing, and can be opened and
-closed at any time.
+included), `audit/` (the verdict, the four checks, the findings) and `activity/`
+(the activity log, through `app.activity.query`) -- plus LM Studio's model list.
+It starts nothing, changes nothing, and can be opened and closed at any time.
 
 ## A run is traces JOINED with audit, not audit alone
 
 The first version listed audit records only, and a run that crashed mid-graph
-writes none (G9: there are no error edges, so `audit` is never reached). The one
-run that most needed looking at -- LM Studio dying inside `independent_review` --
-was therefore the one run the page could not show. History is now built from the
+wrote none (there are no error edges, so `audit` is never reached). The one run
+that most needed looking at -- LM Studio dying inside `independent_review` -- was
+therefore the one run the page could not show. History is now built from the
 trace spans, keyed by `run_id`, with the audit record attached where one exists.
+
+Since G9 a crash does leave a `failed` / `interrupted` record (written by
+`app/graph.py::_traced`), but the join stays: the spans are where each stage's
+status, duration and retries come from, and a run paused at the approval gate
+still has no audit record at all.
 
 ## Which models: what the RUN used, not what this shell would pick
 
@@ -32,10 +37,14 @@ citation ids, escalation reasons and the diagnosis text -- evidence-DERIVED data
 the same trust level as `var/` itself (docs/DATA_STORAGE.md). There is no
 authentication, so it must not be reachable from another machine.
 
-## No third-party dependency of its own
+## No server framework of its own
 
-`http.server` and `urllib` for the serving; `config` only to name the models a
-run would use when no audit record says so.
+`http.server` and `urllib` for the serving and for LM Studio's model list. The
+project imports are the things that must not be copied: `config` to name the
+models a run would use when no audit record says so, the adapter's strict model
+matcher (T26), `app.activity`'s reader, and `STAGE_PLAN` from `app.graph`. Through
+`config` and `app.graph` it loads every adapter and langgraph, so it needs
+`requirements.txt` like everything else -- just nothing beyond it.
 """
 from __future__ import annotations
 
@@ -93,8 +102,9 @@ ROLES = {
     "utility": "Small helper for cheap side tasks. Not called by a code review today.",
     "embedding": "Turns code chunks (at ingest) and each diff (at review) into vectors, "
                  "so related code can be found.",
-    "reranker": "Re-orders retrieved passages by true relevance. Planned (T13) -- "
-                "not called yet.",
+    "reranker": "Re-scores the top fused passages with a cross-encoder (T13). Off by "
+                "default: on measurement it separated relevant passages worse than "
+                "the cosine.",
     "entailer": "Scores whether the review's claims follow from the passages it cites. "
                 "Drives the entailment check.",
 }
@@ -201,6 +211,11 @@ def server_models() -> dict:
 
 
 def _fetch_server_models(root: str) -> dict:
+    """One uncached call to LM Studio's `/api/v0/models`, reduced to what the page shows.
+
+    Never raises: an unreachable or garbled server is a `reachable: False` value
+    the page renders, with a 1.5 s timeout so it cannot hold up a poll for long.
+    """
     try:
         with urllib.request.urlopen(f"{root}/api/v0/models", timeout=1.5) as resp:
             data = json.loads(resp.read().decode("utf-8")).get("data", [])
@@ -223,11 +238,32 @@ def _runtime(recent: list[dict]) -> dict:
         return {"platform": type(config.get_platform()).__name__,
                 "profile": config.get_profile(),
                 "entailer": os.getenv("ENTAILER", "lexical"),
+                "reranker": os.getenv("RERANKER", "none"),
                 "models": config.get_models(), "model_server": base_url(),
                 "source": "shell"}
     except CONFIG_ERRORS as e:
         # An unresolvable profile is SHOWN as an error on the page, not a crash.
         return {"source": "shell", "error": f"{type(e).__name__}: {e}"[:200], "models": {}}
+
+
+def _reranker_row(runtime: dict, assigned: dict) -> dict:
+    """The reranker's row, from what the run (or this shell) actually selected.
+
+    It used to be hard-coded "unused -- dense + BM25 only", which became false the
+    day T13 shipped: a run with RERANKER=cross_encoder was shown as not reranking.
+    A record written before `reranker` was recorded reads as off, which is what
+    every such run was.
+    """
+    selected = runtime.get("reranker") or "none"
+    row = {"role": "reranker", "does": ROLES["reranker"],
+           "model": assigned.get("reranker") or "—", "where": "in-process (this machine)"}
+    if selected == "none":
+        return {**row, "state": "off",
+                "note": "RERANKER=none (default): order is dense + BM25 fusion, and the "
+                        "gate reads the cosine. RERANKER=cross_encoder opts in."}
+    return {**row, "state": "ready",
+            "note": f"RERANKER={selected}: rescoring the top fused candidates; the gate "
+                    f"reads min_rerank_score for these hits"}
 
 
 def model_table(server: dict, runtime: dict) -> list[dict]:
@@ -238,6 +274,7 @@ def model_table(server: dict, runtime: dict) -> list[dict]:
     # The ADAPTER'S matcher, not a copy: it is strict on purpose (T26), and a
     # looser monitor-side copy reported "ready" for ids the adapter refuses.
     def served(model_id: str):
+        """The server's entry for this model id, by the adapter's rules; None if absent."""
         return by_id.get(resolves_to(model_id, list(by_id))) if model_id else None
 
     rows = []
@@ -262,9 +299,7 @@ def model_table(server: dict, runtime: dict) -> list[dict]:
         rows.append({"role": role, "does": ROLES[role], "model": want or "—",
                      "where": f"LM Studio · {server.get('url')}", "state": state,
                      "note": note})
-    rows.append({"role": "reranker", "does": ROLES["reranker"],
-                 "model": assigned.get("reranker") or "—", "where": "in-process (this machine)",
-                 "state": "unused", "note": "T13 -- retrieval uses dense + BM25 fusion only"})
+    rows.append(_reranker_row(runtime, assigned))
     ent = runtime.get("entailer") or "lexical"
     rows.append({"role": "entailer", "does": ROLES["entailer"],
                  "model": assigned.get("entailer") or (
@@ -338,12 +373,14 @@ class _RetryIndex:
     """
 
     def __init__(self, trace_rows: list[dict]):
+        """Keep only `llm.retry` rows with a parseable timestamp, sorted by it."""
         pairs = sorted((t.timestamp(), r) for r in trace_rows
                        if r.get("span") == "llm.retry" and (t := _parse_ts(r.get("ts"))))
         self.keys = [k for k, _ in pairs]
         self.rows = [r for _, r in pairs]
 
     def between(self, start: float, end: float) -> list[dict]:
+        """Retries in [start, end] (epoch seconds, inclusive), trimmed to RETRY_FIELDS."""
         lo, hi = bisect.bisect_left(self.keys, start), bisect.bisect_right(self.keys, end)
         return [{k: r.get(k) for k in RETRY_FIELDS} for r in self.rows[lo:hi]]
 
@@ -367,6 +404,8 @@ def retry_command(run: dict, runtime: dict) -> str:
     env = [f"CRA_PROFILE={rt['profile']}"] if rt.get("profile") else []
     if rt.get("entailer") and rt["entailer"] != "lexical":
         env.append(f"ENTAILER={rt['entailer']}")
+    if rt.get("reranker") and rt["reranker"] != "none":
+        env.append(f"RERANKER={rt['reranker']}")
     target = run.get("target") or "staged"
     args = f"--tenant {run.get('tenant') or '<tenant>'}"
     if target != "staged":
@@ -392,6 +431,7 @@ def runs(trace_rows: list[dict] | None = None, live: list[dict] | None = None,
         grouped.setdefault(rid, [])
 
     def last_seen(rid: str) -> str:
+        """Sort key: when the run was recorded, else its newest span's end."""
         spans = grouped[rid]
         return (audits.get(rid) or {}).get("recorded_at") or (spans[-1].get("ts") if spans else "")
 
@@ -538,6 +578,7 @@ def activity_view(query: str) -> dict:
     params = urllib.parse.parse_qs(query)
 
     def one(key: str) -> str | None:
+        """The first value of a query parameter, capped at 200 chars; None if empty."""
         vals = params.get(key)
         return vals[0][:200] if vals and vals[0] else None
 
@@ -556,7 +597,7 @@ class Handler(BaseHTTPRequestHandler):
     """`/` is the page; `/api/status` and `/api/activity` its data. No writes."""
 
     def do_GET(self):  # noqa: N802 -- the http.server naming contract
-        """Serve the page or the status JSON; 404 everything else."""
+        """Serve the page, the status JSON or the activity JSON; 404 everything else."""
         if self.path in ("/", "/index.html"):
             body, kind = page().encode("utf-8"), "text/html; charset=utf-8"
         elif self.path == "/api/status":

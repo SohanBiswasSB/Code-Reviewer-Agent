@@ -1,21 +1,24 @@
-"""Measure the two gate thresholds instead of guessing them.
+"""Measure the gate's score thresholds instead of guessing them.
 
     python -m tools.calibrate --tenant masterclass --root ~/Dev/<repo> relevance
     python -m tools.calibrate --tenant masterclass entailment
     python -m tools.calibrate --tenant masterclass relevance --json
     python -m tools.calibrate --tenant masterclass --root ~/Dev/<repo> rerank --commits 15
 
-`min_relevance_score` and `min_entailment_score` decide approve-vs-escalate, and
-both shipped values were calibrated for an embedder this project no longer uses
-(CLAUDE.md, "Thresholds are measured, not guessed"). This tool produces the
-measurement. It never edits a policy: it prints the numbers and a suggestion, and
-a human writes the value into `tenants/<name>/policy.json`.
+`min_relevance_score` and `min_entailment_score` (and `min_rerank_score` when
+the T13 reranker is on) decide approve-vs-escalate, and the originally shipped
+values were calibrated for an embedder this project no longer uses (CLAUDE.md,
+"Thresholds are measured, not guessed"). This tool produces the measurement --
+the interim 0.75 relevance bar in the masterclass policy and the 0.61
+`MIN_RERANK_SCORE` default were both set from its numbers. It never edits a
+policy: it prints the numbers and a suggestion, and a human writes the value into
+`tenants/<name>/policy.json`.
 
 ## What each measurement is -- and what it is a PROXY for
 
 **relevance** (needs the embedder, i.e. LM Studio running). For each of the last
-N commits, every changed file the index knows becomes a query built exactly the
-way a review builds one (path + that file's diff, `surfaces/code_review.py`).
+N commits, every changed CODE file the index knows becomes a query built exactly
+the way a review builds one (path + that file's diff, `surfaces/code_review.py`).
   · positive  = the best cosine to a chunk of the SAME file
   · negative  = the top cosines to chunks of OTHER files
 "Same file" stands in for "relevant". It is noisy both ways -- another file can
@@ -78,6 +81,7 @@ def _git(root, *args: str) -> str:
 def suggest(pos: list[float], neg: list[float]) -> dict:
     """Distribution summary and two candidate cuts for positive vs negative scores."""
     def describe(xs):
+        """n, p10, median and p90 of `xs`; just {"n": 0} when it is empty."""
         if not xs:
             return {"n": 0}
         q = statistics.quantiles(xs, n=10) if len(xs) > 1 else [xs[0]] * 9
@@ -101,7 +105,14 @@ def suggest(pos: list[float], neg: list[float]) -> dict:
 
 
 def relevance(tenant: str, root_override: str | None, commits: int) -> dict:
-    policy = config.get_tenant_store().policy(tenant, "code_review")
+    """Same-file vs other-file cosines for per-file queries over the last `commits`.
+
+    Searches the tenant's whole namespace for each query, so every chunk is
+    scored, not only the top k a review would see. Returns `suggest`'s summary
+    plus the query count, the policy's current `min_relevance_score` and the
+    embedder. See the module docstring for what "same file" is a proxy for.
+    """
+    policy =config.get_tenant_store().policy(tenant, "code_review")
     namespace = (policy.get("codebase") or {}).get("repo")
     root = codebase_root(policy.get("codebase") or {}, root_override)
     index, embedder = config.get_index(), config.get_embedder()
