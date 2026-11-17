@@ -34,6 +34,18 @@ class ConfigError(ReviewerError, ValueError):
     a policy value of the wrong shape. Fix the config; retrying will not help."""
 
 
+class ProviderAuthError(ConfigError):
+    """The model server was reached and refused our key (HTTP 401/403).
+
+    A ConfigError on purpose. A ProviderError is a ConnectionError, which
+    `transient_reason` retries, and a wrong key does not improve on a retry. A
+    PermissionError already has two meanings in this graph: "the tenant has not
+    enabled this surface" (resolve_tenant, which /run turns into an HTTP 403
+    naming the tenant) and "a human did not approve" (execute). A refused key is
+    neither, so it gets its own name. The fix is LMSTUDIO_API_KEY.
+    """
+
+
 class EvidenceError(ReviewerError, ValueError):
     """The change or log window could not be read (bad git target, no checkout)."""
 

@@ -13,7 +13,7 @@
 
   "code_review": {
     "min_relevance_score": 0.75,
-    "_min_relevance_score": "EmbeddingGemma cosine. 0.75 is the interim floor measured on masterclass (2026-11-16); measure your own with python -m tools.calibrate.",
+    "_min_relevance_score": "EmbeddingGemma cosine. 0.75 is the interim floor measured on merger_app (2026-11-16); measure your own with python -m tools.calibrate.",
     "severity_allowlist": ["low", "medium"],
     "allowed_actions": ["comment", "comment+label"],
     "escalate_to_human": true,

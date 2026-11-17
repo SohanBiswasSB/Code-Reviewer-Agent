@@ -20,12 +20,12 @@ Each check is `fn(change, config) -> list[dict]`. Stdlib only.
 """
 from __future__ import annotations
 
-import ast  # noqa: F401 -- re-exported: tests reach the parser through this module
+import ast
 import pathlib
-import subprocess  # noqa: F401 -- re-exported: tests count git calls through it
+import subprocess
 
 from errors import PARSE_ERRORS
-from tools.prepush.change import (  # noqa: F401 -- the public surface
+from tools.prepush.change import (
     FLAG,
     MAX_REPORTED,
     PASS,
@@ -35,7 +35,7 @@ from tools.prepush.change import (  # noqa: F401 -- the public surface
     result,
     split_diff,
 )
-from tools.prepush.conventions import (  # noqa: F401
+from tools.prepush.conventions import (
     _author,
     check_commit_message,
     check_docs,
@@ -44,17 +44,31 @@ from tools.prepush.conventions import (  # noqa: F401
     check_postman,
     check_tracker,
 )
-from tools.prepush.hygiene import (  # noqa: F401
+from tools.prepush.hygiene import (
     check_handler_docstrings,
     check_line_hygiene,
     check_suppressions,
     check_untracked_imports,
 )
-from tools.prepush.n_plus_one import _LoopVisitor, _Module, check_n_plus_one  # noqa: F401
+from tools.prepush.n_plus_one import _LoopVisitor, _Module, check_n_plus_one
+from tools.prepush.standards import STANDARDS_CHECKS
 
+# The public surface. `ast` and `subprocess` are here because the tests reach the
+# parser and count git calls through this module; listing a name in __all__ is
+# what marks it exported rather than unused.
+__all__ = [
+    "CHECKS", "FLAG", "MAX_REPORTED", "PASS", "SKIP", "Change", "_LoopVisitor", "_Module",
+    "_author", "added_lines", "ast", "check_commit_message", "check_docs",
+    "check_handler_docstrings", "check_line_hygiene", "check_n_plus_one",
+    "check_not_checkable", "check_paths", "check_postman", "check_suppressions",
+    "check_tracker", "check_untracked_imports", "result", "run_all", "split_diff",
+    "subprocess",
+]
+
+# The ritual's own checks, then the coding standards (tools/prepush/standards/).
 CHECKS = [check_n_plus_one, check_suppressions, check_line_hygiene, check_handler_docstrings,
           check_untracked_imports, check_paths, check_docs, check_postman, check_tracker,
-          check_commit_message, check_not_checkable]
+          check_commit_message, check_not_checkable, *STANDARDS_CHECKS]
 
 
 def run_all(evidence: dict, root: pathlib.Path, config: dict) -> list[dict]:

@@ -33,12 +33,14 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 
 import openai
 from openai import OpenAI
 
 from adapters.tracer_jsonl import hash_text, prompts_enabled
 from app.activity import WARNING, ActivityLogger, log_event
+from errors import ProviderAuthError
 from registry import adapter
 
 DEFAULT_BASE_URL = "http://localhost:1234/v1"
@@ -49,6 +51,29 @@ PLACEHOLDER_KEY = "lm-studio"
 def base_url() -> str:
     """`LMSTUDIO_BASE_URL` (default localhost:1234/v1), without a trailing slash."""
     return os.getenv("LMSTUDIO_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
+
+
+def api_key() -> str:
+    """`LMSTUDIO_API_KEY`, or the placeholder a bare LM Studio ignores.
+
+    A local or tailnet LM Studio has no authentication, so the placeholder was
+    enough. A hosted OpenAI-compatible gateway in front of the same models answers
+    401 to it. Every caller of the model server reads the key here: the chat
+    client, the embedder, `available_models` and the monitor. It is never logged
+    and never written to an audit or trace record.
+    """
+    return os.getenv("LMSTUDIO_API_KEY") or PLACEHOLDER_KEY
+
+
+def auth_headers() -> dict[str, str]:
+    """The `Authorization` header for a stdlib urllib call, or none without a key.
+
+    The openai client adds the header itself. This covers the urllib paths
+    (`available_models`, the monitor), which would otherwise fail on a gateway
+    with an HTTP 401 that reads like "server down".
+    """
+    key = os.getenv("LMSTUDIO_API_KEY")
+    return {"Authorization": f"Bearer {key}"} if key else {}
 
 
 # ── retry ────────────────────────────────────────────────────────────────────
@@ -103,18 +128,37 @@ def retry_policy() -> tuple[int, tuple[float, ...]]:
     return retries, waits or DEFAULT_BACKOFF_S
 
 
-def _announce_retry(what: str, role, model, next_attempt: int, total: int, why: str,
-                    error: BaseException, wait: float, sleep) -> None:
+@dataclass(frozen=True)
+class RetryAttempt:
+    """Which call is being retried, and where it stands: the facts every retry
+    notice repeats (stderr line, activity record, trace span).
+
+    Grouped so the three notices are built from one value and cannot disagree
+    about, say, the attempt number. `next_attempt` is 1-based and counts the
+    first try, so the first retry is attempt 2 of `total`.
+    """
+
+    what: str
+    role: str | None
+    model: str | None
+    next_attempt: int
+    total: int
+    why: str
+
+
+def announce_retry(attempt: RetryAttempt, error: BaseException, wait: float, sleep) -> None:
     """Say so on stderr and in the trace, then wait. A retry nobody can see is how
     a flaky server stays flaky: the run "just took longer"."""
+    what, role, model = attempt.what, attempt.role, attempt.model
     # Terminal notice for the person watching, AND a record in the activity log
     # -- before this the retry existed only on a stderr nobody kept.
-    print(f"[retry] {what} ({role or '-'}, {model}): {why}. "
-          f"Attempt {next_attempt} of {total} in {wait:g}s.", file=sys.stderr, flush=True)
+    print(f"[retry] {what} ({role or '-'}, {model}): {attempt.why}. "
+          f"Attempt {attempt.next_attempt} of {attempt.total} in {wait:g}s.",
+          file=sys.stderr, flush=True)
     log_event("external_api", f"retry.{what}", severity=WARNING, exception=error,
-              failure_source="external", message=why,
-              metadata={"role": role, "model": model, "attempt": next_attempt,
-                        "of": total, "wait_s": wait})
+              failure_source="external", message=attempt.why,
+              metadata={"role": role, "model": model, "attempt": attempt.next_attempt,
+                        "of": attempt.total, "wait_s": wait})
     try:
         # Function-level: `config` imports `adapters`, so this is circular at
         # module level.
@@ -127,9 +171,9 @@ def _announce_retry(what: str, role, model, next_attempt: int, total: int, why: 
     if tracer is None:
         sleep(wait)
         return
-    with tracer.span("llm.retry", what=what, role=role, model=model, attempt=next_attempt,
-                     of=total, reason=why, wait_s=wait,
-                     error=f"{type(error).__name__}: {error}"[:500]):
+    with tracer.span("llm.retry", what=what, role=role, model=model,
+                     attempt=attempt.next_attempt, of=attempt.total, reason=attempt.why,
+                     wait_s=wait, error=f"{type(error).__name__}: {error}"[:500]):
         sleep(wait)
 
 
@@ -150,8 +194,8 @@ def with_retry(call, *, what: str, role: str | None = None, model: str | None = 
             why = transient_reason(e)
             if why is None or attempt == retries:
                 raise
-            _announce_retry(what, role, model, attempt + 2, retries + 1, why, e,
-                            waits[min(attempt, len(waits) - 1)], sleep)
+            announce_retry(RetryAttempt(what, role, model, attempt + 2, retries + 1, why), e,
+                           waits[min(attempt, len(waits) - 1)], sleep)
     raise AssertionError("unreachable")   # the loop always returns or raises
 
 
@@ -161,11 +205,35 @@ def available_models(url: str | None = None, timeout: float = 2.0) -> list[str]:
     Raises ConnectionError with an actionable message when the server is down —
     "start it with `lms server start`" is more useful than a stack trace out of
     urllib. Stdlib only; see the module docstring.
+
+    Raises ProviderAuthError when the server refuses the key (HTTP 401/403). It
+    is not a ConnectionError, which `transient_reason` would retry, and not a
+    PermissionError, which /run would report as a 403 about the tenant. See
+    errors.ProviderAuthError.
     """
     endpoint = f"{url or base_url()}/models"
+    request = urllib.request.Request(endpoint, headers=auth_headers())
     try:
-        with urllib.request.urlopen(endpoint, timeout=timeout) as resp:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
             payload = _json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        # Caught before URLError, which it subclasses: a 401 means the server
+        # was reached, and saying "start it" would send the reader the wrong way.
+        if e.code in (401, 403) and not os.getenv("LMSTUDIO_API_KEY"):
+            # Nothing was sent, so "refused the key" would point at the wrong
+            # thing; the usual cause is a key file that was never loaded.
+            raise ProviderAuthError(
+                f"the model server at {endpoint} requires an API key (HTTP {e.code}), "
+                f"and LMSTUDIO_API_KEY is not set in this process."
+            ) from None
+        if e.code in (401, 403):
+            raise ProviderAuthError(
+                f"the model server at {endpoint} refused the API key (HTTP {e.code}). "
+                f"Set LMSTUDIO_API_KEY to a valid key."
+            ) from None
+        raise ConnectionError(
+            f"the model server at {endpoint} answered HTTP {e.code} ({e.reason})."
+        ) from None
     except (urllib.error.URLError, OSError) as e:
         # OSError too: a server that ACCEPTS and then answers slowly raises a bare
         # TimeoutError while reading, which urlopen does not wrap in URLError -- a
@@ -273,7 +341,7 @@ def _trace_call(role, model, prompt_sha: str, system: str, user: str):
     surface than a hash.
     """
     # Function-level: `config` imports the adapters, so this is circular at
-    # module level (same as `_announce_retry`).
+    # module level (same as `announce_retry`).
     import config
     attrs = {"role": role, "model": model, "prompt_sha": prompt_sha}
     if prompts_enabled():
@@ -312,7 +380,7 @@ class LMStudioLLM:
         """The OpenAI-compatible client, built on first use with its retries OFF."""
         if self._client is None:
             # max_retries=0: the retry policy is `with_retry`, in one visible place.
-            self._client = OpenAI(base_url=self.base_url, api_key=PLACEHOLDER_KEY,
+            self._client = OpenAI(base_url=self.base_url, api_key=api_key(),
                                   max_retries=0)
         return self._client
 

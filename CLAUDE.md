@@ -39,14 +39,14 @@ python -m jobs.daily_log_review --date YYYY-MM-DD
 python -m jobs.prune_checkpoints --keep-days 30           # dry run by default; --apply to act
 
 # Review a LOCAL change with the full graph (git_local source -> review_file sink):
-python -m tools.ingest --tenant masterclass --root ~/Dev/<repo>            # build the index once
-python -m app.review --tenant masterclass --root ~/Dev/<repo>              # staged changes
-python -m app.review --tenant masterclass --root ~/Dev/<repo> --target main...HEAD
+python -m tools.ingest --tenant merger_app --root ~/Dev/<repo>            # build the index once
+python -m app.review --tenant merger_app --root ~/Dev/<repo>              # staged changes
+python -m app.review --tenant merger_app --root ~/Dev/<repo> --target main...HEAD
 python -m app.monitor                 # live view: http://127.0.0.1:8765 (localhost only)
 
 # Measure the gate thresholds (prints a suggestion; never edits a policy):
-python -m tools.calibrate --tenant masterclass --root ~/Dev/<repo> relevance   # needs LM Studio
-python -m tools.calibrate --tenant masterclass entailment                      # from audit records
+python -m tools.calibrate --tenant merger_app --root ~/Dev/<repo> relevance   # needs LM Studio
+python -m tools.calibrate --tenant merger_app entailment                      # from audit records
 ```
 
 Requirements files are layered: `requirements.txt` (graph + API) ⊂
@@ -148,8 +148,9 @@ Tenants tune *values* (thresholds, allowlists, prompts). They cannot remove a
 
 **Adding a provider:** drop a module in `adapters/`, decorate it
 `@adapter(kind, name)`, and add it to the import list in `adapters/__init__.py`
-(imported purely for the registration side effect — hence the `F401` per-file
-ignore). Nothing in `nodes/` changes. Same shape for `surfaces/`.
+(imported for the registration side effect, and listed in that package's
+`__all__` -- there is no lint ignore for it). Nothing in `nodes/` changes. Same
+shape for `surfaces/`.
 
 **Nodes reach providers only through `config.get_*()` / ports.** A node importing
 `tools.github_client` or `tools.retrieval` directly is the T5/G2 bug class: it makes
@@ -303,9 +304,22 @@ saved beside the vectors (`bm25.npz`, keyed by the index fingerprint).
 `StorageError` -- each also a builtin, so old `except ValueError` keeps working) and
 the families a boundary may catch: `WRITE_ERRORS` (disk / serialisation),
 `CONFIG_ERRORS`, `PARSE_ERRORS`. Anything outside its family is a bug and
-propagates; the activity log records it with its traceback. Re-raising handlers
-(record, then `raise`) are fine. The ONE deliberate broad catch is the label in
-`PRCommentSink` -- after an irreversible comment post -- and it logs at ERROR.
+propagates; the activity log records it with its traceback. There is NO broad
+catch anywhere, re-raising ones included (2026-11-17): to record a failure and let
+it propagate, use try/finally with a done-flag set as the body's last step, and
+read `sys.exception()` in `finally` only when the flag is unset -- unguarded, it
+also returns an exception a CALLER is handling, so a success would be recorded as
+a failure. The label in `PRCommentSink` (after an irreversible comment post)
+catches `LABEL_ERRORS` and logs at ERROR.
+
+**Coding standards are enforced on this repo, not just reviewed in others**
+(user, 2026-11-17): no `# noqa` / `# pylint: disable` / `# type: ignore` / isort
+skips and no config-level ignores -- fix the cause; no broad except; functions
+within pylint's default limits (5 args, 15 locals, 12 branches, 50 statements, 6
+returns -- split into helpers, never raise a limit); the HTTP API is typed, strict
+(undeclared field = 400), enveloped `{success, message, data}` and under /v1.
+`python -m tools.standards_audit` runs the reviewer's own rules
+(tools/prepush/standards/) over the whole tree; check.py blocks on it.
 
 **Activity log** (`app/activity.py`, port of the Masterclass `Logger` design):
 `ActivityLogger(...)` spans and `log_event(...)`; secrets/PII masked on the way in;
@@ -386,10 +400,10 @@ Both suites are green, so CI should pass.
   run showed why it matters: the one real citation scored **0.2 against the 0.35 bar**,
   and entailment landed at **0.24 against 0.25**. The verdict turned on two constants
   calibrated for an embedder this project no longer uses. **Since 2026-11-17 the real
-  tenants (`masterclass`, `milesone`, `_template`) use 0.75**, an interim value taken
+  tenants (`merger_app`, `milesone`, `_template`) use 0.75**, an interim value taken
   from the measurement below; `_default`, `project_a` and `project_b` still carry the
   old numbers. `min_entailment_score` (0.25) is still unmeasured.
-- **MEASURED 2026-11-16 (`tools.calibrate`, masterclass, 305 per-file queries from 40
+- **MEASURED 2026-11-16 (`tools.calibrate`, masterclass -- now `merger_app`, 305 per-file queries from 40
   commits): the 0.40 relevance bar is INERT.** EmbeddingGemma packs cosines into
   ~0.7-0.9: same-file passages p10/median/p90 = 0.780/0.823/0.869, other-file
   passages 0.727/0.770/0.803 -- so 0.40 can never fail on real retrieval (T21's

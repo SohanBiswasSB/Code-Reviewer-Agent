@@ -58,7 +58,7 @@ verdict turned on two uncalibrated constants, one of them by a hundredth.
 
 `tools.calibrate` then measured EmbeddingGemma on the Masterclass index (305
 per-file queries): cosines sit in ~0.7–0.9, so a 0.40 bar could never fail. The
-real tenants (`masterclass`, `milesone`, `_template`) now use **0.75**, set as an
+real tenants (`merger_app`, `milesone`, `_template`) now use **0.75**, set as an
 interim value from that measurement. It keeps over 90% of same-file evidence and
 rejects roughly the bottom quarter of other-file passages. "Same file" is only a proxy
 for "relevant", so treat 0.75 as a measured starting point, not a validated one. The

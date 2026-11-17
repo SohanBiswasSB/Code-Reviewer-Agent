@@ -100,6 +100,39 @@ def fingerprint(chunks: list[dict]) -> str:
     return h.hexdigest()[:16]
 
 
+def _refuse_duplicate_ids(chunks: list[dict]) -> None:
+    """ValueError naming up to five ids that occur more than once.
+
+    Ids carry path, name, line and content hash, so a duplicate means the chunker
+    emitted the same text twice from one place. Refusing is cheaper than
+    discovering later that `similarities()` silently resolved a citation to
+    whichever copy came last.
+    """
+    ids = [c["id"] for c in chunks]
+    if len(set(ids)) != len(ids):
+        dupes = sorted({i for i in ids if ids.count(i) > 1})[:5]
+        raise ValueError(f"duplicate chunk ids, e.g. {dupes}")
+
+
+def _unit_rows(chunks: list[dict]) -> np.ndarray:
+    """The chunks' vectors as float32 rows scaled to unit length, so a dot
+    product is the cosine. A zero vector stays zero, not NaN."""
+    vectors = np.asarray([c["vector"] for c in chunks], dtype="float32")
+    if vectors.size:
+        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        vectors = vectors / norms
+    return vectors
+
+
+def _write_metas(path: pathlib.Path, chunks: list[dict]) -> None:
+    """One JSON line per chunk, everything but its vector (that is in vectors.npy)."""
+    with path.open("w", encoding="utf-8") as fh:
+        for c in chunks:
+            meta = {k: v for k, v in c.items() if k != "vector"}
+            fh.write(json.dumps(meta, ensure_ascii=False) + "\n")
+
+
 @adapter("index", "local")
 class LocalVectorIndex:
     """Flat exact search. Exact rather than approximate, on purpose.
@@ -136,14 +169,7 @@ class LocalVectorIndex:
         Written to a temporary directory and renamed, so a crash mid-write leaves
         the previous index intact rather than a half-written one that still loads.
         """
-        ids = [c["id"] for c in chunks]
-        if len(set(ids)) != len(ids):
-            # Ids carry path, name, line and content hash, so a duplicate means
-            # the chunker emitted the same text twice from one place. Refusing is
-            # cheaper than discovering later that `similarities()` silently
-            # resolved a citation to whichever copy came last.
-            dupes = sorted({i for i in ids if ids.count(i) > 1})[:5]
-            raise ValueError(f"duplicate chunk ids, e.g. {dupes}")
+        _refuse_duplicate_ids(chunks)
 
         target = self._dir(namespace)
         tmp = target.with_name(target.name + ".tmp")
@@ -151,17 +177,9 @@ class LocalVectorIndex:
             shutil.rmtree(tmp)
         tmp.mkdir(parents=True, exist_ok=True)
 
-        vectors = np.asarray([c["vector"] for c in chunks], dtype="float32")
-        if vectors.size:
-            norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-            norms[norms == 0] = 1.0          # a zero vector stays zero, not NaN
-            vectors = vectors / norms
+        vectors = _unit_rows(chunks)
         np.save(tmp / "vectors.npy", vectors)
-
-        with (tmp / "chunks.jsonl").open("w", encoding="utf-8") as fh:
-            for c in chunks:
-                meta = {k: v for k, v in c.items() if k != "vector"}
-                fh.write(json.dumps(meta, ensure_ascii=False) + "\n")
+        _write_metas(tmp / "chunks.jsonl", chunks)
 
         record = {
             **(manifest or {}),

@@ -1,15 +1,15 @@
 """Measure the gate's score thresholds instead of guessing them.
 
-    python -m tools.calibrate --tenant masterclass --root ~/Dev/<repo> relevance
-    python -m tools.calibrate --tenant masterclass entailment
-    python -m tools.calibrate --tenant masterclass relevance --json
-    python -m tools.calibrate --tenant masterclass --root ~/Dev/<repo> rerank --commits 15
+    python -m tools.calibrate --tenant merger_app --root ~/Dev/<repo> relevance
+    python -m tools.calibrate --tenant merger_app entailment
+    python -m tools.calibrate --tenant merger_app relevance --json
+    python -m tools.calibrate --tenant merger_app --root ~/Dev/<repo> rerank --commits 15
 
 `min_relevance_score` and `min_entailment_score` (and `min_rerank_score` when
 the T13 reranker is on) decide approve-vs-escalate, and the originally shipped
 values were calibrated for an embedder this project no longer uses (CLAUDE.md,
 "Thresholds are measured, not guessed"). This tool produces the measurement --
-the interim 0.75 relevance bar in the masterclass policy and the 0.61
+the interim 0.75 relevance bar in the merger_app policy and the 0.61
 `MIN_RERANK_SCORE` default were both set from its numbers. It never edits a
 policy: it prints the numbers and a suggestion, and a human writes the value into
 `tenants/<name>/policy.json`.
@@ -55,12 +55,14 @@ import statistics
 import subprocess
 import sys
 import time
+from dataclasses import dataclass, field
 
 import config
 import registry
 from adapters.audit_jsonl import iter_records
 from adapters.rerank_cross_encoder import passage_text
 from adapters.retriever_indexed import RERANK_CANDIDATES, IndexedRetriever
+from app.live import JobProgress
 from nodes.generate_diagnosis import PER_QUERY_K
 from nodes.independent_review import effective_gates, entailment_claims
 from schemas.diagnosis import Diagnosis
@@ -104,7 +106,19 @@ def suggest(pos: list[float], neg: list[float]) -> dict:
     return out
 
 
-def relevance(tenant: str, root_override: str | None, commits: int) -> dict:
+def _no_progress(done: int, total: int) -> None:
+    """Default progress sink: none. `main` passes the live job's instead."""
+
+
+def _tenant_target(tenant: str, root_override: str | None) -> tuple[dict, str, object]:
+    """(code-review policy, index namespace, repo root on this machine) for a tenant."""
+    policy = config.get_tenant_store().policy(tenant, "code_review")
+    codebase = policy.get("codebase") or {}
+    return policy, codebase.get("repo"), codebase_root(codebase, root_override)
+
+
+def relevance(tenant: str, root_override: str | None, commits: int,
+              progress=_no_progress) -> dict:
     """Same-file vs other-file cosines for per-file queries over the last `commits`.
 
     Searches the tenant's whole namespace for each query, so every chunk is
@@ -112,31 +126,41 @@ def relevance(tenant: str, root_override: str | None, commits: int) -> dict:
     plus the query count, the policy's current `min_relevance_score` and the
     embedder. See the module docstring for what "same file" is a proxy for.
     """
-    policy =config.get_tenant_store().policy(tenant, "code_review")
-    namespace = (policy.get("codebase") or {}).get("repo")
-    root = codebase_root(policy.get("codebase") or {}, root_override)
+    policy, namespace, root = _tenant_target(tenant, root_override)
     index, embedder = config.get_index(), config.get_embedder()
     metas = index.documents(namespace)
-    paths = {m.get("path") for m in metas}
-    pos, neg, queries = [], [], 0
-    for sha in _git(root, "log", f"-{commits}", "--no-merges", "--format=%H").split():
-        chunks = split_diff(_git(root, "show", "--format=", "--no-renames", sha))
-        for path, diff in chunks.items():
-            if path not in paths or file_rank(path) != CODE:
-                continue
-            query = f"{path}\n{diff[:PER_FILE_QUERY_CHARS]}"
-            qvec = embedder.embed([query], kind="query")[0]
-            hits = index.search(namespace, qvec, len(metas))
-            same = [h["score"] for h in hits if h.get("path") == path]
-            other = [h["score"] for h in hits if h.get("path") != path]
-            if same and other:
-                pos.append(max(same))
-                neg.extend(other[:NEGATIVES_PER_QUERY])
-                queries += 1
+    # A list, not the generator: the progress bar needs its length up front.
+    items = list(_commit_queries(root, commits, {m.get("path") for m in metas}))
+    pos, neg = _same_vs_other_file(
+        lambda query: index.search(namespace, embedder.embed([query], kind="query")[0],
+                                   len(metas)),
+        items, progress)
     out = suggest(pos, neg)
-    out.update(measure="relevance (cosine)", tenant=tenant, queries=queries,
+    out.update(measure="relevance (cosine)", tenant=tenant, queries=len(pos),
                current=policy.get("min_relevance_score"), embedder=embedder.model)
     return out
+
+
+def _same_vs_other_file(search, items: list[tuple[str, str]],
+                        progress) -> tuple[list[float], list[float]]:
+    """(positives, negatives) for `relevance`, one query at a time.
+
+    `search(query)` returns every chunk of the namespace scored against the query.
+    A positive is the best score of a chunk from the query's OWN file; the
+    negatives are the top NEGATIVES_PER_QUERY scores of other files' chunks. A
+    query with no chunk on one side has nothing to compare, so it adds neither.
+    Kept apart so `relevance` reads as setup, measure, summarise.
+    """
+    pos, neg = [], []
+    for n, (path, query) in enumerate(items, start=1):
+        hits = search(query)
+        same = [h["score"] for h in hits if h.get("path") == path]
+        other = [h["score"] for h in hits if h.get("path") != path]
+        if same and other:
+            pos.append(max(same))
+            neg.extend(other[:NEGATIVES_PER_QUERY])
+        progress(n, len(items))
+    return pos, neg
 
 
 def _commit_queries(root, commits: int, paths: set):
@@ -153,42 +177,81 @@ def _top_has_same(hits: list[dict], path: str, n: int) -> bool:
     return any(h.get("path") == path for h in hits[:n])
 
 
-def rerank(tenant: str, root_override: str | None, commits: int) -> dict:
-    """Rerank vs cosine on the retriever's real candidate pool. See the docstring."""
-    policy = config.get_tenant_store().policy(tenant, "code_review")
-    namespace = (policy.get("codebase") or {}).get("repo")
-    root = codebase_root(policy.get("codebase") or {}, root_override)
-    reranker = config.get_reranker() or registry.get_adapter("reranker", "cross_encoder")()
-    pool_retriever = IndexedRetriever(reranker=None)
-    paths = {m.get("path") for m in config.get_index().documents(namespace)}
-    r_pos, r_neg, c_pos, c_neg = [], [], [], []
-    top_fused = top_reranked = queries = 0
-    started = time.monotonic()
-    for path, query in _commit_queries(root, commits, paths):
-        pool = pool_retriever.retrieve(query, k=RERANK_CANDIDATES, namespace=namespace)
+@dataclass
+class _RerankTally:
+    """Both instruments' scores on the same pools, accumulated query by query."""
+
+    r_pos: list = field(default_factory=list)
+    r_neg: list = field(default_factory=list)
+    c_pos: list = field(default_factory=list)
+    c_neg: list = field(default_factory=list)
+    top_fused: int = 0
+    top_reranked: int = 0
+
+    def add(self, pool: list[dict], path: str) -> None:
+        """One query's pool, every hit already carrying `rerank` and `cosine`."""
         same = [h for h in pool if h.get("path") == path]
         other = [h for h in pool if h.get("path") != path]
-        if not same or not other:
+        self.r_pos.append(max(h["rerank"] for h in same))
+        self.r_neg.extend(sorted((h["rerank"] for h in other), reverse=True)
+                          [:NEGATIVES_PER_QUERY])
+        self.c_pos.append(max(h["cosine"] for h in same))
+        self.c_neg.extend(sorted((h["cosine"] for h in other), reverse=True)
+                          [:NEGATIVES_PER_QUERY])
+        self.top_fused += _top_has_same(pool, path, PER_QUERY_K)
+        self.top_reranked += _top_has_same(
+            sorted(pool, key=lambda h: h["rerank"], reverse=True), path, PER_QUERY_K)
+
+    def summary(self) -> dict:
+        """`suggest` for each instrument, plus how often the file's own code made top k."""
+        n = max(len(self.r_pos), 1)
+        return {"rerank": suggest(self.r_pos, self.r_neg),
+                "cosine_same_pairs": suggest(self.c_pos, self.c_neg),
+                "queries": len(self.r_pos),
+                "same_file_in_top_k": {"k": PER_QUERY_K,
+                                       "fusion_order": round(self.top_fused / n, 3),
+                                       "reranked": round(self.top_reranked / n, 3)}}
+
+
+def _tally_pools(pool_retriever, reranker, namespace: str, items: list[tuple[str, str]],
+                 progress) -> _RerankTally:
+    """Rerank each query's real candidate pool and tally both instruments on it.
+
+    The pool is the top RERANK_CANDIDATES by fusion, retrieved WITHOUT a reranker
+    so the cross-encoder scores every candidate here, onto `h["rerank"]`. A pool
+    holding only the query's own file, or none of it, has no pair to compare and
+    is skipped. Progress is reported before each query and once at the end.
+    """
+    tally = _RerankTally()
+    for n, (path, query) in enumerate(items, start=1):
+        progress(n - 1, len(items))
+        pool = pool_retriever.retrieve(query, k=RERANK_CANDIDATES, namespace=namespace)
+        if not any(h.get("path") == path for h in pool) or \
+                all(h.get("path") == path for h in pool):
             continue
-        scores = reranker.scores(query, [passage_text(h) for h in pool])
-        for h, s in zip(pool, scores, strict=True):
+        for h, s in zip(pool, reranker.scores(query, [passage_text(h) for h in pool]),
+                        strict=True):
             h["rerank"] = s
-        r_pos.append(max(h["rerank"] for h in same))
-        r_neg.extend(sorted((h["rerank"] for h in other), reverse=True)[:NEGATIVES_PER_QUERY])
-        c_pos.append(max(h["cosine"] for h in same))
-        c_neg.extend(sorted((h["cosine"] for h in other), reverse=True)[:NEGATIVES_PER_QUERY])
-        top_fused += _top_has_same(pool, path, PER_QUERY_K)
-        top_reranked += _top_has_same(sorted(pool, key=lambda h: h["rerank"], reverse=True),
-                                      path, PER_QUERY_K)
-        queries += 1
-    out = {"rerank": suggest(r_pos, r_neg), "cosine_same_pairs": suggest(c_pos, c_neg)}
+        tally.add(pool, path)
+    progress(len(items), len(items))
+    return tally
+
+
+def rerank(tenant: str, root_override: str | None, commits: int,
+           progress=_no_progress) -> dict:
+    """Rerank vs cosine on the retriever's real candidate pool. See the docstring."""
+    policy, namespace, root = _tenant_target(tenant, root_override)
+    reranker = config.get_reranker() or registry.get_adapter("reranker", "cross_encoder")()
+    pool_retriever = IndexedRetriever(reranker=None)
+    started = time.monotonic()
+    items = list(_commit_queries(
+        root, commits, {m.get("path") for m in config.get_index().documents(namespace)}))
+    out = _tally_pools(pool_retriever, reranker, namespace, items, progress).summary()
     out.update(measure="rerank vs cosine (same candidate pool)", tenant=tenant,
-               queries=queries, pool=RERANK_CANDIDATES, reranker=reranker.model,
+               pool=RERANK_CANDIDATES, reranker=reranker.model,
                current=policy.get("min_rerank_score", "default"),
-               same_file_in_top_k={"k": PER_QUERY_K,
-                                   "fusion_order": round(top_fused / max(queries, 1), 3),
-                                   "reranked": round(top_reranked / max(queries, 1), 3)},
-               seconds_per_query=round((time.monotonic() - started) / max(queries, 1), 2))
+               seconds_per_query=round((time.monotonic() - started)
+                                       / max(out["queries"], 1), 2))
     return out
 
 
@@ -202,7 +265,51 @@ def _diff_for(root, target: str | None) -> str:
     return _git(root, "show", "--format=", "--no-renames", target)
 
 
-def entailment(tenant: str, root_override: str | None = None) -> dict:
+def _score_records(records: list[dict], text: dict, root, entailer,
+                   progress) -> tuple[list[float], list[float]]:
+    """(every claim's score, the lowest claim per review) over recorded reviews.
+
+    The lowest is collected per review because that is what decides at the gate.
+    A record scored nothing (`_review_scores` is None) adds to neither list.
+    Progress is reported before each record and once at the end.
+    """
+    claims, lowest = [], []
+    for n, rec in enumerate(records, start=1):
+        progress(n - 1, len(records))
+        scored = _review_scores(rec, text, root, entailer)
+        if scored is None:
+            continue
+        claims.extend(scored)
+        lowest.append(min(scored, default=0.0))
+    progress(len(records), len(records))
+    return claims, lowest
+
+
+def _review_scores(rec: dict, text: dict, root, entailer) -> list[float] | None:
+    """Each claim of one recorded review, scored as the gate scores it now.
+
+    The diagnosis is rebuilt from the record, its citations' passages from the
+    index's current `text` (by id), and its diff re-read from git (`_diff_for`),
+    then `entailment_claims` builds the very claims and premises the gate would.
+    A claim or premise that is empty scores 0.0, as at the gate. None for a
+    record made before findings were recorded (2026-11-16): it has no claims to
+    score in today's shape.
+    """
+    d = rec.get("diagnosis") or {}
+    if "findings" not in d:
+        return None
+    diag = Diagnosis.model_validate({
+        "summary": d.get("summary") or "", "severity": d.get("severity") or "high",
+        "proposed_comment": d.get("proposed_comment") or "",
+        "citations": d.get("citations") or [], "findings": d.get("findings") or []})
+    retrieved = [{"id": r.get("id"), "text": text.get(r.get("id"), "")}
+                 for r in rec.get("retrieved") or []]
+    return [entailer.score(c, p) if c and p else 0.0 for _, c, p in
+            entailment_claims(diag, {"diff": _diff_for(root, rec.get("target"))}, retrieved)]
+
+
+def entailment(tenant: str, root_override: str | None = None,
+               progress=_no_progress) -> dict:
     """Per-claim entailment scores on REAL recorded reviews, computed by the gate's
     own `entailment_claims` -- so the numbers are what the gate would score now.
 
@@ -210,35 +317,37 @@ def entailment(tenant: str, root_override: str | None = None) -> dict:
     not suggest a cut. It reports the distribution, the lowest claim per review
     (what decides), and how many reviews the current bar would pass.
     """
-    policy = config.get_tenant_store().policy(tenant, "code_review")
-    namespace = (policy.get("codebase") or {}).get("repo")
-    root = codebase_root(policy.get("codebase") or {}, root_override)
+    policy, namespace, root = _tenant_target(tenant, root_override)
     text = {m["id"]: m.get("text", "") for m in config.get_index().documents(namespace)}
     entailer = config.get_entailer()
     bar = effective_gates(policy)["min_entailment_score"]
-    claims, lowest = [], []
-    for rec in (r for r in iter_records() if r.get("tenant") == tenant):
-        d = rec.get("diagnosis") or {}
-        if "findings" not in d:
-            continue        # recorded before findings were (2026-11-16)
-        diag = Diagnosis.model_validate({
-            "summary": d.get("summary") or "", "severity": d.get("severity") or "high",
-            "proposed_comment": d.get("proposed_comment") or "",
-            "citations": d.get("citations") or [], "findings": d.get("findings") or []})
-        retrieved = [{"id": r.get("id"), "text": text.get(r.get("id"), "")}
-                     for r in rec.get("retrieved") or []]
-        scored = [entailer.score(c, p) if c and p else 0.0 for _, c, p in
-                  entailment_claims(diag, {"diff": _diff_for(root, rec.get("target"))},
-                                    retrieved)]
-        claims.extend(scored)
-        lowest.append(min(scored, default=0.0))
-    out = {"per_claim": suggest(claims, [])["positive"],
-           "lowest_claim_per_review": suggest(lowest, [])["positive"],
-           "reviews": len(lowest),
-           "reviews_passing_current_bar": sum(s >= bar for s in lowest)}
-    out.update(measure="entailment (per claim, the gate's own premises)", tenant=tenant,
-               entailer=type(entailer).__name__, current=bar)
-    return out
+    records = [r for r in iter_records() if r.get("tenant") == tenant]
+    claims, lowest = _score_records(records, text, root, entailer, progress)
+    return {"per_claim": suggest(claims, [])["positive"],
+            "lowest_claim_per_review": suggest(lowest, [])["positive"],
+            "reviews": len(lowest),
+            "reviews_passing_current_bar": sum(s >= bar for s in lowest),
+            "measure": "entailment (per claim, the gate's own premises)", "tenant": tenant,
+            "entailer": type(entailer).__name__, "current": bar}
+
+
+def _measure(args, progress) -> dict:
+    """Run the measure the CLI named."""
+    if args.measure == "relevance":
+        return relevance(args.tenant, args.root, args.commits, progress)
+    if args.measure == "rerank":
+        return rerank(args.tenant, args.root, args.commits, progress)
+    return entailment(args.tenant, args.root, progress)
+
+
+def _end_job(job: JobProgress, exc: BaseException | None) -> None:
+    """finished / interrupted / error, from the exception in flight (if any)."""
+    if exc is None:
+        job.end("finished")
+    elif isinstance(exc, KeyboardInterrupt):
+        job.end("interrupted")
+    else:
+        job.end("error", error=f"{type(exc).__name__}: {exc}"[:300])
 
 
 def main() -> int:
@@ -250,12 +359,24 @@ def main() -> int:
     ap.add_argument("--commits", type=int, default=40)
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
-    if args.measure == "relevance":
-        result = relevance(args.tenant, args.root, args.commits)
-    elif args.measure == "rerank":
-        result = rerank(args.tenant, args.root, args.commits)
-    else:
-        result = entailment(args.tenant, args.root)
+    # Shown on the monitor's "Now running" (app/live.JobProgress): a 15-minute
+    # measurement used to leave the page reading "0 running" the whole time.
+    job = JobProgress("calibrate", f"calibrate-{args.tenant}-{args.measure}",
+                      f"Calibrate {args.measure} · {args.tenant}", tenant=args.tenant,
+                      unit="reviews" if args.measure == "entailment" else "queries")
+    measured = False
+    try:
+        job.phase("measuring")
+        result = _measure(args, job.progress)
+        measured = True
+    finally:
+        # The job's end is recorded on EVERY exit, the failure with its reason,
+        # without catching anything: sys.exception() sees the exception in flight
+        # inside `finally`, and it propagates unchanged afterwards. Only when the
+        # body did NOT finish, though: on success sys.exception() can still return
+        # an unrelated exception a CALLER is handling, which would end a finished
+        # job as "error".
+        _end_job(job, None if measured else sys.exception())
     if args.json:
         print(json.dumps(result, indent=2))
     else:

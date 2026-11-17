@@ -46,7 +46,7 @@ from dataclasses import asdict, dataclass, field
 # change will ever have. The shipped 0.35/0.40 min_relevance_score values were
 # calibrated for text-embedding-3-small@512 and mean nothing in any other space.
 # Since measured on this embedder (tools.calibrate, 2026-11-16): the real tenants
-# (masterclass, milesone, _template) now carry an interim 0.75; _default,
+# (merger_app, milesone, _template) now carry an interim 0.75; _default,
 # project_a and project_b still carry the old numbers.
 #
 # The id is FULLY QUALIFIED on purpose. `llm_lmstudio.resolves_to()` would match

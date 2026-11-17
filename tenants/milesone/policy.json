@@ -5,11 +5,17 @@
   "enabled_surfaces": ["code_review", "log_review"],
   "code_review": {
     "min_relevance_score": 0.75,
-    "_min_relevance_score": "INTERIM 2026-11-16, carried from masterclass: same embedder (EmbeddingGemma), same ~0.7-0.9 cosine band. Re-measure on this index with tools.calibrate.",
+    "_min_relevance_score": "INTERIM 2026-11-16, carried from merger_app: same embedder (EmbeddingGemma), same ~0.7-0.9 cosine band. Re-measure on this index with tools.calibrate.",
     "severity_allowlist": ["low", "medium"],
     "allowed_actions": ["comment", "comment+label"],
     "escalate_to_human": true,
-    "risky_areas": ["migrations", "auth", "credly", "celery", "routing", "zoom", "webhook"]
+    "risky_areas": ["migrations", "auth", "credly", "celery", "routing", "zoom", "webhook"],
+    "prepush": {
+      "standards": {
+        "_comment": "Coding standards (tools/prepush/standards/). Django pack declared. No UUID/soft-delete house rules: this backend mixes integer and UUID keys (measured 2026-11-17), so they would flag every new model.",
+        "frameworks": ["django"]
+      }
+    }
   },
   "log_review": {"min_relevance_score": 0.30, "anomaly_threshold": 3, "allowed_actions": ["report"],
                  "escalate_to_human": true}

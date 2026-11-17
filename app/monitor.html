@@ -63,7 +63,11 @@ svg.i{width:16px;height:16px;flex:none;stroke:currentColor;fill:none;stroke-widt
 
 /* ── kpis ── */
 .kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:22px}
-.kpi{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:16px 18px;box-shadow:var(--shadow);display:flex;gap:14px;align-items:flex-start}
+.kpi{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:16px 18px;box-shadow:var(--shadow);display:flex;gap:14px;align-items:flex-start;
+ font:inherit;color:inherit;text-align:left;width:100%;cursor:pointer;transition:border-color .15s,transform .15s}
+.kpi:hover{border-color:var(--acc,#6366f1);transform:translateY(-1px)}
+.kpi:focus-visible{outline:2px solid var(--acc,#6366f1);outline-offset:2px}
+.kpi[aria-pressed="true"]{border-color:var(--acc,#6366f1)}
 .kpi .ic{width:38px;height:38px;border-radius:10px;display:grid;place-items:center;flex:none}
 .kpi .ic svg.i{width:19px;height:19px}
 .kpi b{display:block;font-size:26px;line-height:1.1;font-weight:600;letter-spacing:-.02em}
@@ -125,7 +129,11 @@ tr.dim td{opacity:.62}
 .rrow{all:unset;box-sizing:border-box;display:grid;grid-template-columns:118px minmax(150px,1.1fr) minmax(0,2.6fr) 128px 74px 86px 22px;gap:14px;align-items:center;width:100%;padding:13px 18px;cursor:pointer}
 .rrow:hover{background:var(--hover)}.rrow:focus-visible{outline:2px solid var(--acc);outline-offset:-2px}
 .run.open>.rrow{background:var(--hover)}
-.r-run b{display:block;font-weight:600;font-size:13.5px}.r-run span{font-size:11.5px;color:var(--mute);font-family:var(--mono)}
+.rrow>*,.rhead>*{min-width:0}
+.r-run{display:flex;flex-direction:column;gap:2px}
+.r-run b{font-weight:600;font-size:13.5px}
+.r-run .tg{font-family:var(--mono);font-size:12px;color:var(--ink2);overflow-wrap:anywhere;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical}
+.r-run .vs,.r-run .rid{font-size:11.5px;color:var(--mute);font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .r-verdict{font-size:13px;color:var(--ink2);overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical}
 .r-verdict.err{color:var(--err)}
 .r-t{font-size:12.5px;color:var(--mute);white-space:nowrap}
@@ -143,6 +151,20 @@ tr.dim td{opacity:.62}
 .btn:hover{background:var(--hover)}.btn:focus-visible{outline:2px solid var(--acc)}
 .btn.primary{background:var(--acc);border-color:var(--acc);color:#fff}.btn.primary:hover{filter:brightness(1.08)}
 .cmd{flex:1;min-width:240px;font-family:var(--mono);font-size:12px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:7px 10px;color:var(--ink2);overflow-x:auto;white-space:nowrap}
+.glance{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px 18px;padding:12px 16px;margin-bottom:14px}
+.glance div{min-width:0}.glance dt{font-size:11.5px;color:var(--mute);margin-bottom:2px}
+.glance dd{margin:0;font-size:13px;color:var(--ink);overflow-wrap:anywhere}.glance dd.mono{font-family:var(--mono);font-size:12px}
+.guide{margin-bottom:14px}.guide h4{margin:0 0 6px;font-size:13px;font-weight:600}
+.guide .whyl{margin:0 0 12px;padding-left:18px;font-size:13px;color:var(--ink2)}.guide .whyl li{margin:3px 0}
+.guide .cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}
+.guide .col{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px;min-width:0}
+.guide .col h5{margin:0 0 2px;font-size:13px;display:flex;gap:8px;align-items:center}
+.guide .col .who{font-size:12px;color:var(--mute);margin:0 0 8px}
+.guide ol{margin:0;padding-left:20px;font-size:13px;color:var(--ink2)}.guide ol>li{margin:0 0 10px}
+.guide ol ul{margin:4px 0 0;padding-left:16px;font-size:12px}.guide ol ul li{overflow-wrap:anywhere}
+.guide .cmdrow{display:flex;gap:8px;align-items:center;margin-top:6px}.guide .cmdrow .cmd{min-width:0}
+.linkbtn{all:unset;cursor:pointer;color:var(--acc);font-size:12.5px;font-weight:500;margin-left:4px}
+.linkbtn:hover{text-decoration:underline}.linkbtn:focus-visible{outline:2px solid var(--acc)}
 .callout{display:flex;gap:12px;border:1px solid var(--acc-bd);background:var(--acc-bg);border-radius:10px;padding:12px 14px;margin-bottom:14px}
 .callout .ic{color:var(--acc);margin-top:1px}.callout b{display:block;font-size:13px;margin-bottom:2px}
 .callout ul{margin:4px 0 0;padding-left:18px;font-size:13px;color:var(--ink2)}.callout li{margin:3px 0}
@@ -352,14 +374,27 @@ const PRECHECK={n_plus_one:"N+1 queries",suppressions:"Silenced warnings",line_l
  postman_structure:"Postman structure",tracker:"Tracker",tracker_row:"Tracker row",tracker_csv:"Tracker CSV",tracker_md:"Tracker markdown",
  tracker_key:"Tracker key",tracker_blocks:"Tracker blocks",tracker_attribution:"Tracker attribution",commit_message:"Commit message",
  commit_subject:"Commit subject",commit_line_length:"Commit line length",commit_ascii:"Commit ASCII",commit_attribution:"Commit attribution",
- commit_blocks:"Commit blocks",never_commit:"No never-commit paths",read_only:"No edits to read-only history"};
-const pname=c=>PRECHECK[c]||String(c||"").replace(/_/g," ");
+ commit_blocks:"Commit blocks",never_commit:"No never-commit paths",read_only:"No edits to read-only history",
+ broad_except:"No broad except",size_limits:"Function size (SRP)",match_capture:"match/case capture",
+ api_envelope:"Response envelope",response_keys:"snake_case response keys",api_versioning:"Versioned routes",
+ strict_input:"Strict input",v2_imports_v1:"V2 never imports V1",css_empty_rules:"No empty CSS rules",
+ solid:"SOLID (design)",duplicate_code:"Duplicate code",control_flow:"Control-flow choice",
+ serializer_per_url:"Serializer per URL",query_count:"O(1) queries"};
+/* Framework pack checks arrive as "<pack>:<concern>" (tools/prepush/standards/packs). */
+const PACKNAME={django:"Django",fastapi:"FastAPI"};
+const pname=c=>{const s=String(c||""),i=s.indexOf(":");
+ if(i>0)return`${PACKNAME[s.slice(0,i)]||s.slice(0,i)} · ${s.slice(i+1).replace(/_/g," ")}`;
+ return PRECHECK[s]||s.replace(/_/g," ")};
 const ROUTE={ai_investigation:"AI investigation",deterministic:"Deterministic fix",human_review:"Straight to a human"};
 const STATUS={executed:["Approved","b-ok"],escalated:["Escalated","b-warn"],denied:["Declined","b-idle"],
  human_review:["Human review","b-warn"],ended:["Ended","b-idle"],crashed:["Crashed","b-err"],
  incomplete:["Stopped","b-err"],in_progress:["In progress","b-info"],
  awaiting_approval:["Awaiting approval","b-info"],abandoned:["Not approved","b-idle"]};
-const FILTERS=[["all","All"],["escalated","Escalated"],["executed","Approved"],["failed","Crashed / stopped"]];
+const FILTERS=[["all","All"],["to_human","Sent to a human"],["executed","Approved"],["failed","Crashed / stopped"]];
+/* A filter key -> does run r belong. "to_human" is escalated OR routed straight to a
+   human, the same two buckets the "Sent to a human" card counts, so a card and its
+   chip always show the same number. */
+const inFilter=(r,k)=>k==="all"||(k==="to_human"?["escalated","human_review"].includes(bucket(r)):bucket(r)===k);
 const ROLEICO={diagnosis:["cpu","t-acc"],judge:["scale","t-info"],embedding:["layers","t-ok"],utility:["tool","t-idle"],
  reranker:["sort","t-idle"],entailer:["link","t-warn"],"(none)":["dot","t-idle"]};
 
@@ -373,13 +408,9 @@ const badge=(txt,cls,nodot)=>el("span","badge "+cls+(nodot?" nodot":""),txt);
 const iconBox=(name,cls,box="ic")=>{const d=el("span",box+" "+cls);d.append(ico(name));return d};
 function srcParts(id){const s=String(id||""),i=s.indexOf(":");return i<0?[s,""]:[s.slice(0,i),s.slice(i+1).replace(/:[0-9a-f]{8}$/,"")]}
 function firstLine(msg){const m=String(msg||"");const cut=m.search(/\\n|\n|Traceback/);return(cut>0?m.slice(0,cut):m).slice(0,240)}
-function hint(msg){const m=String(msg||"");
- if(/prediction stream|generation thread|mlx_engine/i.test(m))return"LM Studio's model backend crashed while generating. Usually memory pressure or a prompt longer than the loaded context. Check LM Studio's server log, reload the model, then retry.";
- if(/Connection ?(refused|Error)|URLError|APIConnectionError/i.test(m))return"Could not reach the model server. Start it with: lms server start";
- if(/context (length|window)|n_ctx|too many tokens/i.test(m))return"The prompt is longer than the model's loaded context window. Reload the model with a larger context.";
- if(/timed? ?out/i.test(m))return"The model call timed out.";
- if(/not found|no models? loaded/i.test(m))return"The model this role needs is not loaded in LM Studio.";
- return null}
+/* "base...head" (or "base..head") -> [head, base]: the branch under review first,
+   because that is what someone scanning the list is looking for. */
+function targetParts(t){const s=String(t||"staged"),m=s.match(/^(.+?)\.\.\.?(.+)$/);return m?[m[2],m[1]]:[s,""]}
 const tally=cs=>({flag:cs.filter(c=>c.status==="flag").length,pass:cs.filter(c=>c.status==="pass").length,skip:cs.filter(c=>c.status==="skip").length});
 const retriesOf=r=>r.steps.reduce((n,s)=>n+((s.retries||[]).length),0);
 /* A finding about file X that cites only passages from other files: retrieval found
@@ -388,12 +419,20 @@ function offTarget(f){const c=f.citation_ids||[];return !!(f.file&&c.length&&!c.
 const sevCls=s=>s==="high"||s==="critical"?"b-err":s==="low"?"b-info":"b-warn";
 
 /* ── KPIs ──────────────────────────────────────────────────────────────── */
+/* Each card is a shortcut: it opens Review history filtered to exactly the runs it counts. */
+function showHistory(key){
+ filter=key;lastSig="";render(latest);
+ const sec=document.getElementById("sec-history");sec.open=true;sec.scrollIntoView({behavior:"smooth",block:"start"});
+}
 function renderKpis(recent){
  const k=document.getElementById("kpis");k.replaceChildren();
- const n=b=>recent.filter(r=>bucket(r)===b).length;
- for(const[v,l,icn,t]of[[recent.length,"Recent runs","history","t-acc"],[n("executed"),"Approved & written","check","t-ok"],
-  [n("escalated")+n("human_review"),"Sent to a human","user","t-warn"],[n("failed"),"Crashed or stopped","alert","t-err"]]){
-  const d=el("div","kpi"),txt=el("div");txt.append(el("b",null,String(v)),el("span",null,l));d.append(iconBox(icn,t),txt);k.append(d)}
+ const n=key=>recent.filter(r=>inFilter(r,key)).length;
+ for(const[key,l,icn,t]of[["all","Recent runs","history","t-acc"],["executed","Approved & written","check","t-ok"],
+  ["to_human","Sent to a human","user","t-warn"],["failed","Crashed or stopped","alert","t-err"]]){
+  const d=el("button","kpi"),txt=el("div");d.type="button";
+  d.title=`Show ${l.toLowerCase()} in Review history`;d.setAttribute("aria-pressed",String(filter===key));
+  txt.append(el("b",null,String(n(key))),el("span",null,l));d.append(iconBox(icn,t),txt);
+  d.onclick=()=>showHistory(key);k.append(d)}
 }
 
 /* ── model server ──────────────────────────────────────────────────────── */
@@ -447,30 +486,40 @@ function liveJob(job,est,now){
   else{t.textContent=est[name]?`~${fmt(est[name])}`:"";if(est[name])left+=est[name]}
   bar.append(fill);row.append(bar,t);
   const rt=(s&&s.retries)||[];
-  const d=s&&(s.error?(hint(s.error)||firstLine(s.error)):[describe(s.detail),rt.length?`↻ retried ${rt.length}× (${rt[rt.length-1].reason})`:""].filter(Boolean).join(" · "));
+  const d=s&&(s.error?firstLine(s.error):[describe(s.detail),rt.length?`↻ retried ${rt.length}× (${rt[rt.length-1].reason})`:""].filter(Boolean).join(" · "));
   if(d)row.append(el("div","d"+(s.error?" err":""),d));box.append(row)}
  const foot=el("div","foot");
  foot.textContent=st==="waiting"?"Paused at the approval step. Answer the prompt in the terminal that started the review.":(anyRunning&&left?`About ${fmt(left)} left, based on the median of past runs.`:"");
  if(job.age_s>600&&anyRunning)foot.textContent+=` No update for ${fmt(job.age_s*1000)}. The process may have died.`;
  box.append(foot);return box;
 }
-function ingestJob(job){
- const box=el("div","job"),h=el("div","job-h"),st=job.status;
+/* Any job that is not a review: ingest, calibrate, and whatever kind comes next.
+   They share one shape (app/live.py): status, phase, done/total, eta_s, error. */
+function progressJob(job){
+ const box=el("div","job"),h=el("div","job-h"),st=job.status||"running",ingest=job.kind==="ingest";
+ const title=job.title||(ingest?`Ingest · ${job.tenant} → ${job.namespace}`:`${job.kind||"Job"}${job.tenant?" · "+job.tenant:""}`);
  h.append(badge(st==="finished"?"Finished":st==="error"?"Error":"Running",st==="finished"?"b-ok":st==="error"?"b-err":"b-info"),
-  el("b",null,`Ingest · ${job.tenant} → ${job.namespace}`),el("span","sm mute",`phase: ${job.phase}`));box.append(h);
- if(job.total){const pct=job.done/job.total*100,bar=el("div","lbar"),fill=el("i");
-  fill.style.width=pct+"%";if(st==="finished")fill.style.background="var(--ok)";bar.append(fill);box.append(bar);
-  box.append(el("div","foot",`${job.done.toLocaleString()} / ${job.total.toLocaleString()} chunks (${pct.toFixed(1)}%) · ${job.rate||0}/s`
-   +(st==="running"&&job.eta_s!=null?` · about ${fmt(job.eta_s*1000)} left`:"")+(job.elapsed_s?` · took ${fmt(job.elapsed_s*1000)}`:"")))}
+  el("b",null,title),add(el("span","sm mute"),job.phase?`phase: ${job.phase}`:null));box.append(h);
+ const done=Number(job.done)||0,total=Number(job.total)||0,unit=job.unit||(ingest?"chunks":"");
+ if(total){const pct=Math.min(100,done/total*100),bar=el("div","lbar"),fill=el("i");
+  fill.style.width=pct+"%";if(st==="finished")fill.style.background="var(--ok)";if(st==="error")fill.style.background="var(--err)";bar.append(fill);box.append(bar);
+  box.append(el("div","foot",[`${done.toLocaleString()} / ${total.toLocaleString()}${unit?" "+unit:""} (${pct.toFixed(1)}%)`,
+   job.rate!=null?`${job.rate}/s`:null,st==="running"&&job.eta_s!=null?`about ${fmt(job.eta_s*1000)} left`:null,
+   job.elapsed_s?`took ${fmt(job.elapsed_s*1000)}`:null].filter(Boolean).join(" · ")))}
  else box.append(el("div","foot",[job.files&&`${job.files} files`,job.chunks&&`${job.chunks} chunks`].filter(Boolean).join(" · ")||"Preparing…"));
+ if(st==="running"&&job.age_s>600)box.append(el("div","foot",`No update for ${fmt(job.age_s*1000)}. The process may have died.`));
  if(job.error)box.append(el("div","foot",job.error));return box;
 }
-const liveJobs=s=>s.jobs.filter(x=>x.kind==="ingest"?(x.status!=="finished"||x.age_s<900):(["running","waiting"].includes(x.status)&&x.age_s<900));
+/* A review has stages; everything else is a progress job. Routing on `stages` as
+   well as kind keeps a job without stages from reaching liveJob, which would throw
+   and blank the whole page. */
+const isReview=x=>x.kind==="run"||Array.isArray(x.stages);
+const liveJobs=s=>s.jobs.filter(x=>isReview(x)?(["running","waiting"].includes(x.status)&&x.age_s<900):(x.status!=="finished"||x.age_s<900));
 function renderJobs(s){
  const now=Date.parse(s.now),j=document.getElementById("jobs");j.replaceChildren();
  const live=liveJobs(s);
  if(!live.length){const e=el("div","empty");e.append(el("div",null,"Nothing running."),el("div","mono",`python -m app.review --tenant <name>   ·   python -m tools.ingest --tenant <name> --root <repo>`));j.append(e)}
- for(const job of live)j.append(job.kind==="ingest"?ingestJob(job):liveJob(job,s.estimates,now));
+ for(const job of live)j.append(isReview(job)?liveJob(job,s.estimates,now):progressJob(job));
 }
 
 /* ── history ───────────────────────────────────────────────────────────── */
@@ -485,7 +534,7 @@ function verdict(r){
   case"escalated":return`Escalated: ${fails.length} of 4 checks failed (${fails.join(", ")}). Nothing was posted.`+pre+rtx;
   case"denied":return"Passed the checks, but you declined it at the approval prompt."+pre+rtx;
   case"human_review":return"Routed straight to a human. No model looked at it."+pre;
-  case"crashed":return`Crashed at ${LABEL(r.error.step)}${rt?` after ${rt} retr${rt>1?"ies":"y"}`:""}: ${hint(r.error.message)||firstLine(r.error.message)}`;
+  case"crashed":return`Crashed at ${LABEL(r.error.step)}${rt?` after ${rt} retr${rt>1?"ies":"y"}`:""}: ${firstLine(r.error.message)}`;
   case"incomplete":{const l=r.steps[r.steps.length-1];return`Stopped after ${l?LABEL(l.name):"start"} without writing a record. The process was probably killed.`}
   case"in_progress":return"Still running, or just finished.";
   case"awaiting_approval":return`Passed ${a.review?GATE.filter(c=>a.review[c[0]]).length:"?"} of 4 checks and is waiting at the approval prompt. Nothing is written until you answer.`;
@@ -517,7 +566,7 @@ function stepsTab(r){
   const rt=(s&&s.retries)||[];
   if(rt.length){const b=el("div","retrybox");b.append(el("b",null,`↻ ${rt.length} retr${rt.length>1?"ies":"y"}`),
    document.createTextNode(" — "+rt.map(x=>`attempt ${x.attempt} of ${x.of} after ${x.wait_s}s (${x.reason})`).join("; ")+(st==="ok"?". Recovered.":". Gave up.")));mid.append(b)}
-  if(s&&s.error){const b=el("div","errbox"),h=hint(s.error);if(h)b.append(el("div","h",h));b.append(el("div","e",firstLine(s.error)));
+  if(s&&s.error){const b=el("div","errbox"),h=r.error&&r.error.step===name?r.error.hint:null;if(h)b.append(el("div","h",h));b.append(el("div","e",firstLine(s.error)));
    const dd=el("details","more");dd.append(el("summary",null,"Full error"),el("pre",null,String(s.error).replace(/\\n/g,"\n")));b.append(dd);mid.append(b)}
   li.append(stepIcon(st),mid,el("span","s-t",s&&s.duration_ms!=null?fmt(s.duration_ms):""));ol.append(li)}
  if(!r.steps.length)ol.append(el("li","mute","No trace spans kept for this run; the audit record is all there is."));
@@ -604,23 +653,42 @@ function detailsTab(r){
  if(r.audit){const dd=el("details","more");dd.append(el("summary",null,"Raw audit record (JSON)"),el("pre",null,JSON.stringify(r.audit,null,2)));box.append(dd)}
  return box;
 }
-function nextSteps(r){
- const a=r.audit||{},v=a.review||{},tips=[];
- if(r.status==="crashed")tips.push(hint(r.error.message)||"Read the full error on the failed step, fix it, then retry.");
- if(r.status==="incomplete")tips.push("The process stopped without a record. Retry the review.");
- if(tally(a.checks||[]).flag)tips.push("Fix the pre-push flags. They are computed facts, not model opinion.");
- if(r.status==="escalated"){
-  const fs=(a.diagnosis||{}).findings||[],off=fs.filter(offTarget).length;
-  if(v.entailment_ok===false){
-   if(off)tips.push(`${off} of ${fs.length} findings cite only passages from a different file. Retrieval found no code for those files, so the claims cannot follow from their citations. That is the main reason Entailed failed, not the wording.`);
-   if((a.runtime||{}).entailer!=="cross_encoder")tips.push("The entailer is lexical (it counts shared words), so a correct paraphrase can also fail. ENTAILER=cross_encoder judges meaning instead. The 0.25 bar is uncalibrated.")}
-  if(v.groundedness_ok===false)tips.push("Grounded failed: a citation was not retrieved or scored under the relevance bar. See the Evidence tab.");
-  if(v.risk_ok===false)tips.push("Risk failed: this severity always goes to a human under this codebase's policy. That is working as intended.");
-  if(v.permission_ok===false)tips.push("Permission failed: the proposed action is not on this codebase's allowlist.");
-  tips.push("Escalated means a human decides, not that the review is wrong. Read the findings yourself.")}
- if(!tips.length)return null;
- const c=el("div","callout"),body=el("div"),ul=el("ul");c.append(iconBox("bulb","","ic"));body.append(el("b",null,"What to do next"));
- for(const t of tips)ul.append(el("li",null,t));body.append(ul);c.append(body);return c;
+/* The facts an admin asks first, before opening any tab. */
+function glance(r){
+ const a=r.audit||{},rt=a.runtime||{},v=a.review,t=tally(a.checks||[]),[head,base]=targetParts(r.target);
+ const box=el("dl","card glance"),kv=(k,val,mono)=>{if(val==null||val==="")return;const d=el("div");d.append(el("dt",null,k),el("dd",mono?"mono":null,String(val)));box.append(d)};
+ const end=r.ended_at?new Date(r.ended_at):null,start=end&&r.total_ms?new Date(end.getTime()-r.total_ms):null;
+ const posted={executed:"Review written",escalated:"Nothing posted: a human decides",denied:"Declined: nothing written",
+  awaiting_approval:"Waiting for your y/n",abandoned:"Nothing written",human_review:"Sent to a human",crashed:"Nothing written",incomplete:"Nothing written"}[r.status];
+ kv("Codebase",`${r.tenant||"?"}${r.surface&&r.surface!=="code_review"?" · "+r.surface:""}`);
+ kv(base?"Branch under review":"Change",head,true);kv("Compared with",base,true);
+ kv("Result",[(STATUS[r.status]||[r.status])[0],posted].filter(Boolean).join(" — "));
+ kv("Checks",[v?`${GATE.filter(c=>v[c[0]]).length} of 4 gate checks passed`:null,(a.checks||[]).length?`${t.flag} pre-push flag(s)`:null].filter(Boolean).join(" · "));
+ kv("Ran",start?`${when(start.toISOString())} → ${when(r.ended_at)} (${fmt(r.total_ms)})`:when(r.ended_at));
+ kv("Model server",rt.model_server,true);
+ if(rt.models)kv("Models",`diagnosis ${rt.models.diagnosis} · judge ${rt.models.judge} · entailer ${rt.entailer||"lexical"}`);
+ kv("Run id",r.run_id,true);
+ return box;
+}
+/* Why it ended this way and who does what next. Built server-side from the audit
+   record (app/monitor.py::guidance), so the reason quoted is the gate's own. */
+function guidePanel(r,openTab){
+ const g=r.guidance||{},why=g.why||[],steps=g.steps||[];if(!why.length&&!steps.length)return null;
+ const box=el("div","guide");
+ if(why.length){box.append(el("h4",null,"Why it ended this way"));const ul=el("ul","whyl");for(const w of why)ul.append(el("li",null,w));box.append(ul)}
+ const cols=el("div","cols");
+ for(const[who,title,sub,icon]of[["reviewer","Reviewer","Whoever reads this change","list"],["admin","Admin","Whoever runs the agent and owns its config","tool"]]){
+  const mine=steps.filter(s=>s.who===who);if(!mine.length)continue;
+  const col=el("div","col"),h=el("h5");h.append(iconBox(icon,"","ic"),el("span",null,`${title}: next steps`));col.append(h,el("p","who",sub));
+  const ol=el("ol");
+  for(const s of mine){const li=el("li");li.append(document.createTextNode(s.text));
+   if(s.tab){const b=el("button","linkbtn",`Open ${({findings:"Findings",evidence:"Evidence",prepush:"Pre-push checks",steps:"Steps",gate:"Gate"})[s.tab]||s.tab} →`);b.onclick=e=>{e.stopPropagation();openTab(s.tab)};li.append(b)}
+   if(s.items&&s.items.length){const ul=el("ul");for(const it of s.items)ul.append(el("li",null,it));li.append(ul)}
+   if(s.command){const row=el("div","cmdrow"),cb=el("button","btn");cb.append(ico("retry"),el("span",null,"Copy"));
+    cb.onclick=e=>{e.stopPropagation();copy(s.command,cb)};row.append(cb,el("div","cmd",s.command));li.append(row)}
+   ol.append(li)}
+  col.append(ol);cols.append(col)}
+ box.append(cols);return box;
 }
 async function copy(text,btn){
  let ok=false;try{await navigator.clipboard.writeText(text);ok=true}catch(e){}
@@ -635,7 +703,8 @@ function actionsBar(r){
 }
 function detailFor(r){
  const a=r.audit||{},box=el("div"),t=tally(a.checks||[]),fs=((a.diagnosis||{}).findings||[]).length||(a.diagnosis||{}).findings_count||0;
- add(box,actionsBar(r),nextSteps(r));
+ let show=()=>{};   // assigned below, once the tabs exist; guidance links call it
+ add(box,glance(r),guidePanel(r,k=>{show(k);tabsEl.scrollIntoView({block:"nearest",behavior:"smooth"})}),actionsBar(r));
  if(a.provisional){const n=el("div","banner show");n.style.cssText="display:flex;border-color:var(--info-bd);background:var(--info-bg);color:var(--ink2)";
   n.append(ico("pause"),el("span",null,"This run stopped at the approval prompt, so it wrote no audit record yet. The checks and evidence below come from its live snapshot: ids and scores only, no finding text."));box.append(n)}
  const gateOk=a.review?GATE.filter(c=>a.review[c[0]]).length:null;
@@ -644,9 +713,9 @@ function detailFor(r){
   ["gate","Gate",gateOk!=null?`${gateOk}/4`:null,gateOk===4?"ok":gateOk!=null?"err":""],
   ["findings","Findings",a.diagnosis?String(fs):null,""],["evidence","Evidence",a.retrieved?String((a.retrieved||[]).length):null,""],
   ["details","Details",null,""]];
- const tabs=el("div","tabs"),panel=el("div");tabs.setAttribute("role","tablist");
+ const tabs=el("div","tabs"),panel=el("div"),tabsEl=tabs;tabs.setAttribute("role","tablist");
  const cur=tabOf.get(r.run_id)||"steps";
- const show=k=>{tabOf.set(r.run_id,k);for(const b of tabs.children)b.setAttribute("aria-selected",String(b.dataset.k===k));
+ show=k=>{tabOf.set(r.run_id,k);for(const b of tabs.children)b.setAttribute("aria-selected",String(b.dataset.k===k));
   panel.replaceChildren(({steps:()=>stepsTab(r),prepush:()=>prepushTab(a),gate:()=>gateTab(a),findings:()=>findingsTab(a),evidence:()=>evidenceTab(a),details:()=>detailsTab(r)})[k]())};
  for(const[k,l,n,cls]of TABS){const b=el("button","tab");b.dataset.k=k;b.setAttribute("role","tab");b.append(el("span",null,l));
   if(n!=null)b.append(el("span","n "+cls,n));b.onclick=()=>show(k);tabs.append(b)}
@@ -656,7 +725,9 @@ function runRow(r){
  const isOpen=openRuns.has(r.run_id),wrap=el("div","run"+(isOpen?" open":"")),row=el("button","rrow");
  row.setAttribute("aria-expanded",String(isOpen));
  const[lbl,cls]=STATUS[r.status]||[r.status,"b-idle"],stc=el("span","r-st");stc.append(badge(lbl,cls));
- const run=el("span","r-run");run.append(el("b",null,`${r.tenant||"?"} · ${r.target||""}`),el("span",null,String(r.run_id||"").slice(0,8)));
+ const run=el("span","r-run"),[head,base]=targetParts(r.target),tg=el("span","tg",head);
+ run.title=`${r.tenant||"?"} · ${r.target||"staged"}`;
+ add(run,el("b",null,r.tenant||"?"),tg,base&&el("span","vs","vs "+base),el("span","rid",String(r.run_id||"").slice(0,8)));
  const strip=el("span","strip r-strip");
  for(const n of expected(r)){const s=[...r.steps].reverse().find(x=>x.name===n);
   const i=el("i",s?"s-"+(s.status==="ok"?((s.retries||[]).length?"retry":"ok"):s.status):null);i.title=LABEL(n)+(s?`: ${s.status}${(s.retries||[]).length?`, ${s.retries.length} retry`:""}`:": not reached");strip.append(i)}
@@ -672,7 +743,7 @@ function matches(r,q){if(!q)return true;const a=r.audit||{};
   ...(((a.diagnosis||{}).findings)||[]).map(f=>`${f.file} ${f.issue}`)].join(" ").toLowerCase();return hay.includes(q)}
 function renderFilters(recent){
  const f=document.getElementById("filters");f.replaceChildren();
- for(const[k,l]of FILTERS){const n=k==="all"?recent.length:recent.filter(r=>bucket(r)===k).length;
+ for(const[k,l]of FILTERS){const n=recent.filter(r=>inFilter(r,k)).length;
   const b=el("button");b.append(el("span",null,l),el("span","n",String(n)));b.setAttribute("aria-pressed",String(filter===k));
   b.onclick=()=>{filter=k;lastSig="";render(latest)};f.append(b)}
 }
@@ -681,7 +752,7 @@ function renderHistory(recent){
  if(!seeded&&recent.length){openRuns.add(recent[0].run_id);seeded=true}
  renderFilters(recent);
  const h=document.getElementById("history");h.replaceChildren();
- const shown=recent.filter(r=>(filter==="all"||bucket(r)===filter)&&matches(r,query));
+ const shown=recent.filter(r=>inFilter(r,filter)&&matches(r,query));
  if(!shown.length)h.append(el("div","empty",recent.length?"No runs match.":"No runs yet. Start one with python -m app.review --tenant <name>"));
  for(const r of shown)h.append(runRow(r));
 }
@@ -691,10 +762,13 @@ function renderChrome(s){
  const live=liveJobs(s),m=s.models,tbl=m.table||[],ready=tbl.filter(r=>r.state==="ready").length,bad=tbl.filter(r=>["missing","not_loaded"].includes(r.state)).length;
  const f=s.recent.filter(r=>bucket(r)==="failed").length,set=(id,t)=>{document.getElementById(id).textContent=t};
  set("peek-running",live.length?`${live.length} in progress`:"Nothing running");
- set("peek-models",!m.reachable?`LM Studio not reachable at ${m.url}. Start it with: lms server start`:
-  `LM Studio up at ${m.url} · ${m.loaded.length} of ${m.available} downloaded models loaded · profile ${(m.runtime||{}).profile||"?"} `+
+ const local=/localhost|127\.0\.0\.1/.test(m.url||"");
+ set("peek-models",!m.reachable?(local?`LM Studio not reachable at ${m.url}. Start it with: lms server start`:`Model server not reachable at ${m.url}: ${firstLine(m.error)||"no answer"}`):
+  (m.api==="openai"?`Model gateway up at ${m.url} · ${m.served} model${m.served===1?"":"s"} served`:
+   `LM Studio up at ${m.url} · ${m.loaded.length} of ${m.available} downloaded models loaded`)+` · profile ${(m.runtime||{}).profile||"?"} `+
   ((m.runtime||{}).source==="run"?`(as used by the review at ${when(m.runtime.as_of)})`:"(from this shell; no review has recorded its models yet)"));
- set("peek-history",`${s.recent.length} recent runs${f?` · ${f} crashed or stopped`:""}`);
+ const n=s.recent.length;
+ set("peek-history",`${n} recent run${n===1?"":"s"}${f?` · ${f} crashed or stopped`:""}`);
  const nr=document.getElementById("nav-running");nr.textContent=String(live.length);nr.className="cnt"+(live.length?" warn":"");
  const nm=document.getElementById("nav-models");nm.textContent=!m.reachable?"off":bad?`${bad} !`:`${ready}`;nm.className="cnt"+(!m.reachable||bad?" err":"");
  const nh=document.getElementById("nav-history");nh.textContent=String(s.recent.length);nh.className="cnt"+(f?" err":"");

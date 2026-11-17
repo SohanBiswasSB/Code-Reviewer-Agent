@@ -15,9 +15,16 @@ PASS, FLAG, SKIP = "pass", "flag", "skip"
 MAX_REPORTED = 8          # per check, so one bad file cannot drown the review
 
 
-def result(check: str, step: int, status: str, message: str,
-           file: str | None = None, line: int | None = None) -> dict:
-    """One check outcome. Plain dict: it travels through the checkpoint."""
+def result(check: str, step: int, status: str, message: str, *where: str | int | None) -> dict:
+    """One check outcome. Plain dict: it travels through the checkpoint.
+
+    `where` is the optional `(file, line)` the outcome points at, passed
+    positionally as every check always has; a variadic tail keeps the fixed
+    signature inside the five-argument limit without touching ~50 callers.
+    """
+    if len(where) > 2:
+        raise TypeError(f"result() takes at most 6 positional arguments ({4 + len(where)} given)")
+    file, line = (*where, None, None)[:2]
     out = {"check": check, "step": step, "status": status, "message": message}
     if file:
         out["file"] = file

@@ -189,7 +189,14 @@
           3,
           "needs network access and artifact writer rights"
         ]
-      ]
+      ],
+      "standards": {
+        "_comment": "Coding standards (tools/prepush/standards/). Django pack declared, not guessed. UUID primary keys are this repo's house rule (H-14; 429 UUIDField primary keys measured 2026-11-17). Soft delete is NOT enabled: only one model carries deleted_at, so the rule would flag nearly every new model.",
+        "frameworks": [
+          "django"
+        ],
+        "require_uuid_pk": true
+      }
     }
   }
 }

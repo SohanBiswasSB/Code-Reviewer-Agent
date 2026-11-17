@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import pathlib
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from datadir import data_dir
@@ -97,9 +98,24 @@ def summarize(stage: str, out) -> dict:
     return detail
 
 
-def stage(state: dict, name: str, status: str, *, duration_ms: float | None = None,
-          detail: dict | None = None, error: str | None = None) -> None:
-    """Record one stage transition (`running` | `ok` | `error` | `waiting`)."""
+@dataclass(frozen=True)
+class StageOutcome:
+    """What a stage transition reports beyond its status: how long the stage
+    took, the safe facts `summarize` drew from its output, and the error text
+    when it failed. All optional -- a `running` transition has none of them."""
+
+    duration_ms: float | None = None
+    detail: dict | None = None
+    error: str | None = None
+
+
+def stage(state: dict, name: str, status: str, **outcome) -> None:
+    """Record one stage transition (`running` | `ok` | `error` | `waiting`).
+
+    `outcome` is `StageOutcome`'s fields by keyword (`duration_ms`, `detail`,
+    `error`); an unknown keyword is a TypeError, as it was when they were named.
+    """
+    result = StageOutcome(**outcome)
     key = state.get("thread_id") or state.get("_run_id")
     if not key:
         return
@@ -115,12 +131,12 @@ def stage(state: dict, name: str, status: str, *, duration_ms: float | None = No
         entry = {"name": name, "started_at": _now()}
         stages.append(entry)
     entry["status"] = status
-    if duration_ms is not None:
-        entry["duration_ms"] = round(duration_ms, 1)
-    if detail:
-        entry["detail"] = detail
-    if error:
-        entry["error"] = error[:300]
+    if result.duration_ms is not None:
+        entry["duration_ms"] = round(result.duration_ms, 1)
+    if result.detail:
+        entry["detail"] = result.detail
+    if result.error:
+        entry["error"] = result.error[:300]
     snap["status"] = status if status in ("error", "waiting") else (
         "finished" if name == "audit" and status == "ok" else "running")
     _write(path, snap)
@@ -135,6 +151,46 @@ def finish(state_or_key, status: str) -> None:
     if snap:
         snap.update(status=status, updated_at=_now())
         _write(path, snap)
+
+
+# ── long jobs that are not graph runs (calibration, ...) ─────────────────────
+class JobProgress:
+    """Phase and progress of a long non-graph job, rewritten as it goes.
+
+    Added 2026-11-17 because a 15-minute `tools.calibrate` showed nothing on the
+    monitor: "Now running: 0" while the gateway was busy, which reads as idle.
+    Same shape as `IngestProgress` (status, phase, done/total, ETA), plus a `kind`
+    and a human `title`, so the page can draw any job with one card. Written to
+    `job-<id>.json`, never `run-*` -- the page draws run files as graph runs.
+    """
+
+    def __init__(self, kind: str, job_id: str, title: str, **meta):
+        """Write the `starting` snapshot at once, so the job shows immediately."""
+        self.path = live_dir() / f"job-{_safe(job_id)}.json"
+        self.started = time.time()
+        self.data = {"kind": kind, "id": job_id, "title": title, "started_at": _now(),
+                     "updated_at": _now(), "status": "running", "phase": "starting",
+                     "done": 0, "total": 0, **meta}
+        _write(self.path, self.data)
+
+    def phase(self, name: str, **extra) -> None:
+        """Enter a named phase."""
+        self.data.update(phase=name, updated_at=_now(), **extra)
+        _write(self.path, self.data)
+
+    def progress(self, done: int, total: int) -> None:
+        """Items done of total, with a rate and ETA measured since the job began."""
+        elapsed = max(time.time() - self.started, 1e-6)
+        rate = done / elapsed
+        self.data.update(done=done, total=total, rate=round(rate, 2), updated_at=_now(),
+                         eta_s=round((total - done) / rate) if rate else None)
+        _write(self.path, self.data)
+
+    def end(self, status: str, **extra) -> None:
+        """`finished`, `error` or `interrupted`, with the total wall time."""
+        self.data.update(status=status, phase=status, updated_at=_now(),
+                         elapsed_s=round(time.time() - self.started, 1), **extra)
+        _write(self.path, self.data)
 
 
 # ── ingest ───────────────────────────────────────────────────────────────────

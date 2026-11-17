@@ -33,7 +33,7 @@ import os
 import platform as _platform
 import sys
 
-from errors import CONFIG_ERRORS
+from errors import CONFIG_ERRORS, ProviderAuthError
 from schemas.policy import policy_errors  # stdlib-only, like errors
 
 OK, WARN, FAIL = "OK  ", "WARN", "FAIL"
@@ -132,10 +132,12 @@ def _check_lmstudio(r: Report, models: dict) -> None:
 
     try:
         loaded = llm_lmstudio.available_models()
-    except ConnectionError as e:
+    except (ConnectionError, ProviderAuthError) as e:
+        # ProviderAuthError: reached, but the key was refused (HTTP 401/403).
         r.add(FAIL, "lm studio server", str(e))
         return
     r.add(OK, "lm studio server", f"{llm_lmstudio.base_url()} ({len(loaded)} model(s) available)")
+    _check_key_transport(r, llm_lmstudio.base_url())
 
     for role in ("diagnosis", "judge", "utility", "embedding"):
         wanted = models.get(role)
@@ -152,6 +154,24 @@ def _check_lmstudio(r: Report, models: dict) -> None:
             hint = (f"ambiguous or near-miss: {near} -- matching is strict (T26)"
                     if near else f"not available (fetch: lms get {wanted})")
             r.add(WARN, f"model: {role}", f"{wanted} {hint}")
+
+
+def _check_key_transport(r: Report, url: str) -> None:
+    """WARN when `LMSTUDIO_API_KEY` would travel as a Bearer token over plain http.
+
+    A WARN, not a FAIL: plain http over a tailnet is still encrypted by
+    WireGuard, and localhost never leaves the machine. Doctor cannot tell a
+    tailnet from the open internet, so it says so and leaves the call to the
+    reader. Reports nothing when no key is set, since there is nothing to leak.
+    """
+    if not os.getenv("LMSTUDIO_API_KEY"):
+        return
+    if url.lower().startswith("https://"):
+        r.add(OK, "api key transport", "LMSTUDIO_API_KEY is sent over https")
+    else:
+        r.add(WARN, "api key transport",
+              f"LMSTUDIO_API_KEY is sent in clear text to {url}. Use https:// unless "
+              f"this host is localhost or on a tailnet.")
 
 
 def _check_local_stack(r: Report) -> None:

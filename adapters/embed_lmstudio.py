@@ -25,7 +25,7 @@ import os
 
 from openai import OpenAI
 
-from adapters.llm_lmstudio import with_retry
+from adapters.llm_lmstudio import api_key, with_retry
 from adapters.platforms import base
 from app.activity import ActivityLogger
 from registry import adapter
@@ -57,17 +57,20 @@ class LMStudioEmbedder:
 
         `config.get_embedder()` passes neither, and should not: the pin is what keeps
         an index and its `min_relevance_score` meaningful. The client is created on
-        first use, against `LMSTUDIO_BASE_URL`.
+        first use, against `LMSTUDIO_BASE_URL` with `LMSTUDIO_API_KEY`. Both are read
+        here, so `config.get_retriever` keys its shared instance on both.
         """
         self.model = model or base.EMBEDDING_MODEL
         self.dims = dims or base.EMBEDDING_DIMS
         self.base_url = os.getenv("LMSTUDIO_BASE_URL", "http://localhost:1234/v1")
+        self._api_key = api_key()
         self._client = None
 
     def _get_client(self):
         if self._client is None:
             # Same policy as the LLM adapter: one visible retry loop, not two.
-            self._client = OpenAI(base_url=self.base_url, api_key="lm-studio", max_retries=0)
+            self._client = OpenAI(base_url=self.base_url, api_key=self._api_key,
+                                  max_retries=0)
         return self._client
 
     def embed(self, texts: list[str], *, kind: str = "passage") -> list[list[float]]:

@@ -3,12 +3,21 @@
 No model is called here. These tests cover the wiring that makes it *impossible*
 to accidentally review a diagnosis with the model that produced it.
 """
+import asyncio
+import json
 import os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
 import config
 from adapters import llm_lmstudio
+from adapters.embed_lmstudio import LMStudioEmbedder
+from app import doctor
+from app import main as api
+from app.api_models import RunRequestV1
+from errors import ConfigError, ProviderAuthError
 
 
 @pytest.fixture(autouse=True)
@@ -167,7 +176,6 @@ def test_an_unresolvable_model_fails_with_the_near_misses(monkeypatch):
 def test_doctor_gate_check_is_model_free_even_in_a_configured_shell(monkeypatch):
     """The shell that RUNS the agent exports LLM_PROVIDER=lmstudio; doctor's gate
     check must still use the stub, and must leave the shell's value alone."""
-    from app import doctor
     monkeypatch.setenv("LLM_PROVIDER", "lmstudio")
     monkeypatch.setattr(llm_lmstudio.LMStudioLLM, "complete",
                         lambda *a, **k: pytest.fail("the gate check reached a real model"))
@@ -270,3 +278,130 @@ def test_the_gate_suite_is_offline_by_default():
 
     source = __import__("pathlib").Path(harness.__file__).read_text()
     assert 'os.environ.setdefault("LLM_PROVIDER", "stub")' in source
+
+
+# ── the gateway key (LMSTUDIO_API_KEY) ───────────────────────────────────────
+KEY = "sk-test-gateway-key-0123456789"
+
+
+class _Gateway(BaseHTTPRequestHandler):
+    """A model server that wants KEY, like a hosted gateway, and records what it saw."""
+
+    seen: list = []
+
+    def serve_get(self):
+        """Answer GET /v1/models: 200 with one model for the right key, else 401."""
+        auth = self.headers.get("Authorization")
+        _Gateway.seen.append(auth)
+        if auth != f"Bearer {KEY}":
+            self.send_response(401)
+            self.end_headers()
+            return
+        body = json.dumps({"data": [{"id": "qwen3-4b"}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(body)
+
+    # http.server routes a request to the attribute "do_" + its HTTP method.
+    do_GET = serve_get
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.fixture
+def gateway():
+    _Gateway.seen = []
+    srv = HTTPServer(("127.0.0.1", 0), _Gateway)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{srv.server_address[1]}/v1"
+    srv.shutdown()
+    srv.server_close()
+
+
+def test_the_model_listing_sends_the_key_as_a_bearer_token(monkeypatch, gateway):
+    monkeypatch.setenv("LMSTUDIO_API_KEY", KEY)
+    assert llm_lmstudio.available_models(gateway) == ["qwen3-4b"]
+    assert _Gateway.seen == [f"Bearer {KEY}"]
+
+
+def test_without_a_key_nothing_is_sent_and_bare_lm_studio_is_unchanged(monkeypatch, gateway):
+    monkeypatch.delenv("LMSTUDIO_API_KEY", raising=False)
+    assert llm_lmstudio.api_key() == llm_lmstudio.PLACEHOLDER_KEY
+    assert llm_lmstudio.auth_headers() == {}
+    # A gateway that wants a key, reached with none: the message must say none
+    # was set (the key file was not loaded), not that a key was refused.
+    with pytest.raises(ProviderAuthError, match="is not set") as e:
+        llm_lmstudio.available_models(gateway)
+    assert "refused" not in str(e.value)
+    assert _Gateway.seen == [None]
+
+
+def test_a_refused_key_says_so_and_is_not_retried(monkeypatch, gateway):
+    """A 401 is a reached server with the wrong key: "start LM Studio" would send
+    the reader the wrong way, and retrying a bad key only costs the backoff."""
+    monkeypatch.setenv("LMSTUDIO_API_KEY", "wrong")
+    with pytest.raises(ProviderAuthError, match="LMSTUDIO_API_KEY") as e:
+        llm_lmstudio.available_models(gateway)
+    assert "lms server start" not in str(e.value)
+    assert llm_lmstudio.transient_reason(e.value) is None
+    # Not a PermissionError: in this graph that means "tenant refused" or "human
+    # denied", and both /run and /approve catch it as such.
+    assert isinstance(e.value, ConfigError) and not isinstance(e.value, PermissionError)
+
+
+def test_run_with_a_refused_key_is_not_reported_as_a_tenant_refusal(monkeypatch, gateway):
+    """/run maps PermissionError to "403: the tenant has not enabled this surface".
+    A refused gateway key raised mid-review must not come back looking like that."""
+    monkeypatch.setenv("LMSTUDIO_API_KEY", "wrong")
+
+    class _Graph:
+        async def ainvoke(self, *a, **k):
+            # Where a real run hits the gateway: resolving the model id.
+            llm_lmstudio.available_models(gateway)
+
+    monkeypatch.setattr(api, "get_graph", lambda: _Graph())
+    with pytest.raises(ProviderAuthError):
+        asyncio.run(api.run_surface_v1("code_review", RunRequestV1(target="HEAD")))
+
+
+def test_the_chat_client_and_the_embedder_carry_the_key(monkeypatch):
+    monkeypatch.setenv("LMSTUDIO_API_KEY", KEY)
+    llm = llm_lmstudio.LMStudioLLM(model="qwen3-4b", role="judge")
+    emb = LMStudioEmbedder()
+    assert llm._get_client().api_key == KEY
+    assert emb._get_client().api_key == KEY
+    # The key never appears where a record or a page could pick it up.
+    assert KEY not in repr(llm) and KEY not in repr(emb)
+
+
+def test_doctor_never_prints_the_key(monkeypatch, gateway):
+    monkeypatch.setenv("LMSTUDIO_API_KEY", KEY)
+    monkeypatch.setenv("LMSTUDIO_BASE_URL", gateway)
+    r = doctor.Report()
+    doctor._check_lmstudio(r, {"judge": "qwen3-4b"})
+    assert r.failed == 0
+    assert KEY not in r.render() and KEY not in json.dumps(r.as_dict())
+
+
+def test_doctor_reports_a_refused_key_as_a_failure_not_a_crash(monkeypatch, gateway):
+    monkeypatch.setenv("LMSTUDIO_API_KEY", "wrong")
+    monkeypatch.setenv("LMSTUDIO_BASE_URL", gateway)
+    r = doctor.Report()
+    doctor._check_lmstudio(r, {"judge": "qwen3-4b"})
+    assert r.lines == [(doctor.FAIL, "lm studio server", r.lines[0][2])]
+    assert "refused the API key" in r.lines[0][2]
+
+
+@pytest.mark.parametrize(("url", "key", "expect"), [
+    ("https://gw.example/v1", KEY, "OK"),
+    ("http://203.0.113.5:1234/v1", KEY, "WARN"),
+    ("http://203.0.113.5:1234/v1", "", None),     # no key: nothing to leak
+])
+def test_doctor_warns_when_the_key_would_travel_in_clear_text(monkeypatch, url, key, expect):
+    monkeypatch.setenv("LMSTUDIO_API_KEY", key)
+    r = doctor.Report()
+    doctor._check_key_transport(r, url)
+    got = [s.strip() for s, c, _ in r.lines if c == "api key transport"]
+    assert got == ([expect] if expect else [])

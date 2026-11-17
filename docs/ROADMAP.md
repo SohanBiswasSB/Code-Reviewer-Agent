@@ -18,7 +18,7 @@ node docstring + this file. Honesty about scope reads stronger than vague confid
 P0 (must close):
 - [x] G1 tenant-scoped retrieval (namespace per codebase)   *(port + ENFORCEMENT: an
       adapter that cannot honour a namespace refuses; T10's namespaced ingest is real, and
-      masterclass + milesone retrieve from their own index)*
+      merger_app + milesone retrieve from their own index)*
 - [x] G2 graph dispatches through the active Surface          *(T5: source/query/classify/prompts/sink)*
 - [ ] G3 per-tenant credentials (secret ref) + API authN/Z    *(CredentialProvider port done)*
 - [x] G4 log-review detect→aggregate→sample pipeline  *(adapters/detectors.py + source_s3logs)*

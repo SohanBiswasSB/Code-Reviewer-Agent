@@ -46,6 +46,7 @@ An index that is simply NOT BUILT returns `[]`: that is the truthful answer to
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 
 from registry import adapter
 from tools.bm25 import BM25
@@ -62,6 +63,66 @@ WIDE_FACTOR = 4
 # both backends ranked mediocre can still win on a real reading of the pair.
 RERANK_CANDIDATES = int(os.getenv("RERANK_CANDIDATES", "100"))
 _UNSET = object()
+
+
+@dataclass(frozen=True)
+class _Query:
+    """One retrieval request as the backends see it: the text (for BM25 and the
+    reranker), its embedding (for the dense side), the namespace both search, and
+    how many candidates each backend contributes before fusion."""
+
+    text: str
+    namespace: str
+    vector: list
+    wide: int
+
+
+def _require_namespace(namespace: str | None) -> None:
+    """Refuse an un-namespaced request (G1): there is no global index to fall
+    back on, and there must never be one."""
+    if not namespace:
+        raise ValueError(
+            "G1: IndexedRetriever needs a namespace. The tenant declares no "
+            "codebase.repo, so there is no index it may search -- and there is "
+            "deliberately no global one. Bind the tenant to a codebase in its "
+            "policy.json, or use RETRIEVER=hybrid for the offline demo corpus.")
+
+
+def _build_hits(ordered: list[tuple[str, float]], relevance: dict, meta_by_id: dict) -> list[dict]:
+    """The fused candidates as hits, in fusion order, each with its cosine as `score`.
+
+    A chunk the index cannot score gets 0.0 -- fail closed: it can be read, but
+    it cannot ground anything.
+    """
+    out = []
+    for position, (cid, fusion) in enumerate(ordered, start=1):
+        meta = meta_by_id.get(cid, {})
+        out.append({
+            "id": cid,
+            "text": meta.get("text", ""),
+            "score": relevance.get(cid, 0.0),
+            "score_kind": "cosine",
+            "cosine": relevance.get(cid, 0.0),
+            "fusion": round(fusion, 6),
+            "rank": position,
+            "path": meta.get("path"),
+            "name": meta.get("name"),
+            "start_line": meta.get("start_line"),
+            "end_line": meta.get("end_line"),
+        })
+    return out
+
+
+def _reranked(reranker, query: str, hits: list[dict], k: int) -> list[dict]:
+    """The best `k` of `hits` in rerank order, `score` now the RERANK score.
+
+    The cosine stays on each hit as `cosine`; `score_kind` says which number
+    `score` is, so the gate picks the bar measured for that model.
+    """
+    reranked = reranker.rerank(query, hits, top_n=k)
+    for position, hit in enumerate(reranked, start=1):
+        hit.update(score=hit.pop("rerank"), score_kind="rerank", rank=position)
+    return reranked
 
 
 @adapter("retriever", "indexed")
@@ -164,12 +225,7 @@ class IndexedRetriever:
         and line span. See the module docstring for the refusals; an unbuilt
         namespace returns [].
         """
-        if not namespace:
-            raise ValueError(
-                "G1: IndexedRetriever needs a namespace. The tenant declares no "
-                "codebase.repo, so there is no index it may search -- and there is "
-                "deliberately no global one. Bind the tenant to a codebase in its "
-                "policy.json, or use RETRIEVER=hybrid for the offline demo corpus.")
+        _require_namespace(namespace)
 
         stats = self.index.stats(namespace)
         if not stats.get("built") or not stats.get("chunks"):
@@ -178,49 +234,47 @@ class IndexedRetriever:
 
         reranker = self.reranker
         pool = max(k, RERANK_CANDIDATES) if reranker is not None else k
-        wide = max(WIDE_MIN, k * WIDE_FACTOR, pool)
-        qvec = self.embedder.embed([query], kind="query")[0]
+        q = _Query(text=query, namespace=namespace,
+                   vector=self.embedder.embed([query], kind="query")[0],
+                   wide=max(WIDE_MIN, k * WIDE_FACTOR, pool))
+        hits = self._candidates(q, stats.get("fingerprint", ""), pool)
+        if reranker is None:
+            return hits[:k]
+        return _reranked(reranker, query, hits, k)
 
-        dense_hits = self.index.search(namespace, qvec, wide)
-        relevance = {h["id"]: h["score"] for h in dense_hits}
-        meta_by_id = {h["id"]: h for h in dense_hits}
+    def _candidates(self, q: _Query, fingerprint: str, pool: int) -> list[dict]:
+        """The top `pool` fused candidates as hits, each with a real cosine."""
+        ordered, dense_hits, metas = self._fused(q, fingerprint, pool)
+        relevance, meta_by_id = self._cosines(q, ordered, dense_hits, metas)
+        return _build_hits(ordered, relevance, meta_by_id)
 
-        bm25, metas = self._sparse(namespace, stats.get("fingerprint", ""))
-        sparse_ids = [metas[i]["id"] for i, _ in bm25.top(query, wide)]
+    def _fused(self, q: _Query, fingerprint: str, pool: int):
+        """(ordered, dense_hits, metas): the RRF ranking of the dense and BM25
+        lists cut to `pool`, plus what each backend returned, for `_cosines`.
 
+        RRF supplies ORDER only; the fusion value carries no magnitude and is
+        never what the gate reads.
+        """
+        dense_hits = self.index.search(q.namespace, q.vector, q.wide)
+        bm25, metas = self._sparse(q.namespace, fingerprint)
+        sparse_ids = [metas[i]["id"] for i, _ in bm25.top(q.text, q.wide)]
         fused = reciprocal_rank_fusion([[h["id"] for h in dense_hits], sparse_ids])
         ordered = sorted(fused.items(), key=lambda p: p[1], reverse=True)[:pool]
+        return ordered, dense_hits, metas
 
-        # Keyword-only winners need a real cosine too, or they would reach the
-        # gate with no number at all (T21's sibling).
+    def _cosines(self, q: _Query, ordered: list, dense_hits: list[dict], metas: list[dict]):
+        """(relevance, meta_by_id) for every candidate in `ordered`.
+
+        Dense hits bring their cosine and metadata with them. Keyword-only
+        winners need a real cosine too, or they would reach the gate with no
+        number at all (T21's sibling), so theirs is looked up explicitly.
+        """
+        relevance = {h["id"]: h["score"] for h in dense_hits}
+        meta_by_id = {h["id"]: h for h in dense_hits}
         missing = [cid for cid, _ in ordered if cid not in relevance]
         if missing:
-            relevance.update(self.index.similarities(namespace, qvec, missing))
+            relevance.update(self.index.similarities(q.namespace, q.vector, missing))
             by_id = {m["id"]: m for m in metas}
             for cid in missing:
                 meta_by_id.setdefault(cid, by_id.get(cid, {}))
-
-        out = []
-        for position, (cid, fusion) in enumerate(ordered, start=1):
-            meta = meta_by_id.get(cid, {})
-            out.append({
-                "id": cid,
-                "text": meta.get("text", ""),
-                # A chunk the index cannot score gets 0.0 -- fail closed: it can
-                # be read, but it cannot ground anything.
-                "score": relevance.get(cid, 0.0),
-                "score_kind": "cosine",
-                "cosine": relevance.get(cid, 0.0),
-                "fusion": round(fusion, 6),
-                "rank": position,
-                "path": meta.get("path"),
-                "name": meta.get("name"),
-                "start_line": meta.get("start_line"),
-                "end_line": meta.get("end_line"),
-            })
-        if reranker is None:
-            return out[:k]
-        reranked = reranker.rerank(query, out, top_n=k)
-        for position, hit in enumerate(reranked, start=1):
-            hit.update(score=hit.pop("rerank"), score_kind="rerank", rank=position)
-        return reranked
+        return relevance, meta_by_id

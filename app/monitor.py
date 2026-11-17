@@ -54,20 +54,26 @@ import errno
 import json
 import os
 import pathlib
+import re
 import statistics
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import Counter
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import config
-from adapters.llm_lmstudio import base_url, resolves_to
-from app import activity, live
+from adapters.llm_lmstudio import auth_headers, available_models, base_url, resolves_to
+from adapters.vector_index_local import MANIFEST, namespace_dirname
+from adapters.vector_index_local import _root as index_root
+from app import activity
+from app import live as live_files  # aliased: runs()/snapshot() take a `live` job list
 from app.graph import STAGE_PLAN
 from datadir import data_dir
-from errors import CONFIG_ERRORS
+from errors import CONFIG_ERRORS, ConfigError
 
 HOST = "127.0.0.1"
 RECENT_RUNS = 20
@@ -215,10 +221,23 @@ def _fetch_server_models(root: str) -> dict:
 
     Never raises: an unreachable or garbled server is a `reachable: False` value
     the page renders, with a 1.5 s timeout so it cannot hold up a poll for long.
+    It sends `LMSTUDIO_API_KEY` when one is set. The key goes in the request
+    header only, never into the value the page receives. A gateway that does not
+    expose LM Studio's `/api/v0` shows as unreachable here, which is what the page
+    should report.
     """
+    request = urllib.request.Request(f"{root}/api/v0/models", headers=auth_headers())
     try:
-        with urllib.request.urlopen(f"{root}/api/v0/models", timeout=1.5) as resp:
+        with urllib.request.urlopen(request, timeout=1.5) as resp:
             data = json.loads(resp.read().decode("utf-8")).get("data", [])
+    except urllib.error.HTTPError as e:
+        # Caught before URLError, which it subclasses. A 404 is a server that is UP
+        # but is not LM Studio -- the devops gateway (2026-11-17) serves only the
+        # OpenAI-compatible /v1. Showing it as "not reachable" sent the reader to
+        # restart a server that was answering every review.
+        if e.code == 404:
+            return _fetch_openai_models(root)
+        return {"reachable": False, "url": root, "error": str(e)[:200], "models": []}
     except (urllib.error.URLError, OSError, ValueError) as e:
         return {"reachable": False, "url": root, "error": str(e)[:200], "models": []}
     return {"reachable": True, "url": root, "models": [{
@@ -226,6 +245,23 @@ def _fetch_server_models(root: str) -> dict:
         "quantization": m.get("quantization"), "format": m.get("compatibility_type"),
         "context": m.get("loaded_context_length") or m.get("max_context_length"),
     } for m in data]}
+
+
+def _fetch_openai_models(root: str) -> dict:
+    """The standard `GET /v1/models` list, for a server with no LM Studio `/api/v0`.
+
+    The OpenAI listing says which models are SERVED, not whether they are loaded,
+    so each gets `state: "served"` -- the honest value. A hosted gateway loads on
+    demand or keeps models resident; either way a served model answers a call.
+    Never raises, like `_fetch_server_models`; the key goes in the header only.
+    """
+    try:
+        ids = available_models(f"{root}/v1", timeout=3.0)
+    except (ConnectionError, ConfigError) as e:   # ProviderAuthError is a ConfigError
+        return {"reachable": False, "url": root, "error": str(e)[:200], "models": []}
+    return {"reachable": True, "url": root, "api": "openai",
+            "models": [{"id": m, "type": None, "state": "served", "quantization": None,
+                        "format": None, "context": None} for m in ids]}
 
 
 def _runtime(recent: list[dict]) -> dict:
@@ -280,50 +316,68 @@ def model_table(server: dict, runtime: dict) -> list[dict]:
     rows = []
     for role in ("diagnosis", "judge", "embedding", "utility"):
         want = assigned.get(role) or ""
-        hit = served(want)
-        if not server.get("reachable"):
-            state, note = "unknown", "model server not reachable"
-        elif hit is None:
-            state, note = "missing", f"not on this server -- lms get {want}"
-        elif hit["state"] == "loaded":
-            state = "ready"
-            note = ", ".join(str(x) for x in (
-                hit.get("format"), hit.get("quantization"),
-                hit.get("context") and f"ctx {hit['context']:,}") if x)
-        elif role == "utility":
-            # Never called by a code review, so "not loaded" is the right state
-            # for it, not a warning to act on.
-            state, note = "unused", f"not needed for a code review -- lms load {hit['id']}"
-        else:
-            state, note = "not_loaded", f"downloaded, not loaded -- lms load {hit['id']}"
+        state, note = _role_state(server, role, want, served(want))
         rows.append({"role": role, "does": ROLES[role], "model": want or "—",
                      "where": f"LM Studio · {server.get('url')}", "state": state,
                      "note": note})
-    rows.append(_reranker_row(runtime, assigned))
-    ent = runtime.get("entailer") or "lexical"
-    rows.append({"role": "entailer", "does": ROLES["entailer"],
-                 "model": assigned.get("entailer") or (
-                     "none -- word overlap" if ent == "lexical" else ent),
-                 "where": "in-process (this machine)",
-                 "state": "ready",
-                 "note": ("ENTAILER=lexical: cheap but strict on paraphrase; "
-                          "ENTAILER=cross_encoder is stronger") if ent == "lexical" else ""})
+    rows += [_reranker_row(runtime, assigned), _entailer_row(runtime, assigned)]
     used = {h["id"] for h in (served(m) for m in assigned.values() if m) if h}
-    for m in on_server:
-        if m["state"] == "loaded" and m["id"] not in used:
-            rows.append({"role": "(none)", "does": "Loaded in LM Studio but not used by "
-                         "this profile -- it only holds memory.", "model": m["id"],
-                         "where": f"LM Studio · {server.get('url')}", "state": "extra",
-                         "note": f"lms unload {m['id']}"})
-    return rows
+    return rows + _unused_loaded_rows(server, on_server, used)
+
+
+def _role_state(server: dict, role: str, want: str, hit: dict | None) -> tuple[str, str]:
+    """(state, note) for one model role, from what the server reports for it."""
+    if not server.get("reachable"):
+        return "unknown", "model server not reachable"
+    if hit is None:
+        return "missing", f"not on this server -- lms get {want}"
+    if hit["state"] == "served":
+        return "ready", f"served by {server.get('url')} (OpenAI API; load state not exposed)"
+    if hit["state"] == "loaded":
+        return "ready", ", ".join(str(x) for x in (
+            hit.get("format"), hit.get("quantization"),
+            hit.get("context") and f"ctx {hit['context']:,}") if x)
+    if role == "utility":
+        # Never called by a code review, so "not loaded" is the right state for
+        # it, not a warning to act on.
+        return "unused", f"not needed for a code review -- lms load {hit['id']}"
+    return "not_loaded", f"downloaded, not loaded -- lms load {hit['id']}"
+
+
+def _entailer_row(runtime: dict, assigned: dict) -> dict:
+    """The entailer's row: in-process, so always ready; the note says how strong."""
+    ent = runtime.get("entailer") or "lexical"
+    return {"role": "entailer", "does": ROLES["entailer"],
+            "model": assigned.get("entailer") or (
+                "none -- word overlap" if ent == "lexical" else ent),
+            "where": "in-process (this machine)", "state": "ready",
+            "note": ("ENTAILER=lexical: cheap but strict on paraphrase; "
+                     "ENTAILER=cross_encoder is stronger") if ent == "lexical" else ""}
+
+
+def _unused_loaded_rows(server: dict, on_server: list[dict], used: set[str]) -> list[dict]:
+    """Models loaded in LM Studio that this profile never calls: memory held for nothing."""
+    return [{"role": "(none)", "does": "Loaded in LM Studio but not used by this profile "
+             "-- it only holds memory.", "model": m["id"],
+             "where": f"LM Studio · {server.get('url')}", "state": "extra",
+             "note": f"lms unload {m['id']}"}
+            for m in on_server if m["state"] == "loaded" and m["id"] not in used]
 
 
 def models() -> dict:
-    """Server reachability plus the per-role table, in one block for the page."""
+    """Server reachability plus the per-role table, in one block for the page.
+
+    `api` says which listing answered. LM Studio's own API reports load state
+    ("loaded"); a plain OpenAI-compatible gateway only reports what it serves
+    ("served"). Counting only "loaded" read "0 loaded" for a gateway that was
+    answering every review.
+    """
     srv = server_models()
     loaded = [m for m in srv["models"] if m["state"] == "loaded"]
     return {"reachable": srv["reachable"], "url": srv["url"], "error": srv.get("error"),
-            "loaded": loaded, "available": len(srv["models"]), "_server": srv}
+            "api": srv.get("api", "lmstudio"), "loaded": loaded,
+            "served": sum(1 for m in srv["models"] if m["state"] == "served"),
+            "available": len(srv["models"]), "_server": srv}
 
 
 # ── history ──────────────────────────────────────────────────────────────────
@@ -393,7 +447,7 @@ class _RetryIndex:
         return self.between(stop - float(span.get("duration_ms") or 0) / 1000, stop)
 
 
-def retry_command(run: dict, runtime: dict) -> str:
+def retry_command(run: dict, runtime: dict, override: dict | None = None) -> str:
     """The exact command that re-runs this review, for the page's Retry button.
 
     The monitor stays read-only: it hands you the command rather than launching
@@ -401,16 +455,373 @@ def retry_command(run: dict, runtime: dict) -> str:
     other local site can start processes through.
     """
     rt = (run.get("audit") or {}).get("runtime") or runtime or {}
-    env = [f"CRA_PROFILE={rt['profile']}"] if rt.get("profile") else []
+    env = {"CRA_PROFILE": rt["profile"]} if rt.get("profile") else {}
     if rt.get("entailer") and rt["entailer"] != "lexical":
-        env.append(f"ENTAILER={rt['entailer']}")
+        env["ENTAILER"] = rt["entailer"]
     if rt.get("reranker") and rt["reranker"] != "none":
-        env.append(f"RERANKER={rt['reranker']}")
+        env["RERANKER"] = rt["reranker"]
+    env.update(override or {})
     target = run.get("target") or "staged"
     args = f"--tenant {run.get('tenant') or '<tenant>'}"
     if target != "staged":
         args += f" --target {target}"
-    return " ".join([*env, "python -m app.review", args])
+    return " ".join([*(f"{k}={v}" for k, v in env.items()), "python -m app.review", args])
+
+
+# ── what the page says under a run ───────────────────────────────────────────
+# The gate's own failure strings (nodes/independent_review.py) are the source of
+# truth for WHY a run escalated. The page used to infer the reason from the
+# findings' citations instead, and on 2026-11-17 it blamed a finding that had
+# PASSED while the one that failed sat just under the bar.
+_ENTAIL_FAIL = re.compile(r"^(?P<label>.+?) not entailed by its premise "
+                          r"\(score (?P<score>[0-9.]+) < (?P<bar>[0-9.]+)\)$")
+_FINDING_LABEL = re.compile(r"^finding (?P<n>\d+) \((?P<file>.*)\)$")
+_SEVERITY_FAIL = re.compile(r"^severity '(?P<sev>[^']*)' not in (?P<allowed>.*)$")
+_ACTION_FAIL = re.compile(r"^action '(?P<action>[^']*)' not in (?P<allowed>.*)$")
+
+
+def _entailment_text(m: re.Match) -> tuple[str, int | None]:
+    """An Entailed failure in words, and the finding number it names, if any."""
+    score, bar = float(m["score"]), float(m["bar"])
+    f = _FINDING_LABEL.match(m["label"])
+    what = f"Finding {f['n']} ({f['file']})" if f else f"The {m['label']}"
+    return (f"{what} scored {score:.3f} on Entailed against a bar of {bar:.2f} "
+            f"({bar - score:.3f} short): its claim did not clearly follow from the "
+            f"code it cites."), (int(f["n"]) if f else None)
+
+
+# (does it match?, what to say) for the gate's other failure strings, in order.
+_FAILURE_TEXT = (
+    (lambda t: t == "no citations",
+     lambda t, _m: ("The diagnosis cited no retrieved code, so nothing it says could be "
+                    "checked against the codebase.")),
+    (lambda t: t.startswith("citations not retrieved:"),
+     lambda t, _m: ("The model cited passages that retrieval never returned"
+                    f"{t[len('citations not retrieved'):]}. A citation that was not "
+                    "retrieved is usually invented.")),
+    (lambda t: t.startswith("citations below relevance:"),
+     lambda t, _m: ("Cited passages scored under the relevance bar"
+                    f"{t[len('citations below relevance'):]}.")),
+    (_SEVERITY_FAIL.match,
+     lambda t, m: (f"The change was rated {m['sev']} severity. This codebase's policy "
+                   f"lets only {m['allowed']} through without a human.")),
+    (_ACTION_FAIL.match,
+     lambda t, m: (f"The proposed action '{m['action']}' is not on this codebase's "
+                   f"allowed list {m['allowed']}.")),
+)
+
+
+def _explain_failure(text: str) -> tuple[str, int | None]:
+    """One gate failure in plain words, plus the finding number it names, if any."""
+    m = _ENTAIL_FAIL.match(text)
+    if m:
+        return _entailment_text(m)
+    for matches, say in _FAILURE_TEXT:
+        hit = matches(text)
+        if hit:
+            return say(text, hit), None
+    return text, None
+
+
+def _cited_files(finding: dict) -> list[str]:
+    """The files a finding's citations come from, in order, without duplicates."""
+    return list(dict.fromkeys(str(c).split(":", 1)[0] for c in finding.get("citation_ids") or []))
+
+
+def _unreachable_hint(server: str, local: bool) -> str:
+    """What to do when the model server did not answer: local and remote differ."""
+    return ("Could not reach the model server. Start it with: lms server start" if local
+            else f"Could not reach the model server at {server}. Check that it is up and "
+            "that LMSTUDIO_BASE_URL is right.")
+
+
+def _model_missing_hint(server: str, _local: bool) -> str:
+    """What to do when the server does not serve a role's model."""
+    return (f"The model this role needs is not served at {server}. "
+            "Run `python -m app.doctor` to see which.")
+
+
+# (substrings that identify the failure, the hint or a function of (server, local)).
+# First match wins, so the specific key errors come before the generic connection one.
+_CRASH_HINTS = (
+    (("LMSTUDIO_API_KEY is not set",),
+     "The model server needs an API key and none was loaded. Load your key file in the "
+     "shell that runs the review, then retry."),
+    (("refused the API key",),
+     "The model server refused the API key. Update it in your key file, check it with "
+     "doctor, then retry."),
+    (("prediction stream", "generation thread", "mlx_engine"),
+     "LM Studio's model backend crashed while generating, usually from memory pressure or "
+     "a prompt longer than the loaded context. Reload the model, then retry."),
+    (("Connection refused", "ConnectionError", "URLError", "APIConnectionError",
+      "not reachable"), _unreachable_hint),
+    (("context length", "context window", "n_ctx", "too many tokens"),
+     "The prompt is longer than the model's context window."),
+    (("timed out", "Timeout"),
+     "The model call timed out. Retry; if it repeats, the server is overloaded."),
+    (("Invalid model identifier", "no model", "No model"), _model_missing_hint),
+)
+
+
+def crash_hint(message: str, server: str) -> str:
+    """What to do about a crashed step, for the model server this run used."""
+    m = message or ""
+    local = any(h in server for h in ("localhost", "127.0.0.1"))
+    for needles, hint in _CRASH_HINTS:
+        if any(n in m for n in needles):
+            return hint(server, local) if callable(hint) else hint
+    return "Read the full error on the failed step (Steps tab), fix it, then retry."
+
+
+def _index_built_at(tenant: str) -> str | None:
+    """When this tenant's code index was built, or None if unknown or unbuilt."""
+    try:
+        policy = config.get_tenant_store().policy(tenant, "code_review")
+    except CONFIG_ERRORS:
+        return None
+    repo = (policy.get("codebase") or {}).get("repo")
+    if not repo:
+        return None
+    path = index_root() / namespace_dirname(repo) / MANIFEST
+    try:
+        return json.loads(path.read_text(encoding="utf-8")).get("built_at")
+    except (OSError, ValueError):
+        return None
+
+
+@dataclass(frozen=True)
+class _RunView:
+    """What the guidance reads from one run, parsed once.
+
+    `failed` maps a finding number the gate named to its file; `shortfall` is the
+    smallest gap under the entailment bar (None if Entailed did not fail).
+    """
+
+    run: dict
+    runtime: dict
+    audit: dict
+    review: dict
+    tenant: str
+    findings: list
+    failed: dict[int, str]
+    shortfall: float | None
+
+    @property
+    def entailer(self) -> str:
+        """The entailer this run used ('lexical' unless the run recorded otherwise)."""
+        return ((self.audit.get("runtime") or self.runtime or {}).get("entailer")
+                or "lexical")
+
+    def failures_matching(self, pattern: re.Pattern) -> re.Match | None:
+        """The first gate failure `pattern` matches, or None."""
+        return next((pattern.match(t) for t in self.review.get("failures") or []
+                     if pattern.match(t)), None)
+
+
+def _read_run(run: dict, runtime: dict) -> tuple[_RunView, list[str]]:
+    """The run's view, plus one plain-language 'why' line per gate failure."""
+    a = run.get("audit") or {}
+    review = a.get("review") or {}
+    findings = (a.get("diagnosis") or {}).get("findings") or []
+    why, failed, gaps = [], {}, []
+    for text in review.get("failures") or []:
+        line, n = _explain_failure(text)
+        why.append(line)
+        if n is not None:
+            failed[n] = (findings[n - 1].get("file") if 0 < n <= len(findings) else None) or "?"
+        m = _ENTAIL_FAIL.match(text)
+        if m:
+            gaps.append(float(m["bar"]) - float(m["score"]))
+    view = _RunView(run, runtime, a, review, run.get("tenant") or "<tenant>", findings,
+                    failed, min(gaps) if gaps else None)
+    return view, why
+
+
+def _step(who: str, text: str, **extra) -> dict:
+    """One next step: who acts, what to do, and any command, tab or list to show."""
+    return {"who": who, "text": text, **{k: v for k, v in extra.items() if v}}
+
+
+def _reviewer_escalated(v: _RunView) -> list[dict]:
+    """What the person reading an escalated change does next."""
+    others = len(v.findings) - len(v.failed)
+    rest = f"; the other {others} passed." if others else "."
+    if len(v.failed) == 1:
+        ((n, file),) = v.failed.items()
+        steps = [_step("reviewer", f"Read finding {n} ({file}) yourself. It is the one the "
+                       "gate could not verify" + rest, tab="findings")]
+    else:
+        # One step listing them: seven near-identical "read finding N" steps were
+        # noise an admin had to read seven times.
+        steps = [_step("reviewer", f"Read these {len(v.failed)} findings yourself. The gate "
+                       "could not verify them" + rest, tab="findings",
+                       items=[f"Finding {n} ({file})" for n, file in v.failed.items()])] \
+            if v.failed else []
+    if v.review.get("groundedness_ok") is False:
+        steps.append(_step("reviewer", "Open Evidence to see which citations were missing or "
+                           "scored under the bar.", tab="evidence"))
+    if v.review.get("risk_ok") is False:
+        steps.append(_step("reviewer", "Escalating this severity is the policy working as "
+                           "intended: a human reads it before anything is posted."))
+    steps.append(_step("reviewer", "Nothing was posted. If the findings hold up, post them "
+                       "yourself; the drafted comment is at the bottom of the Findings tab.",
+                       tab="findings"))
+    return steps
+
+
+def _admin_entailment(v: _RunView) -> list[dict]:
+    """Admin steps for an Entailed failure: a semantic retry, then a measured bar."""
+    steps = []
+    if v.entailer == "lexical":
+        near = f" The closest miss was {v.shortfall:.3f} under the bar." \
+            if v.shortfall is not None else ""
+        steps.append(_step("admin", "Re-run with the meaning-based entailer. The word-overlap "
+                           "entailer this run used also fails correct paraphrases." + near,
+                           command=retry_command(v.run, v.runtime,
+                                                 {"ENTAILER": "cross_encoder"})))
+    bar = (v.audit.get("gates") or {}).get("min_entailment_score")
+    steps.append(_step("admin", f"If good findings keep failing Entailed, measure {v.tenant}'s "
+                       f"entailment bar ({bar if bar is not None else 'default'}) instead of "
+                       "guessing it.",
+                       command=f"python -m tools.calibrate --tenant {v.tenant} entailment"))
+    return steps
+
+
+def _admin_policy(v: _RunView) -> list[dict]:
+    """Admin steps for Grounded, Risk and Permission failures."""
+    steps = []
+    if v.review.get("groundedness_ok") is False:
+        steps.append(_step("admin", "If the cited passages look relevant but scored under the "
+                           f"bar, measure {v.tenant}'s relevance bar.",
+                           command=f"python -m tools.calibrate --tenant {v.tenant} relevance"))
+    m = v.failures_matching(_SEVERITY_FAIL)
+    if m:
+        steps.append(_step("admin", f"To let {m['sev']} severity through without a human, add "
+                           f"it to severity_allowlist in tenants/{v.tenant}/policy.json. That "
+                           "is a policy decision, not a fix."))
+    m = v.failures_matching(_ACTION_FAIL)
+    if m:
+        steps.append(_step("admin", f"If '{m['action']}' should be allowed here, add it to "
+                           f"allowed_actions in tenants/{v.tenant}/policy.json."))
+    return steps
+
+
+def _guide_escalated(v: _RunView, _why: list[str]) -> list[dict]:
+    """Escalated: reviewer steps first, then the admin's. `why` is already the gate's."""
+    admin = _admin_entailment(v) if v.review.get("entailment_ok") is False else []
+    return _reviewer_escalated(v) + admin + _admin_policy(v)
+
+
+def _guide_crashed(v: _RunView, why: list[str]) -> list[dict]:
+    """Crashed: say where, then the server-aware hint and the retry."""
+    err = v.run.get("error") or {}
+    why.append(f"Crashed at {err.get('step')}: {_first_line(err.get('message'))}")
+    server = (v.audit.get("runtime") or v.runtime or {}).get("model_server") or base_url()
+    return [_step("admin", crash_hint(err.get("message") or "", server), tab="steps"),
+            _step("admin", "Then re-run it.", command=retry_command(v.run, v.runtime))]
+
+
+def _guide_incomplete(v: _RunView, why: list[str]) -> list[dict]:
+    """Stopped without a record: name the last step, offer the retry."""
+    last = (v.run.get("steps") or [{}])[-1].get("name") or "start"
+    why.append(f"Stopped after {last} without writing a record. The process was "
+               "probably killed (Ctrl-C, a closed terminal or a crash outside Python).")
+    return [_step("admin", "Re-run it.", command=retry_command(v.run, v.runtime))]
+
+
+def _guide_awaiting(_v: _RunView, why: list[str]) -> list[dict]:
+    """Paused at the approval prompt."""
+    why.append("Passed the checks and is paused at the approval prompt.")
+    return [_step("reviewer", "Answer the y/n prompt in the terminal that started this run. "
+                  "Nothing is written until you do.")]
+
+
+def _guide_abandoned(v: _RunView, why: list[str]) -> list[dict]:
+    """Nobody answered the prompt."""
+    why.append("Stopped at the approval prompt with nobody to answer it. Nothing was written.")
+    return [_step("reviewer", "Re-run it and answer the prompt.",
+                  command=retry_command(v.run, v.runtime))]
+
+
+def _guide_executed(v: _RunView, why: list[str]) -> list[dict]:
+    """Approved and written: say where."""
+    why.append("Passed all four checks and was approved.")
+    path = ((v.audit.get("result") or {}).get("review") or {}).get("markdown")
+    return [_step("reviewer", "Read the written review" + (f": {path}" if path else "."))]
+
+
+def _guide_denied(_v: _RunView, why: list[str]) -> list[dict]:
+    """Declined at the prompt: nothing to do."""
+    why.append("Passed the checks, but was declined at the approval prompt. "
+               "Nothing was written.")
+    return []
+
+
+def _guide_human_review(_v: _RunView, why: list[str]) -> list[dict]:
+    """Routed to a human by rule."""
+    why.append("Routed straight to a human by rule. No model looked at it.")
+    return [_step("reviewer", "Review the change yourself; the agent deliberately skips "
+                  "this kind of change.")]
+
+
+_STATUS_GUIDES = {"escalated": _guide_escalated, "crashed": _guide_crashed,
+                  "incomplete": _guide_incomplete, "awaiting_approval": _guide_awaiting,
+                  "abandoned": _guide_abandoned, "executed": _guide_executed,
+                  "denied": _guide_denied, "human_review": _guide_human_review}
+
+
+def _off_target_steps(v: _RunView, index_built: str | None) -> list[dict]:
+    """Findings citing only other files: a re-ingest hint, with which passed or failed."""
+    off = [(n, f) for n, f in enumerate(v.findings, start=1)
+           if f.get("file") and _cited_files(f) and f["file"] not in _cited_files(f)]
+    if not off:
+        return []
+    built = f" ({index_built})" if index_built else ""
+    return [_step("admin", "Some findings cite only other files: retrieval returned no code "
+                  "from the file they are about. If those files are new or changed since the "
+                  f"index was built{built}, re-ingest it.",
+                  items=[f"Finding {n} ({f['file']}) cites {', '.join(_cited_files(f))}"
+                         + (" — failed the gate" if n in v.failed else " — passed the gate")
+                         for n, f in off],
+                  command=f"python -m tools.ingest --tenant {v.tenant}")]
+
+
+def _prepush_steps(v: _RunView) -> list[dict]:
+    """The pre-push flags, grouped by file and check, as one reviewer step."""
+    flags = [c for c in v.audit.get("checks") or [] if c.get("status") == "flag"]
+    if not flags:
+        return []
+    by_file: dict[str, Counter] = {}
+    for c in flags:
+        where = c.get("file") or "(whole change)"
+        by_file.setdefault(where, Counter())[c.get("check") or "?"] += 1
+    plural = "s" if len(flags) > 1 else ""
+    return [_step("reviewer", f"Fix the {len(flags)} pre-push flag{plural}. Code computed "
+                  "these, not a model, so they are facts about the change.", tab="prepush",
+                  items=[f"{file}: " + ", ".join(f"{k.replace('_', ' ')} ×{n}"
+                                                 for k, n in counts.items())
+                         for file, counts in by_file.items()])]
+
+
+def guidance(run: dict, runtime: dict, index_built: str | None = None) -> dict:
+    """Why a run ended the way it did, and the next steps, split by who acts.
+
+    `why` holds plain-language facts read from the audit record. `steps` holds
+    actions, each with `who` ("reviewer": whoever reads this change; "admin":
+    whoever runs the agent and owns its config) and optionally a `command` to
+    copy, a `tab` of the run panel to open, and `items` to list.
+    """
+    view, why = _read_run(run, runtime)
+    guide = _STATUS_GUIDES.get(run.get("status"))
+    steps = guide(view, why) if guide else []
+    return {"why": why,
+            "steps": steps + _off_target_steps(view, index_built) + _prepush_steps(view)}
+
+
+def _first_line(message) -> str:
+    """The first line of an error, without its traceback, capped for the page."""
+    text = str(message or "")
+    return text.split("\n", 1)[0].split("Traceback", 1)[0].strip()[:240]
 
 
 def runs(trace_rows: list[dict] | None = None, live: list[dict] | None = None,
@@ -421,73 +832,82 @@ def runs(trace_rows: list[dict] | None = None, live: list[dict] | None = None,
     live = jobs() if live is None else live
     retries = retries or _RetryIndex(trace_rows)
     audits = _recent_audits()
-    # In flight -> shown under "Now running" instead. A snapshot that stopped
-    # updating long ago is a killed process, and must not hide its run forever.
-    live_ids = {j.get("run_id") for j in live if j.get("status") in ("running", "waiting")
-                and (j.get("age_s") or 0) < STALE_S}
-    now = datetime.now(UTC)
     grouped = _group_spans(trace_rows)
     for rid in audits:                          # audited but trace rotated away
         grouped.setdefault(rid, [])
+    return [_build_run(rid, grouped[rid], audits.get(rid) or {}, retries)
+            for rid in _shown_run_ids(grouped, audits, live)]
+
+
+def _shown_run_ids(grouped: dict, audits: dict, live: list[dict]) -> list[str]:
+    """The RECENT_RUNS newest run ids that are not in flight.
+
+    Picked BEFORE building any run: building every run in the window to keep 20
+    was most of the poll's cost at scale. A run still in flight is shown under
+    "Now running" instead -- unless its snapshot stopped updating long ago, which
+    is a killed process that must not hide its run forever.
+    """
+    live_ids = {j.get("run_id") for j in live if j.get("status") in ("running", "waiting")
+                and (j.get("age_s") or 0) < STALE_S}
 
     def last_seen(rid: str) -> str:
         """Sort key: when the run was recorded, else its newest span's end."""
         spans = grouped[rid]
         return (audits.get(rid) or {}).get("recorded_at") or (spans[-1].get("ts") if spans else "")
 
-    # Pick the runs to SHOW before building any of them: building every run in
-    # the window to keep 20 was most of the poll's cost at scale.
-    shown = sorted((rid for rid in grouped if rid not in live_ids),
-                   key=last_seen, reverse=True)[:RECENT_RUNS]
-    out = []
-    for rid in shown:
-        spans = grouped[rid]
-        audit = audits.get(rid) or {}
-        first = spans[0] if spans else audit
-        steps = [{"name": s["span"][5:], "status": s.get("status"),
-                  "duration_ms": s.get("duration_ms"), "ended_at": s.get("ts"),
-                  "error": s.get("error"), "retries": retries.within(s)}
-                 for s in spans]
-        err = next((s for s in steps if s["status"] == "error"), None)
-        ended = audit.get("recorded_at") or (spans[-1].get("ts") if spans else None)
-        if audit:
-            run_status = audit.get("outcome") or "ended"
-        elif err:
-            run_status = "crashed"
-        elif spans and spans[-1].get("status") == "suspended":
-            # Paused at the approval gate. That writes NO audit record (it is not
-            # an outcome yet), so without this the page called a run that passed
-            # all four checks "In progress", then "Stopped".
-            snap = _snapshot_for(rid)
-            run_status = "abandoned" if snap.get("status") == "abandoned" \
-                else "awaiting_approval"
-            audit = _provisional_record(snap)
-        else:
-            age = (now - _parse_ts(ended)).total_seconds() if _parse_ts(ended) else 0
-            run_status = "incomplete" if age > STALE_S else "in_progress"
-        out.append({
-            "run_id": rid, "thread_id": audit.get("thread_id"),
-            "tenant": first.get("tenant"), "surface": first.get("surface"),
-            "target": first.get("target"),
-            "route": audit.get("route") or next(
-                (s.get("route") for s in spans if s.get("route")), None),
-            "status": run_status, "decision": audit.get("decision"),
-            "outcome": audit.get("outcome"), "ended_at": ended,
-            "total_ms": round(sum(float(s.get("duration_ms") or 0) for s in spans), 1),
-            "steps": steps, "error": err and {"step": err["name"], "message": err["error"]},
-            "audit": audit or None,
-            # Kept flat for callers that read the old shape.
-            "checks": {k: v for k, v in (audit.get("review") or {}).items()
-                       if k.endswith("_ok")},
-            "failures": (audit.get("review") or {}).get("failures") or [],
-        })
-    return out
+    return sorted((rid for rid in grouped if rid not in live_ids),
+                  key=last_seen, reverse=True)[:RECENT_RUNS]
+
+
+def _run_status(rid: str, spans: list[dict], audit: dict, failed: bool) -> tuple[str, dict]:
+    """A run's status, and the record to show for it (a provisional one if paused)."""
+    if audit:
+        return audit.get("outcome") or "ended", audit
+    if failed:
+        return "crashed", audit
+    if spans and spans[-1].get("status") == "suspended":
+        # Paused at the approval gate. That writes NO audit record (it is not an
+        # outcome yet), so without this the page called a run that passed all
+        # four checks "In progress", then "Stopped".
+        snap = _snapshot_for(rid)
+        status = "abandoned" if snap.get("status") == "abandoned" else "awaiting_approval"
+        return status, _provisional_record(snap)
+    ended = _parse_ts(spans[-1].get("ts")) if spans else None
+    age = (datetime.now(UTC) - ended).total_seconds() if ended else 0
+    return ("incomplete" if age > STALE_S else "in_progress"), audit
+
+
+def _build_run(rid: str, spans: list[dict], audit: dict, retries: _RetryIndex) -> dict:
+    """One run as the page shows it: its steps, its status and its record."""
+    steps = [{"name": s["span"][5:], "status": s.get("status"),
+              "duration_ms": s.get("duration_ms"), "ended_at": s.get("ts"),
+              "error": s.get("error"), "retries": retries.within(s)} for s in spans]
+    err = next((s for s in steps if s["status"] == "error"), None)
+    ended = audit.get("recorded_at") or (spans[-1].get("ts") if spans else None)
+    first = spans[0] if spans else audit
+    status, audit = _run_status(rid, spans, audit, err is not None)
+    review = audit.get("review") or {}
+    return {
+        "run_id": rid, "thread_id": audit.get("thread_id"),
+        "tenant": first.get("tenant"), "surface": first.get("surface"),
+        "target": first.get("target"),
+        "route": audit.get("route") or next(
+            (s.get("route") for s in spans if s.get("route")), None),
+        "status": status, "decision": audit.get("decision"),
+        "outcome": audit.get("outcome"), "ended_at": ended,
+        "total_ms": round(sum(float(s.get("duration_ms") or 0) for s in spans), 1),
+        "steps": steps, "error": err and {"step": err["name"], "message": err["error"]},
+        "audit": audit or None,
+        # Kept flat for callers that read the old shape.
+        "checks": {k: v for k, v in review.items() if k.endswith("_ok")},
+        "failures": review.get("failures") or [],
+    }
 
 
 def _snapshot_for(run_id: str) -> dict:
     """The live snapshot of one run, however old (jobs() skips stale ones)."""
     for p in (_data_dir() / "live").glob("run-*.json"):
-        snap = live.read_json(p)
+        snap = live_files.read_json(p)
         if snap.get("run_id") == run_id:
             return snap
     return {}
@@ -516,15 +936,17 @@ def jobs() -> list[dict]:
     out = []
     now = datetime.now(UTC)
     for p in (_data_dir() / "live").glob("*.json"):
-        # A run snapshot untouched for STALE_S is a finished or killed run; the
-        # page drops it anyway, so do not parse thousands of them per poll.
+        # A run or job snapshot untouched for STALE_S is finished or killed; the
+        # page drops it anyway, so do not parse thousands of them per poll. A
+        # job-<id> file is one per job (calibrate, ...), so they pile up like runs.
         # Ingest snapshots (one per tenant) are always kept.
         try:
-            if p.name.startswith("run-") and time.time() - p.stat().st_mtime > STALE_S:
+            if p.name.startswith(("run-", "job-")) and \
+                    time.time() - p.stat().st_mtime > STALE_S:
                 continue
         except OSError:
             continue
-        snap = live.read_json(p)
+        snap = live_files.read_json(p)
         if not snap:
             continue
         try:
@@ -549,6 +971,13 @@ def status() -> dict:
     m["runtime"] = runtime
     for r in recent:
         r["retry_command"] = retry_command(r, runtime)
+    built = {t: _index_built_at(t) for t in {r.get("tenant") for r in recent} if t}
+    for r in recent:
+        r["guidance"] = guidance(r, runtime, built.get(r.get("tenant")))
+        if r.get("error"):
+            server = ((r.get("audit") or {}).get("runtime") or {}).get("model_server")
+            r["error"]["hint"] = crash_hint(r["error"].get("message") or "",
+                                            server or base_url())
     _attach_live_retries(live, retries)
     return {"now": datetime.now(UTC).isoformat(), "data_dir": str(_data_dir().resolve()),
             "models": m, "estimates": estimates(trace_rows), "jobs": live,
@@ -596,7 +1025,7 @@ def activity_view(query: str) -> dict:
 class Handler(BaseHTTPRequestHandler):
     """`/` is the page; `/api/status` and `/api/activity` its data. No writes."""
 
-    def do_GET(self):  # noqa: N802 -- the http.server naming contract
+    def serve_get(self):
         """Serve the page, the status JSON or the activity JSON; 404 everything else."""
         if self.path in ("/", "/index.html"):
             body, kind = page().encode("utf-8"), "text/html; charset=utf-8"
@@ -616,8 +1045,17 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def log_message(self, format, *args):  # noqa: A002 -- a poll a second is noise
-        """Silence per-request logging."""
+    # http.server routes a request to the attribute named "do_" + its HTTP method,
+    # so the stdlib fixes this name; the handler itself keeps a normal one.
+    do_GET = serve_get
+
+    def log_request(self, code="-", size="-"):
+        """Drop the access line `http.server` prints for every request.
+
+        The page polls once a second, so that line is pure noise. This is the
+        stdlib's hook for exactly that line. `log_message` stays as it is, so a
+        request that fails (`log_error`) still reaches stderr.
+        """
 
 
 def serve(port: int) -> None:

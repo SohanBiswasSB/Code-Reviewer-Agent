@@ -88,23 +88,30 @@ def entailment_claims(diag, evidence, retrieved: list[dict]) -> list[tuple[str, 
     text = {s.get("id"): s.get("text", "") for s in retrieved}
     diff = (evidence_as_dict(evidence).get("diff") or "") if evidence is not None else ""
     hunks = split_diff(diff) if diff else {}
-
-    def premise(ids, *extra):
-        """The cited passages' text, each id once, in citation order, then `extra`."""
-        parts = [text[i] for i in dict.fromkeys(ids) if i in text]
-        return " ".join(p for p in (*parts, *extra) if p)
-
     cited = [c.snippet_id for c in getattr(diag, "citations", None) or []]
     comment = (getattr(diag, "proposed_comment", "") or "").strip()
     findings = getattr(diag, "findings", None) or []
     claims = []
     if comment or not findings:
-        claims.append(("comment", comment, premise(cited, diff)))
+        claims.append(("comment", comment, _premise(text, cited, diff)))
     for n, f in enumerate(findings, start=1):
         claim = f"{f.issue} {f.suggestion}".strip()
         claims.append((f"finding {n} ({f.file or 'no file'})", claim,
-                       premise(f.citation_ids, hunks.get(f.file, ""))))
+                       _premise(text, f.citation_ids, hunks.get(f.file, ""))))
     return claims
+
+
+def _premise(text: dict, ids, *extra: str) -> str:
+    """The cited passages' text, each id once, in citation order, then `extra`.
+
+    `text` maps a retrieved id to its passage; a cited id that was not retrieved
+    contributes nothing (groundedness reports it, this does not invent it), and
+    empty parts are dropped so a missing diff adds no stray separator. Kept apart
+    from `entailment_claims` because the comment and every finding build their
+    premise the same way, from different ids.
+    """
+    parts = [text[i] for i in dict.fromkeys(ids) if i in text]
+    return " ".join(p for p in (*parts, *extra) if p)
 
 
 def _entailment(diag, evidence, retrieved: list[dict], entailer,
@@ -209,6 +216,59 @@ def _groundedness(cited_ids: list[str], retrieved: dict[str, float],
     return False, failures
 
 
+def _grounded(diag, retrieved_list: list[dict], bars: dict) -> tuple[bool, list[str]]:
+    """`groundedness_ok` and its failures for this diagnosis's citations.
+
+    Each cited id is held to the RETRIEVER's score for it -- "score" is the
+    calibrated relevance, never the rank-fusion value (T21) -- and to the bar for
+    the kind of score that hit carries (`_bar_for`, T13). The check itself is
+    `_groundedness`; this only assembles its inputs from the node's state.
+    """
+    retrieved = {s["id"]: s["score"] for s in retrieved_list}
+    return _groundedness([c.snippet_id for c in diag.citations], retrieved,
+                         {s["id"]: _bar_for(s, bars) for s in retrieved_list})
+
+
+def _allowlisted(kind: str, value: str, allowlist: list[str]) -> tuple[bool, list[str]]:
+    """Is `value` on the tenant's `allowlist`? Returns (ok, failures).
+
+    One shape for `risk_ok` (the severity) and `permission_ok` (the action type),
+    which differ only in what is looked up. The failure reads
+    "<kind> '<value>' not in [...]" -- the form app/monitor.py parses, so the
+    wording is fixed here rather than repeated per boolean.
+    """
+    if value in allowlist:
+        return True, []
+    return False, [f"{kind} {value!r} not in {allowlist}"]
+
+
+def _decide(state: dict, diag, retrieved_list: list[dict], bars: dict,
+            entailer) -> tuple[dict[str, bool], list[str], str]:
+    """Step 2: code DECIDES -- the four booleans from real data, never parsed from
+    the llm (invariant 1).
+
+    Returns `(booleans, failures, action_type)`: the four `*_ok` flags keyed as
+    ReviewResult names them; every failure, in the order groundedness, severity,
+    action, entailment (the order records and the monitor have always shown); and
+    the action type the permission check judged, which an approved action carries.
+    `entailer` None resolves the configured one.
+    """
+    checks = {"groundedness_ok": _grounded(diag, retrieved_list, bars),
+              "risk_ok": _allowlisted("severity", diag.severity, bars["severity_allowlist"])}
+    action_type = _action_type(state, diag)
+    checks["permission_ok"] = _allowlisted("action", action_type, bars["allowed_actions"])
+    # The gate judges the comment and each finding as its own claim
+    # (`entailment_claims`). Checking only `proposed_comment` would let findings
+    # reach the page without ever being judged.
+    entailment_ok, _, entail_failures = _entailment(
+        diag, state.get("evidence"), retrieved_list,
+        entailer if entailer is not None else config.get_entailer(),
+        bars["min_entailment_score"])
+    checks["entailment_ok"] = (entailment_ok, entail_failures)
+    return ({key: ok for key, (ok, _) in checks.items()},
+            [f for _, failed in checks.values() for f in failed], action_type)
+
+
 def _approved_action(state: dict, diag, action_type: str, review_text: str) -> dict:
     """The action a human will approve: built HERE, once, and posted verbatim
     (invariant 4). The model's judged text, then the code-computed checklist."""
@@ -231,48 +291,18 @@ def independent_review(state: dict, judge_llm=None, entailer=None) -> dict:
     `judge_llm` and `entailer` are injectable for tests.
     """
     diag = state["diagnosis"]
-    # The Retriever PORT returns dicts, so that is the only shape a node ever
-    # sees. "score" is the calibrated relevance, never the rank-fusion value (T21).
+    # The Retriever PORT returns dicts, so that is the only shape a node ever sees.
     retrieved_list = list(state["_retrieved"])
-    retrieved = {s["id"]: s["score"] for s in retrieved_list}
     # The TENANT'S thresholds and allowlists, with module defaults for offline eval.
     bars = effective_gates(state.get("_policy") or {})
 
     reasoning, judge_guard = _judge(state, diag, retrieved_list, judge_llm)
-
-    # Step 2: code DECIDES -- booleans from real data, never parsed from the llm.
-    cited_ids = [c.snippet_id for c in diag.citations]
-    groundedness_ok, failures = _groundedness(
-        cited_ids, retrieved, {s["id"]: _bar_for(s, bars) for s in retrieved_list})
-
-    risk_ok = diag.severity in bars["severity_allowlist"]
-    if not risk_ok:
-        failures.append(f"severity {diag.severity!r} not in {bars['severity_allowlist']}")
-
-    action_type = _action_type(state, diag)
-    permission_ok = action_type in bars["allowed_actions"]
-    if not permission_ok:
-        failures.append(f"action {action_type!r} not in {bars['allowed_actions']}")
-
-    # The text that will be posted: comment AND findings, rendered once. The gate
-    # judges that same comment and those same findings, each as its own claim
-    # (`entailment_claims`). Checking only `proposed_comment` would let findings
-    # reach the page without ever being judged.
+    booleans, failures, action_type = _decide(state, diag, retrieved_list, bars, entailer)
+    # The text that will be posted: comment AND findings, rendered once -- the
+    # same comment and findings `_decide` just judged, each as its own claim.
     review_text = render_review(diag)
-    entailment_ok, _, entail_failures = _entailment(
-        diag, state.get("evidence"), retrieved_list,
-        entailer if entailer is not None else config.get_entailer(),
-        bars["min_entailment_score"])
-    failures.extend(entail_failures)
 
-    review = ReviewResult(
-        reasoning=reasoning,
-        groundedness_ok=groundedness_ok,
-        risk_ok=risk_ok,
-        permission_ok=permission_ok,
-        entailment_ok=entailment_ok,
-        failures=failures,
-    )
+    review = ReviewResult(reasoning=reasoning, failures=failures, **booleans)
     out = {"review": review,
            "_guard": {**(state.get("_guard") or {}), "judge": judge_guard}}
     if review.decision == "approve":

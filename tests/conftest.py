@@ -1,15 +1,34 @@
-"""Put the project root on sys.path so `import config` works from tests/."""
+"""Session-wide test setup: isolation from ./var, offline models, real surfaces.
+
+The project root reaches sys.path through pytest.ini's `pythonpath = .`, so the
+imports below are ordinary top-of-file imports.
+"""
 import json
 import os
-import sys
 import time
 from pathlib import Path
 
 import pytest
 
+import config
+import registry
+
 ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _surfaces_registered():
+    """The real surfaces are registered before any test overrides one.
+
+    Importing `config` imports surfaces/, whose decorators register the real
+    classes. If that first happened lazily INSIDE a run, it would re-register the
+    real CodeReviewSurface over a test's stub, and the test would exercise the
+    real surface while appearing to use the stub (test_graph_resume.py). Every
+    test module used to guard this with its own silenced `import config`; doing it
+    once here, and asserting it, makes the guarantee explicit.
+    """
+    missing = set(config.enabled_surfaces()) - set(registry.list_registered()["surfaces"])
+    assert not missing, f"enabled surfaces never registered: {sorted(missing)}"
 
 
 @pytest.fixture(autouse=True)

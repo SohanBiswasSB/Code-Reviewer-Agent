@@ -8,13 +8,19 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
+import urllib.request
 
 import pytest
 
 from adapters.action_sinks import ReviewFileSink
-from adapters.source_git_local import MAX_DIFF_CHARS, GitLocalSource, GitTargetError
-from app import review
+from adapters.entail_lexical import LexicalEntailer
+from adapters.source_git_local import MAX_DIFF_CHARS, GitLocalSource, GitTargetError, pack_diff
+from app import live, monitor, review
+from nodes._render import render_checklist, render_review
+from nodes.independent_review import _entailment, entailment_claims, independent_review
 from registry import adapter
+from schemas.diagnosis import Citation, Diagnosis, Finding
 from schemas.evidence import CodeChange
 from surfaces.code_review import CodeReviewSurface
 
@@ -232,7 +238,6 @@ def test_cli_without_a_terminal_refuses_to_decide(cli, tmp_path, capsys):
 
 
 # ── the diff budget ──────────────────────────────────────────────────────────
-from adapters.source_git_local import pack_diff  # noqa: E402
 
 
 def _diffs(sizes: dict[str, int]):
@@ -272,9 +277,6 @@ def test_a_real_staged_csv_is_named_but_its_rows_never_reach_the_evidence(repo):
 
 
 # ── the review text: comment AND findings, judged and posted as one ─────────
-from nodes._render import render_review  # noqa: E402
-from nodes.independent_review import independent_review  # noqa: E402
-from schemas.diagnosis import Citation, Diagnosis, Finding  # noqa: E402
 
 
 def _diag(findings):
@@ -342,8 +344,6 @@ def test_the_gate_judges_and_the_action_posts_the_same_text():
 
 
 # ── entailment, claim by claim ───────────────────────────────────────────────
-from adapters.entail_lexical import LexicalEntailer  # noqa: E402
-from nodes.independent_review import _entailment, entailment_claims  # noqa: E402
 
 DIFF = ("diff --git a/Masterclass/models.py b/Masterclass/models.py\n"
         "--- a/Masterclass/models.py\n+++ b/Masterclass/models.py\n"
@@ -398,10 +398,7 @@ def test_an_empty_review_still_fails_closed():
 
 
 # ── live status and the monitor ──────────────────────────────────────────────
-import threading  # noqa: E402
-import urllib.request  # noqa: E402
 
-from app import live, monitor  # noqa: E402
 
 
 def _live_runs(tmp_path):
@@ -544,3 +541,15 @@ def test_the_judges_guard_report_reaches_the_audit_record(cli, tmp_path):
               for line in p.read_text().splitlines()]
     judge = rec["guard"]["judge"]
     assert {"redacted", "injection_suspected", "fence_forgery"} <= set(judge)
+
+
+def test_a_flag_without_a_file_renders_instead_of_crashing():
+    """Masterclass c91d369 (2026-11-17): the tracker check flags the commit's
+    AUTHOR, not a path, and render_checklist crashed with KeyError: 'file'."""
+    text = render_checklist([
+        {"check": "tracker", "step": 4, "status": "flag",
+         "message": "git author 'me-Usaid' has no tracker in the policy"},
+        {"check": "docs_updated", "step": 1, "status": "flag", "message": "not updated",
+         "file": "Masterclass/Code Documentation/ADMIN_DOCS.md", "line": 3}])
+    assert "**tracker** — git author 'me-Usaid'" in text
+    assert "`Masterclass/Code Documentation/ADMIN_DOCS.md`:3" in text

@@ -13,6 +13,16 @@ from tools import github_client
 
 REPORTS_SUBDIR = "reports"
 
+# What a label call can fail with once the comment is already posted. OSError
+# covers the network and the provider: ProviderError is a ConnectionError and a
+# missing-permission 403 is a PermissionError. RuntimeError covers the stub's
+# NotImplementedError and an HTTP client that reports a refused request as a
+# RuntimeError (the shape eval/harness.py's 403 stand-in raises). ValueError
+# covers a refused key (ProviderAuthError is a ConfigError) and a response that
+# will not parse. Anything outside this family is a bug in the label path, and a
+# bug propagates.
+LABEL_ERRORS: tuple[type[BaseException], ...] = (OSError, RuntimeError, ValueError)
+
 
 def safe_part(part: str, fallback: str) -> str:
     """One path component from caller-supplied text (a tenant, a date, a target).
@@ -42,25 +52,27 @@ class PRCommentSink:
     discard the fact that the comment really was posted.
     """
 
-    def emit(self, action: dict, *, target: str,
-             identity: str | None = None, context: dict | None = None) -> dict:  # pylint: disable=unused-argument
-        """Post the comment, then try the label; a label failure is partial success."""
-        # `context` is run metadata (tenant, run_id). A comment goes to a URL, so
-        # this sink has no use for it -- accepted to satisfy the port.
+    def emit(self, action: dict, *, target: str, identity: str | None = None,
+             **kwargs) -> dict:
+        """Post the comment, then try the label; a label failure is partial success.
+
+        `context` (run metadata: tenant, run_id) arrives in `kwargs` and is not
+        read: a comment goes to a URL, so this sink has no use for it.
+        """
         result = {"comment": None, "label": None}
         result["comment"] = github_client.post_comment(target, action["comment"], identity)
         if action.get("label"):
             try:
                 result["label"] = github_client.add_label(target, action["label"], identity)
-            except Exception as e:  # pylint: disable=broad-exception-caught
-                # The ONE deliberately broad handler in the service. The comment
-                # above is already POSTED -- an irreversible write. Letting any
-                # label error escape would crash `execute` after that write, and
-                # with no failure edges (G9) the run would lose the audit record
-                # of a write that really happened (invariant 9). So every label
-                # failure is a partial success, pinned by the safety gate
-                # `partial_success_reported` -- and is logged at ERROR with its full
-                # traceback, so a bug here is loud rather than lost.
+            except LABEL_ERRORS as e:
+                # The comment above is already POSTED -- an irreversible write.
+                # Letting a label failure escape would crash `execute` after that
+                # write, and with no failure edges (G9) the run would lose the
+                # audit record of a write that really happened (invariant 9). So
+                # every expected label failure (LABEL_ERRORS) is a partial
+                # success, pinned by the safety gate `partial_success_reported`
+                # -- and is logged at ERROR with its full traceback, so it is
+                # loud rather than lost.
                 result["label"] = {"skipped": f"{type(e).__name__}: {e}"}
                 log_event("external_api", "github.add_label", severity=ERROR,
                           exception=e, failure_source=_label_source(e),
@@ -122,9 +134,13 @@ class ReportSink:
                   "Advisory only. Nothing here mutated infrastructure or a database."]
         return "\n".join(lines) + "\n"
 
-    def emit(self, action: dict, *, target: str,
-             identity: str | None = None, context: dict | None = None) -> dict:  # pylint: disable=unused-argument
-        """Write the report as .json and .md. `identity` is unused: nothing is posted."""
+    def emit(self, action: dict, *, target: str, context: dict | None = None,
+             **kwargs) -> dict:
+        """Write the report as .json and .md.
+
+        `identity` arrives in `kwargs` and is not read: nothing is posted, so no
+        approver credential is needed.
+        """
         ctx = context or {}
         report = {
             "schema_version": 1,
@@ -183,9 +199,13 @@ class ReviewFileSink:
         name = f"{safe(target, 'change')}-{safe(run_id or stamp, stamp)}.md"
         return os.path.join(self.root, self.SUBDIR, safe(tenant, "_unknown"), name)
 
-    def emit(self, action: dict, *, target: str,
-             identity: str | None = None, context: dict | None = None) -> dict:  # pylint: disable=unused-argument
-        """Write the review; return where it went. `identity` is unused locally."""
+    def emit(self, action: dict, *, target: str, context: dict | None = None,
+             **kwargs) -> dict:
+        """Write the review; return where it went.
+
+        `identity` arrives in `kwargs` and is not read: a local file needs no
+        approver credential.
+        """
         ctx = context or {}
         cites = ctx.get("citations") or []
         lines = [

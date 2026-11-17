@@ -1,8 +1,8 @@
 """Review a local change from the terminal: the whole graph, one human, no server.
 
-    python -m app.review --tenant masterclass --root ~/Dev/<repo>                 # staged
-    python -m app.review --tenant masterclass --root ~/Dev/<repo> --target HEAD
-    python -m app.review --tenant masterclass --root ~/Dev/<repo> --target main...HEAD
+    python -m app.review --tenant merger_app --root ~/Dev/<repo>                 # staged
+    python -m app.review --tenant merger_app --root ~/Dev/<repo> --target HEAD
+    python -m app.review --tenant merger_app --root ~/Dev/<repo> --target main...HEAD
 
 The same graph `POST /run` + `POST /approve` drive, with two deployment choices
 made for a laptop: evidence from the local checkout (`git_local`) instead of the

@@ -195,7 +195,7 @@ def test_the_org_contract_is_free_of_any_project_specifics():
     and invisible without a check.
     """
     project_vocabulary = ["milesone", "credly", "zoom", "django", "celery",
-                          "masterclass", "cloudwatch"]
+                          "masterclass", "merger_app", "cloudwatch"]
     for path in pathlib.Path("tenants/_default/prompts").rglob("*.md"):
         text = path.read_text(encoding="utf-8").lower()
         found = [word for word in project_vocabulary if word in text]

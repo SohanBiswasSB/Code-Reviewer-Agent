@@ -192,6 +192,19 @@ def _clip(text: str) -> str:
     return text[:PROMPT_SNIPPET_CHARS] + " [...cut for the prompt]"
 
 
+def _change_lines(ev) -> str:
+    """The evidence as `key: value` lines, one per field, for the CHANGE block.
+
+    Accepts the evidence model or a plain dict. Private fields (`_`-prefixed) and
+    `revision` are left out: they identify where the change came from, and the
+    model is asked about the change itself. Not sanitised -- the caller fences it
+    through the guard.
+    """
+    body = ev if isinstance(ev, dict) else getattr(ev, "__dict__", {})
+    return "\n".join(f"{k}: {v}" for k, v in body.items()
+                     if not k.startswith("_") and k != "revision")
+
+
 def render_evidence(ev, hits: list[dict], guard=None, tenant: str = "_default",
                     checks: list[dict] | None = None):
     """The diagnosis model's user turn: the change, then what was retrieved.
@@ -200,10 +213,7 @@ def render_evidence(ev, hits: list[dict], guard=None, tenant: str = "_default",
     not just the diff: they come out of an index built from a repo, so a secret
     committed once is a secret the retriever can hand back later.
     """
-    body = ev if isinstance(ev, dict) else getattr(ev, "__dict__", {})
-    lines = [f"{k}: {v}" for k, v in body.items()
-             if not k.startswith("_") and k != "revision"]
-    change, r1 = fence_guarded("CHANGE", "\n".join(lines), guard, tenant)
+    change, r1 = fence_guarded("CHANGE", _change_lines(ev), guard, tenant)
     retrieved, r2 = fence_guarded("RETRIEVED", render_snippets(hits), guard, tenant)
     report = _merge(_merge({}, r1), r2)
     if not checks:
@@ -293,8 +303,12 @@ def render_checklist(checks: list[dict]) -> str:
     passed = sorted({c["check"] for c in checks if c.get("status") == "pass"})
     lines = ["**Pre-push checklist** (computed by code, not by the model)", ""]
     for c in flags:
-        loc = f" `{c['file']}`" + (f":{c['line']}" if c.get("line") else "")
-        where = loc if c.get("file") else ""
+        # A flag need not name a file -- "git author has no tracker" is about the
+        # commit, not a path. The location is built only when there is one: the
+        # old code read c['file'] first and checked it after, so the first such
+        # flag (Masterclass c91d369, 2026-11-17) crashed the review's printout.
+        where = (f" `{c['file']}`" + (f":{c['line']}" if c.get("line") else "")
+                 if c.get("file") else "")
         lines.append(f"- ✕ **{c['check']}**{where} — {c['message']}")
     if passed:
         lines.append(f"- ✓ passed: {', '.join(passed)}")

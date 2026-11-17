@@ -31,6 +31,7 @@ from __future__ import annotations
 import pathlib
 import re
 from collections import Counter
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -67,24 +68,54 @@ def tokenize(text: str) -> list[str]:
     return out
 
 
-class BM25:
-    """Okapi BM25 over a fixed set of documents, as an inverted index."""
+def _count_postings(corpus: list[list[str]]) -> tuple[dict, np.ndarray]:
+    """({term: [(doc, term frequency), ...]}, length per doc), in corpus order.
 
-    def __init__(self, corpus: list[list[str]], k1: float = K1, b: float = B):
-        """Build from one token list per document (corpus order = row order)."""
-        postings: dict[str, list[tuple[int, int]]] = {}
-        lengths = np.zeros(len(corpus), dtype=np.float32)
-        for doc, tokens in enumerate(corpus):
-            lengths[doc] = len(tokens)
-            for term, tf in Counter(tokens).items():
-                postings.setdefault(term, []).append((doc, tf))
+    The counting pass of a build, kept apart from the flattening into arrays.
+    """
+    postings: dict[str, list[tuple[int, int]]] = {}
+    lengths = np.zeros(len(corpus), dtype=np.float32)
+    for doc, tokens in enumerate(corpus):
+        lengths[doc] = len(tokens)
+        for term, tf in Counter(tokens).items():
+            postings.setdefault(term, []).append((doc, tf))
+    return postings, lengths
+
+
+@dataclass(frozen=True, eq=False)
+class _Postings:
+    """The inverted index's arrays, as built from a corpus or read from `bm25.npz`.
+
+    Term `i`'s postings are `docs[offsets[i]:offsets[i + 1]]` with the matching
+    `tfs`; `lengths` is each document's token count. One value, so the two ways
+    of obtaining the arrays hand `BM25._init` exactly the same shape.
+    """
+
+    terms: list[str]
+    offsets: np.ndarray
+    docs: np.ndarray
+    tfs: np.ndarray
+    lengths: np.ndarray
+
+    @classmethod
+    def from_corpus(cls, corpus: list[list[str]]) -> _Postings:
+        """Count every document's terms, then flatten into term-sorted arrays."""
+        postings, lengths = _count_postings(corpus)
         terms = sorted(postings)
         offsets = np.zeros(len(terms) + 1, dtype=np.int64)
         offsets[1:] = np.cumsum([len(postings[t]) for t in terms])
         flat = [p for t in terms for p in postings[t]]
         docs = np.fromiter((d for d, _ in flat), dtype=np.int32, count=len(flat))
         tfs = np.fromiter((f for _, f in flat), dtype=np.float32, count=len(flat))
-        self._init(terms, offsets, docs, tfs, lengths, k1, b)
+        return cls(terms, offsets, docs, tfs, lengths)
+
+
+class BM25:
+    """Okapi BM25 over a fixed set of documents, as an inverted index."""
+
+    def __init__(self, corpus: list[list[str]], k1: float = K1, b: float = B):
+        """Build from one token list per document (corpus order = row order)."""
+        self._init(_Postings.from_corpus(corpus), k1, b)
 
     @classmethod
     def for_chunks(cls, metas: list[dict]) -> BM25:
@@ -92,7 +123,7 @@ class BM25:
         retriever loads, built the one way so the two can never disagree."""
         return cls([tokenize(bm25_text(m)) for m in metas])
 
-    def _init(self, terms, offsets, docs, tfs, lengths, k1, b) -> None:
+    def _init(self, arrays: _Postings, k1: float, b: float) -> None:
         """Set every attribute from the postings arrays, and derive IDF.
 
         The one place an instance is filled in, shared by `__init__` (built from
@@ -100,12 +131,13 @@ class BM25:
         differ from a freshly built one in anything but how it got its arrays.
         """
         self.k1, self.b = float(k1), float(b)
-        self.terms = list(terms)
+        self.terms = list(arrays.terms)
         self.vocab = {t: i for i, t in enumerate(self.terms)}
-        self.offsets, self.docs, self.tfs, self.lengths = offsets, docs, tfs, lengths
-        self.n = len(lengths)
-        self.avg_len = float(lengths.mean()) if self.n else 0.0
-        df = np.diff(offsets).astype(np.float64)
+        self.offsets, self.docs, self.tfs = arrays.offsets, arrays.docs, arrays.tfs
+        self.lengths = arrays.lengths
+        self.n = len(self.lengths)
+        self.avg_len = float(self.lengths.mean()) if self.n else 0.0
+        df = np.diff(self.offsets).astype(np.float64)
         # Lucene's IDF variant: always positive, so a term appearing in every
         # document contributes ~0 rather than going negative and actively
         # penalising documents that contain it.
@@ -169,8 +201,8 @@ class BM25:
                     return None
                 self = cls.__new__(cls)
                 k1, b = (float(x) for x in z["params"])
-                self._init(z["terms"].tolist(), z["offsets"], z["docs"], z["tfs"],
-                           z["lengths"], k1, b)
+                self._init(_Postings(z["terms"].tolist(), z["offsets"], z["docs"], z["tfs"],
+                                     z["lengths"]), k1, b)
                 return self
         except (OSError, ValueError, KeyError):
             return None

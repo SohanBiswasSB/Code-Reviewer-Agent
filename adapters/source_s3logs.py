@@ -51,6 +51,92 @@ def _candidates(counts: dict, severity_of: dict, samples: dict) -> tuple[list, l
     ]
 
 
+class _WindowReducer:
+    """The running state of one day's reduction: buffers per stream, and what
+    the detector found so far (counts, first severity, capped samples).
+
+    Buffered per (service, ref) so each detector call sees a contiguous window
+    with correct line offsets. Memory is bounded by MAX_BUFFERED_LINES across all
+    streams, never by the size of the day.
+    """
+
+    def __init__(self, detector):
+        """Start empty; `detector` is called once per flushed window."""
+        self.detector = detector
+        self.digest = hashlib.sha256()
+        self.line_count = 0
+        self.services: dict[str, None] = {}
+        self.counts: dict[str, int] = {}
+        self.severity_of: dict[str, str] = {}
+        self.samples: dict[str, list[dict]] = {}
+        self.truncated = False
+        self.buffers: dict[tuple[str, str], list[str]] = {}
+        self.starts: dict[tuple[str, str], int] = {}
+        self.per_stream_count: dict[tuple[str, str], int] = {}
+        self.buffered = 0
+
+    def add(self, service: str, ref: str, line: str) -> None:
+        """Take one line: hash it, buffer it, and flush when a cap is reached.
+
+        A stream flushes alone at WINDOW_LINES; when ALL streams together reach
+        MAX_BUFFERED_LINES, every stream flushes (see MAX_BUFFERED_LINES).
+        """
+        self.line_count += 1
+        self.services.setdefault(service, None)
+        self.digest.update(line.encode("utf-8", "replace"))
+        key = (service, ref)
+        self.starts.setdefault(key, 0)
+        self.per_stream_count[key] = self.per_stream_count.get(key, 0) + 1
+        self.buffers.setdefault(key, []).append(line)
+        self.buffered += 1
+        if len(self.buffers[key]) >= WINDOW_LINES:
+            self.flush(key)
+        elif self.buffered >= MAX_BUFFERED_LINES:
+            self.flush_all()
+
+    def flush_all(self) -> None:
+        """Flush every stream's buffer, in the order the streams first appeared."""
+        for key in list(self.buffers):
+            self.flush(key)
+
+    def flush(self, key: tuple[str, str]) -> None:
+        """Run the detector over one stream's buffer and fold its hits in.
+
+        Empties the buffer and advances that stream's start offset so the next
+        window's line numbers continue where this one stopped.
+        """
+        lines = self.buffers.get(key)
+        if not lines:
+            return
+        self.buffered -= len(lines)
+        service, ref = key
+        hits = self.detector.detect({"service": service, "ref": ref,
+                                     "start": self.starts[key], "lines": lines})
+        for hit in hits:
+            self._fold(hit)
+        self.buffers[key] = []
+        self.starts[key] = self.per_stream_count[key]
+
+    def _fold(self, hit: dict) -> None:
+        """Count one detector hit and keep it as a sample while its signal has room."""
+        signal = hit["signal"]
+        self.counts[signal] = self.counts.get(signal, 0) + 1
+        self.severity_of.setdefault(signal, hit.get("severity", "medium"))
+        bucket = self.samples.setdefault(signal, [])
+        if len(bucket) >= MAX_SAMPLES_PER_SIGNAL:
+            self.truncated = True
+            return
+        bucket.append({
+            "service": hit.get("service", ""),
+            "line_no": hit.get("line_no", 0),
+            "ref": hit.get("ref", ""),
+            # Truncated before it can enter state. One pathological line (a
+            # serialised payload, a base64 blob) would otherwise be carried
+            # through every checkpoint.
+            "text": (hit.get("text", "") or "")[:MAX_LINE_CHARS],
+        })
+
+
 @adapter("source", "s3logs")
 class S3LogSource:
     """Read the day's CloudWatch->S3 exports and reduce them to a LogWindow.
@@ -98,85 +184,20 @@ class S3LogSource:
         MAX_BUFFERED_LINES, never by the size of the day.
         """
         reader = opts.get("reader") or (lambda: self._read(target, **opts))
-        detector = opts.get("detector") or self.detector()
-
-        digest = hashlib.sha256()
-        line_count = 0
-        services: dict[str, None] = {}
-        counts: dict[str, int] = {}
-        severity_of: dict[str, str] = {}
-        samples: dict[str, list[dict]] = {}
-        truncated = False
-
-        # Buffered per (service, ref) so each detector call sees a contiguous
-        # window with correct line offsets.
-        buffers: dict[tuple[str, str], list[str]] = {}
-        starts: dict[tuple[str, str], int] = {}
-        per_stream_count: dict[tuple[str, str], int] = {}
-        buffered = 0
-
-        def flush(key: tuple[str, str]) -> None:
-            """Run the detector over one stream's buffer and fold its hits in.
-
-            Updates the running counts and capped samples, empties the buffer, and
-            advances that stream's start offset so the next window's line numbers
-            continue where this one stopped.
-            """
-            nonlocal truncated, buffered
-            lines = buffers.get(key)
-            if not lines:
-                return
-            buffered -= len(lines)
-            service, ref = key
-            hits = detector.detect({"service": service, "ref": ref,
-                                    "start": starts[key], "lines": lines})
-            for hit in hits:
-                signal = hit["signal"]
-                counts[signal] = counts.get(signal, 0) + 1
-                severity_of.setdefault(signal, hit.get("severity", "medium"))
-                bucket = samples.setdefault(signal, [])
-                if len(bucket) < MAX_SAMPLES_PER_SIGNAL:
-                    bucket.append({
-                        "service": hit.get("service", ""),
-                        "line_no": hit.get("line_no", 0),
-                        "ref": hit.get("ref", ""),
-                        # Truncated before it can enter state. One pathological
-                        # line (a serialised payload, a base64 blob) would
-                        # otherwise be carried through every checkpoint.
-                        "text": (hit.get("text", "") or "")[:MAX_LINE_CHARS],
-                    })
-                else:
-                    truncated = True
-            buffers[key] = []
-            starts[key] = per_stream_count[key]
-
+        window = _WindowReducer(opts.get("detector") or self.detector())
         for service, ref, line in reader():
-            line_count += 1
-            services.setdefault(service, None)
-            digest.update(line.encode("utf-8", "replace"))
-            key = (service, ref)
-            starts.setdefault(key, 0)
-            per_stream_count[key] = per_stream_count.get(key, 0) + 1
-            buffers.setdefault(key, []).append(line)
-            buffered += 1
-            if len(buffers[key]) >= WINDOW_LINES:
-                flush(key)
-            elif buffered >= MAX_BUFFERED_LINES:
-                for k in list(buffers):
-                    flush(k)
-        for key in list(buffers):
-            flush(key)
+            window.add(service, ref, line)
+        window.flush_all()
 
-        ordered, candidates = _candidates(counts, severity_of, samples)
-        truncated = truncated or len(ordered) > MAX_CANDIDATES
+        ordered, candidates = _candidates(window.counts, window.severity_of, window.samples)
 
         return {
             "date": target,
             "ref": opts.get("ref", f"s3://<log-export-bucket>/daily/{target}/"),
-            "digest": f"sha256:{digest.hexdigest()}",
-            "line_count": line_count,
-            "services": sorted(services),
+            "digest": f"sha256:{window.digest.hexdigest()}",
+            "line_count": window.line_count,
+            "services": sorted(window.services),
             "counts": dict(ordered),
             "candidates": candidates,
-            "truncated": truncated,
+            "truncated": window.truncated or len(ordered) > MAX_CANDIDATES,
         }

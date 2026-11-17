@@ -8,14 +8,24 @@ import os
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from langgraph.checkpoint.memory import MemorySaver
+from pydantic import ValidationError
 
 import config
+import registry
+from adapters import source_s3logs as s3
+from adapters import tracer_jsonl
 from adapters.detectors import SignalDetector
 from adapters.source_s3logs import MAX_SAMPLES_PER_SIGNAL, S3LogSource
 from adapters.tracer_jsonl import JsonlTracer, NullTracer, hash_text
+from app.graph import build_graph
 from jobs.prune_checkpoints import expired_threads
+from nodes._surface import evidence_as_dict
+from nodes.classify import classify
+from nodes.normalize_evidence import normalize_evidence
 from schemas.evidence import MAX_LINE_CHARS, LogWindow
 from surfaces.log_review import LogReviewSurface
+from tools import github_client
 
 
 def _reader(lines):
@@ -80,7 +90,6 @@ def test_many_short_objects_never_buffer_the_whole_day():
     """Each stream flushed only at WINDOW_LINES, so objects shorter than that all
     stayed buffered to EOF -- 252 MB for 2M lines. The global cap bounds it, and
     every line still reaches the detector exactly once, at its own offset."""
-    from adapters import source_s3logs as s3
     state = {"yielded": 0, "detected": 0, "worst": 0}
     seen: dict[str, list[int]] = {}
 
@@ -117,7 +126,6 @@ def test_the_digest_is_stable_and_content_addressed():
 def test_a_source_that_returns_raw_lines_fails_loudly():
     """LogWindow uses extra="forbid", so a regression that starts passing the
     day's lines through cannot quietly make every super-step rewrite them."""
-    from pydantic import ValidationError
     with pytest.raises(ValidationError, match="lines"):
         LogReviewSurface().normalize({"date": "2026-09-10", "lines": ["...2M of these..."]})
 
@@ -132,8 +140,6 @@ def test_a_quiet_day_goes_to_a_human_not_to_a_model():
 def test_the_log_surface_survives_the_full_normalize_classify_query_chain():
     """The chain that was broken three separate ways: no normalize (KeyError on
     html_url), nested models breaking build_query, and action_type."""
-    from nodes.classify import classify
-    from nodes.generate_diagnosis import _fallback_query  # noqa: F401  (import guard)
 
     surface = LogReviewSurface()
     raw = S3LogSource().gather(
@@ -142,12 +148,10 @@ def test_the_log_surface_survives_the_full_normalize_classify_query_chain():
         detector=SignalDetector())
     state = {"_surface": surface, "_raw": raw}
 
-    from nodes.normalize_evidence import normalize_evidence
     state.update(normalize_evidence(state))
     assert isinstance(state["evidence"], LogWindow)
     assert classify(state)["route"] == "ai_investigation"
 
-    from nodes._surface import evidence_as_dict
     query = surface.build_query(evidence_as_dict(state["evidence"]))
     assert "traceback" in query, "nested candidates must arrive as dicts, not models"
 
@@ -194,7 +198,6 @@ def test_tracing_never_breaks_the_thing_it_traces(tmp_path, monkeypatch):
 def test_prompts_are_not_traced_by_default(monkeypatch):
     """T12 is open, so nothing redacts PII out of evidence. Storing every prompt
     verbatim would durably copy exactly what the guard is meant to remove."""
-    from adapters import tracer_jsonl
 
     monkeypatch.delenv("CRA_TRACE_PROMPTS", raising=False)
     assert tracer_jsonl.prompts_enabled() is False
@@ -205,12 +208,7 @@ def test_prompts_are_not_traced_by_default(monkeypatch):
 
 def test_every_node_is_traced_without_any_node_knowing(monkeypatch):
     """Wrapped in build_graph, so a node added later is covered automatically."""
-    pytest.importorskip("langgraph")
-    from langgraph.checkpoint.memory import MemorySaver
 
-    import registry
-    from app.graph import build_graph
-    from tools import github_client
 
     spans = []
 

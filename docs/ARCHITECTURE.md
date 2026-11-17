@@ -189,9 +189,11 @@ measured), and `jobs/daily_log_review.py` is a stub.
 
 ## Run modes
 
-- **web** — `uvicorn app.main:app`: `POST /run/{surface}`, `POST /approve`,
-  `GET /runs/{thread_id}`, `GET /registered`, `GET /doctor`, `GET /healthz`. Echoes
-  `X-Correlation-Id`.
+- **web** — `uvicorn app.main:app`: `POST /v1/run/{surface}`, `POST /v1/approve`,
+  `GET /v1/runs/{thread_id}`, `GET /v1/registered`, `GET /v1/doctor`, and the unversioned
+  probe `GET /healthz`. One Pydantic request and response model per route
+  (`app/api_models.py`); an undeclared or mistyped field is a 400; every body, errors
+  included, is `{success, message, data}`. Echoes `X-Correlation-Id`.
 - **local review** — `python -m app.review --tenant <t> --root <repo> [--target <rev>]`: the
   full graph over a local diff (`git_local` source → `review_file` sink, `var/reviews/`),
   approval at the terminal; without a terminal the run is recorded as `abandoned`.

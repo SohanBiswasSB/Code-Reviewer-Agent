@@ -41,7 +41,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from tools.fusion import RRF_K, reciprocal_rank_fusion  # noqa: F401 -- re-exported
+from tools.fusion import RRF_K, reciprocal_rank_fusion
+
+# The public surface. RRF_K and reciprocal_rank_fusion are re-exported: the
+# fusion used to live here, and callers still reach it through this module.
+__all__ = ["RRF_K", "Snippet", "reciprocal_rank_fusion", "relevance_of", "retrieve"]
 
 
 @dataclass

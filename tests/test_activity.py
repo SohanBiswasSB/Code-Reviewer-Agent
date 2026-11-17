@@ -164,9 +164,9 @@ def test_a_graph_node_failure_is_logged_with_its_traceback(tmp_path, monkeypatch
         raise RuntimeError("node blew up")
     wrapped = _traced("generate_diagnosis", boom, NullTracer())
     with pytest.raises(RuntimeError):
-        wrapped({"thread_id": "t-1", "tenant": "masterclass"})
+        wrapped({"thread_id": "t-1", "tenant": "merger_app"})
     (r,) = [x for x in rows(tmp_path) if x["operation_type"] == "node"]
-    assert r["correlation_id"] == "t-1" and r["tenant"] == "masterclass"
+    assert r["correlation_id"] == "t-1" and r["tenant"] == "merger_app"
     assert r["severity"] == ERROR and "node blew up" in r["traceback"]
     assert r["failure_source"] == "internal"
 
@@ -258,8 +258,8 @@ def test_the_bridge_installs_once(bridge):
 
 
 def test_a_model_retry_is_on_record(tmp_path):
-    llm_lmstudio._announce_retry("completion", "judge", "qwen3-4b", 2, 3, "server busy",
-                                 ConnectionError("busy"), 0.0, lambda s: None)
+    attempt = llm_lmstudio.RetryAttempt("completion", "judge", "qwen3-4b", 2, 3, "server busy")
+    llm_lmstudio.announce_retry(attempt, ConnectionError("busy"), 0.0, lambda s: None)
     (r,) = [x for x in rows(tmp_path) if x["operation_name"] == "retry.completion"]
     assert r["severity"] == WARNING and r["metadata"]["attempt"] == 2
 

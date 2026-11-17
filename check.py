@@ -72,6 +72,11 @@ STEPS: tuple[tuple[str, list[str], dict[str, str], bool], ...] = (
      [sys.executable, "-m", "eval.harness"], OFFLINE, True),
     ("lint (ruff)",
      [sys.executable, "-m", "ruff", "check", "."], {}, True),
+    # The reviewer's own standards over this whole repo (tools/standards_audit.py):
+    # no suppressions, no broad except, function size limits, the API contract.
+    # Blocking, so the reviewer can never enforce a rule it does not meet itself.
+    ("coding standards (the reviewer's own rules)",
+     [sys.executable, "-m", "tools.standards_audit", "--summary"], {}, True),
     # `-p no:cacheprovider`: the two passes run concurrently and would otherwise
     # both write .pytest_cache. Each gets its own --basetemp in `_argv`.
     ("unit tests",
@@ -141,7 +146,7 @@ def _list() -> int:
 
 def _report(results: list, step, outcome) -> str:
     """Print one finished step (its output only if it should be seen) and record it."""
-    label, _argv_, _env, blocking = step
+    label, blocking = step[0], step[3]
     code, elapsed, out = outcome
     status = _status(code, blocking)
     print(f"\n=== {label} ===")

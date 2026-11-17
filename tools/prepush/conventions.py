@@ -248,16 +248,38 @@ def _tracker_csv_shape(change: Change, csv_path: str, tr: dict) -> list[dict]:
     return out
 
 
-def _tracker_new_row(change: Change, csv_path: str, md: str, prefix: str,
-                     tr: dict) -> list[dict]:
-    """The row this change ADDED: next key in series, mirrored in the .md, carrying
-    the required blocks, and no AI attribution."""
-    out = []
+def _tracker_keys(change: Change, csv_path: str, prefix: str) -> tuple[list[int], list[str]]:
+    """(the numbers of the base revision's `<prefix>N` keys, the keys the change ADDED).
+
+    The base side gives where the series stands; the added side, what the
+    change claims is next.
+    """
     key_re = re.compile(rf"^{re.escape(prefix)}(\d+)$")
     old = [int(m.group(1)) for r in csv.reader(io.StringIO(change.base_for(csv_path)))
            if r for m in [key_re.match(r[0])] if m]
     new_keys = [r[0] for _, line in change.added(csv_path)
                 for r in csv.reader([line]) if r and key_re.match(r[0])]
+    return old, new_keys
+
+
+def _tracker_row_content(change: Change, csv_path: str, tr: dict) -> list[dict]:
+    """What the added row says: every required block present, no AI attribution."""
+    out = []
+    added_text = " ".join(t for _, t in change.added(csv_path))
+    for block in tr.get("required_blocks", []):
+        if block not in added_text:
+            out.append(result("tracker_blocks", 4, FLAG, f"new row lacks `{block}`", csv_path))
+    if RE_AI_ATTRIBUTION.search(added_text):
+        out.append(result("tracker_attribution", 4, FLAG, "AI attribution in the row", csv_path))
+    return out
+
+
+def _tracker_new_row(change: Change, csv_path: str, md: str, prefix: str,
+                     tr: dict) -> list[dict]:
+    """The row this change ADDED: next key in series, mirrored in the .md, carrying
+    the required blocks, and no AI attribution."""
+    out = []
+    old, new_keys = _tracker_keys(change, csv_path, prefix)
     if not new_keys:
         out.append(result("tracker_row", 4, FLAG, f"no new {prefix}N row added", csv_path))
         return out
@@ -268,13 +290,7 @@ def _tracker_new_row(change: Change, csv_path: str, md: str, prefix: str,
     if md in change.files and not any(new_keys[0] in t for _, t in change.added(md)):
         out.append(result("tracker_md", 4, FLAG,
                           f"{new_keys[0]} is in the CSV but not the .md", md))
-    added_text = " ".join(t for _, t in change.added(csv_path))
-    for block in tr.get("required_blocks", []):
-        if block not in added_text:
-            out.append(result("tracker_blocks", 4, FLAG, f"new row lacks `{block}`", csv_path))
-    if RE_AI_ATTRIBUTION.search(added_text):
-        out.append(result("tracker_attribution", 4, FLAG, "AI attribution in the row", csv_path))
-    return out
+    return out + _tracker_row_content(change, csv_path, tr)
 
 
 def check_commit_message(change: Change, config: dict) -> list[dict]:

@@ -89,6 +89,6 @@ skipped them:
 | `commit_message` | file (staged) or the commit itself; subject regex; required blocks; no attribution |
 | `not_checkable` | `[name, step, why]` rows the reviewer cannot run (DB, Django, network) -- reported as `skip` |
 
-`tenants/masterclass/policy.json` is the worked example: it mirrors that repo's
+`tenants/merger_app/policy.json` is the worked example: it mirrors that repo's
 `.claude/skills/prepush-ritual`. A codebase without a block is held to the generic
 checks only -- it is never flagged for lacking someone else's conventions.

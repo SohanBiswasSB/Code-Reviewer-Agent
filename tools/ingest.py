@@ -37,6 +37,7 @@ import fnmatch
 import pathlib
 import sys
 import time
+from dataclasses import dataclass
 
 import config
 from app.activity import WARNING, ActivityLogger, capture_library_logs, log_event
@@ -116,21 +117,44 @@ def iter_files(root: pathlib.Path, include: list[str] | None,
     return sorted(found)
 
 
-def build(tenant: str, include: list[str] | None, dry_run: bool,
-          limit: int | None, surface: str = "code_review",
-          root_override: str | None = None) -> int:
-    """Chunk, redact, embed and write one tenant's namespace. Returns an exit code.
+@dataclass(frozen=True)
+class IngestJob:
+    """One ingest run's request: which tenant, which files, and how far to go.
 
-    The namespace and the exclusions come from the tenant's policy, never from a
-    flag; only WHERE the repo lives on this machine may be overridden.
+    Grouped so the pipeline passes one value rather than six loose arguments;
+    `build` keeps its historical call shape and builds one of these.
     """
-    policy = config.get_tenant_store().policy(tenant, surface)
+
+    tenant: str
+    include: list[str] | None = None
+    dry_run: bool = False
+    limit: int | None = None
+    surface: str = "code_review"
+    root_override: str | None = None
+
+
+@dataclass(frozen=True)
+class _Target:
+    """Where a job reads from and writes to, resolved from the tenant's policy."""
+
+    namespace: str
+    root: pathlib.Path
+    exclude: list[str]
+
+
+def _resolve_target(job: IngestJob) -> _Target:
+    """The tenant's namespace, this machine's checkout of its repo, and its excludes.
+
+    Refuses (SystemExit) a tenant with no `codebase.repo` -- retrieval must never
+    be global (G1) -- and a root that does not exist here.
+    """
+    policy = config.get_tenant_store().policy(job.tenant, job.surface)
     codebase = policy.get("codebase") or {}
     namespace = codebase.get("repo")
     root_setting = codebase.get("root")
     if not namespace:
         raise SystemExit(
-            f"tenant '{tenant}' declares no codebase.repo, so it has no retrieval "
+            f"tenant '{job.tenant}' declares no codebase.repo, so it has no retrieval "
             f"namespace. Retrieval must never be global (G1)."
         )
     # `codebase.root` is COMMITTED and shared across machines, so it cannot be
@@ -138,38 +162,79 @@ def build(tenant: str, include: list[str] | None, dry_run: bool,
     # repo lives under ~/Dev on the Mac. CRA_CODEBASE_ROOT (or --root) overrides
     # it per machine, the same split the platform layer already uses -- shared
     # config names WHAT, local config says WHERE.
-    root = codebase_root(codebase, root_override)
+    root = codebase_root(codebase, job.root_override)
     if not root.exists():
         raise SystemExit(
-            f"tenant '{tenant}' points codebase.root at {root_setting!r}, which does "
+            f"tenant '{job.tenant}' points codebase.root at {root_setting!r}, which does "
             f"not exist on this machine. Pass --root <path>, or set "
             f"CRA_CODEBASE_ROOT. The namespace still comes from the tenant."
         )
+    return _Target(namespace, root, list(codebase.get("index_exclude") or []))
 
-    print(f"tenant    : {tenant}")
-    print(f"namespace : {namespace}")
-    print(f"root      : {root}")
+
+def build(tenant: str, include: list[str] | None, dry_run: bool,
+          limit: int | None, **where: str | None) -> int:
+    """Chunk, redact, embed and write one tenant's namespace. Returns an exit code.
+
+    The namespace and the exclusions come from the tenant's policy, never from a
+    flag; only WHERE the repo lives on this machine may be overridden. `where`
+    takes `surface=` and `root_override=` by keyword, as every caller passes
+    them; anything else is a TypeError from `IngestJob`.
+    """
+    return run(IngestJob(tenant, include, dry_run, limit, **where))
+
+
+def run(job: IngestJob) -> int:
+    """`build` for an `IngestJob`: resolve the target, then ingest under live progress."""
+    target = _resolve_target(job)
+    print(f"tenant    : {job.tenant}")
+    print(f"namespace : {target.namespace}")
+    print(f"root      : {target.root}")
 
     # Live progress for `python -m app.monitor` -- a 10-minute embed that only
     # prints "\r embedded 3424/17622" is invisible to anyone not tailing a log.
-    live = IngestProgress(tenant, namespace)
+    live = IngestProgress(job.tenant, target.namespace)
+    # A completion flag, not sys.exception() alone: in `finally` that also
+    # returns an exception the CALLER is handling, even when this body
+    # succeeded. When `done` is False an exception is in flight, and
+    # sys.exception() returns it rather than any outer one.
+    done = False
     try:
-        # One activity record for the whole job: its ~550 embedding batches roll
-        # up here (adapters/embed_lmstudio.py logs query embeddings only).
-        with ActivityLogger("job", "ingest", tenant=tenant,
-                            metadata={"namespace": namespace, "dry_run": dry_run}) as alog:
-            code = _build(live, tenant, namespace, root, codebase, include, dry_run, limit)
-            for key in ("files", "chunks", "redacted", "elapsed_s"):
-                if live.data.get(key) is not None:
-                    alog.add_metadata(key, live.data[key])
-            return code
-    except KeyboardInterrupt:
+        code = _logged_build(live, job, target)
+        done = True
+        return code
+    finally:
+        if not done:
+            _record_failure(live, sys.exception())
+
+
+def _record_failure(live: IngestProgress, failure: BaseException | None) -> None:
+    """Mark the live record with why the job stopped; the exception still propagates.
+
+    Ctrl-C is `interrupted`; an error is `error` with its type and message, so
+    the monitor shows WHY. SystemExit (a refusal like "nothing to index") and
+    other non-errors are left as they were, exactly as before.
+    """
+    if isinstance(failure, KeyboardInterrupt):
         live.end("interrupted")
-        raise
-    except Exception as e:
-        # Recorded so the monitor shows WHY, then re-raised unchanged.
-        live.end("error", error=f"{type(e).__name__}: {e}"[:300])
-        raise
+    elif isinstance(failure, Exception):
+        live.end("error", error=f"{type(failure).__name__}: {failure}"[:300])
+
+
+def _logged_build(live: IngestProgress, job: IngestJob, target: _Target) -> int:
+    """`_build` inside one activity record for the whole job.
+
+    Its ~550 embedding batches roll up here (adapters/embed_lmstudio.py logs
+    query embeddings only), with the run's counts added as metadata at the end.
+    """
+    with ActivityLogger("job", "ingest", tenant=job.tenant,
+                        metadata={"namespace": target.namespace,
+                                  "dry_run": job.dry_run}) as alog:
+        code = _build(live, job, target)
+        for key in ("files", "chunks", "redacted", "elapsed_s"):
+            if live.data.get(key) is not None:
+                alog.add_metadata(key, live.data[key])
+        return code
 
 
 def _save_bm25(index, namespace: str) -> None:
@@ -182,27 +247,32 @@ def _save_bm25(index, namespace: str) -> None:
             sidecar(namespace, BM25_FILE), index.stats(namespace).get("fingerprint", ""))
 
 
-def _build(live, tenant, namespace, root, codebase, include, dry_run, limit) -> int:
-    """The body of `build`, run under a live-progress record that marks failures."""
-    exclude = list(codebase.get("index_exclude") or [])
-    if exclude:
-        print(f"exclude   : {exclude}")
+def _collect_chunks(live: IngestProgress, job: IngestJob, target: _Target) -> list[dict]:
+    """Scan the target for indexable files and chunk them; SystemExit if none chunk."""
+    if target.exclude:
+        print(f"exclude   : {target.exclude}")
     live.phase("scanning")
-    files = iter_files(root, include, exclude)
-    if limit:
-        files = files[:limit]
+    files = iter_files(target.root, job.include, target.exclude)
+    if job.limit:
+        files = files[:job.limit]
     print(f"files     : {len(files)}")
     live.phase("chunking", files=len(files))
 
     chunks: list[dict] = []
     for f in files:
-        chunks.extend(chunk_file(f, root))
+        chunks.extend(chunk_file(f, target.root))
     print(f"chunks    : {len(chunks)}")
     if not chunks:
         raise SystemExit("nothing to index")
+    return chunks
 
-    # Redact BEFORE embedding. An index is durable: a secret embedded once stays
-    # retrievable and quotable until the whole namespace is rebuilt.
+
+def _redact(live: IngestProgress, chunks: list[dict], tenant: str) -> int:
+    """Run every chunk's text through the InputGuard in place; the redaction count.
+
+    Redact BEFORE embedding. An index is durable: a secret embedded once stays
+    retrievable and quotable until the whole namespace is rebuilt.
+    """
     live.phase("redacting", chunks=len(chunks))
     guard = config.get_input_guard()
     redacted_total = 0
@@ -210,22 +280,22 @@ def _build(live, tenant, namespace, root, codebase, include, dry_run, limit) -> 
         c["text"], report = guard.sanitize(c["text"], tenant=tenant)
         redacted_total += report.get("total_redactions", 0)
     print(f"redacted  : {redacted_total} value(s) removed before embedding")
+    return redacted_total
 
-    if dry_run:
-        by_kind: dict[str, int] = {}
-        for c in chunks:
-            by_kind[c["kind"]] = by_kind.get(c["kind"], 0) + 1
-        print(f"kinds     : {by_kind}")
-        print("dry run - nothing embedded or written")
-        live.end("finished", dry_run=True, redacted=redacted_total)
-        return 0
 
-    embedder = config.get_embedder()
-    index = config.get_index()
-    print(f"embedder  : {embedder}")
-    live.phase("embedding", redacted=redacted_total, model=embedder.model)
+def _dry_run_summary(live: IngestProgress, chunks: list[dict], redacted_total: int) -> int:
+    """Report chunk counts by kind and finish the job without embedding or writing."""
+    by_kind: dict[str, int] = {}
+    for c in chunks:
+        by_kind[c["kind"]] = by_kind.get(c["kind"], 0) + 1
+    print(f"kinds     : {by_kind}")
+    print("dry run - nothing embedded or written")
+    live.end("finished", dry_run=True, redacted=redacted_total)
+    return 0
 
-    started = time.time()
+
+def _embed_all(live: IngestProgress, embedder, chunks: list[dict]) -> None:
+    """Set every chunk's `vector`, BATCH at a time, reporting progress as it goes."""
     for i in range(0, len(chunks), BATCH):
         batch = chunks[i:i + BATCH]
         vectors = embedder.embed([embed_text(c) for c in batch], kind="passage")
@@ -236,20 +306,35 @@ def _build(live, tenant, namespace, root, codebase, include, dry_run, limit) -> 
         live.progress(done, len(chunks))
     print()
 
+
+def _build(live: IngestProgress, job: IngestJob, target: _Target) -> int:
+    """The body of `build`, run under a live-progress record that marks failures."""
+    chunks = _collect_chunks(live, job, target)
+    redacted_total = _redact(live, chunks, job.tenant)
+    if job.dry_run:
+        return _dry_run_summary(live, chunks, redacted_total)
+
+    embedder = config.get_embedder()
+    index = config.get_index()
+    print(f"embedder  : {embedder}")
+    live.phase("embedding", redacted=redacted_total, model=embedder.model)
+    started = time.time()
+    _embed_all(live, embedder, chunks)
+
     # The manifest is what lets the retriever refuse a query from a different
     # embedder (adapters/retriever_indexed.py). `root` is deliberately NOT
     # recorded: it is a per-machine path, and the index must stay meaningful
     # when the same corpus is built on the other machine.
-    manifest = {"tenant": tenant, "model": embedder.model, "dims": embedder.dims,
-                "include": include or [], "exclude": exclude}
+    manifest = {"tenant": job.tenant, "model": embedder.model, "dims": embedder.dims,
+                "include": job.include or [], "exclude": target.exclude}
     live.phase("writing")
-    written = index.upsert(namespace, chunks, manifest=manifest)
+    written = index.upsert(target.namespace, chunks, manifest=manifest)
     # The BM25 statistics, saved beside the vectors so a review loads them
     # instead of re-tokenising the whole corpus in every new process.
     live.phase("bm25")
-    _save_bm25(index, namespace)
+    _save_bm25(index, target.namespace)
     print(f"indexed   : {written} chunks in {time.time() - started:.1f}s")
-    print(f"stats     : {index.stats(namespace)}")
+    print(f"stats     : {index.stats(target.namespace)}")
     live.end("finished", chunks=written)
     return 0
 
@@ -267,8 +352,8 @@ def main() -> None:
                     help="chunk and redact, but do not embed or write")
     args = ap.parse_args()
     capture_library_logs()
-    raise SystemExit(build(args.tenant, args.include, args.dry_run,
-                           args.limit, args.surface, args.root))
+    raise SystemExit(build(args.tenant, args.include, args.dry_run, args.limit,
+                           surface=args.surface, root_override=args.root))
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ Every terminal path passes through `audit`, which writes one immutable run recor
 (G6). A DENIAL is the exception and is recorded by `await_approval` itself -- see
 the note on that edge below, and docs/DATA_STORAGE.md. A CRASH is the other: the
 graph has no failure edges, so `_traced` records the run as `failed` or
-`interrupted` before re-raising (G9).
+`interrupted` as the exception propagates (G9).
 
 ## One approval gate, not two (T4)
 
@@ -44,6 +44,7 @@ restart.
 """
 from __future__ import annotations
 
+import sys
 import time
 
 from langgraph.errors import GraphBubbleUp
@@ -77,7 +78,7 @@ def _traced(name, fn, tracer):
     The run's identity comes off state, so every span joins to the audit record
     on `run_id`. The same wrapper writes the node's live status (app/live.py) and
     its activity-log span, and on an exception records the run's failure audit
-    record (G9) before re-raising it unchanged.
+    record (G9) while it propagates unchanged (`_record_raise`).
     """
     def wrapped(state, *args, **kwargs):
         """Run the node inside its span; an interrupt() pause is `waiting`, not an error."""
@@ -89,6 +90,7 @@ def _traced(name, fn, tracer):
         alog = activity.ActivityLogger(
             "node", name, tenant=state.get("tenant"), run_id=state.get("_run_id"),
             correlation_id=state.get("thread_id") or activity.current_correlation()).start()
+        returned = False
         try:
             with tracer.span(f"node.{name}",
                              run_id=state.get("_run_id"),
@@ -97,28 +99,15 @@ def _traced(name, fn, tracer):
                              target=state.get("target"),
                              route=state.get("route")):
                 out = fn(state, *args, **kwargs)
-        except GraphBubbleUp:
-            # interrupt() suspends by raising: the approval gate, not a failure.
-            _live(state, name, "waiting", duration_ms=(time.perf_counter() - started) * 1000)
-            alog.complete("waiting")
-            raise
-        except KeyboardInterrupt as e:
-            _live(state, name, "error", duration_ms=(time.perf_counter() - started) * 1000,
-                  error="interrupted (Ctrl-C)")
-            alog.record_error(e, "interrupted (Ctrl-C)")
-            alog.complete()
-            _record_failure(state, name, e, "interrupted")
-            raise
-        except Exception as e:
-            # Recorded -- with its traceback, in the activity log -- then re-raised
-            # unchanged. Nothing is swallowed: the graph has no failure edges (G9),
-            # so this record is how a crashed run stays explainable.
-            ms = (time.perf_counter() - started) * 1000
-            _live(state, name, "error", duration_ms=ms, error=f"{type(e).__name__}: {e}")
-            alog.record_error(e, failure_source=_failure_source(e))
-            alog.complete()
-            _record_failure(state, name, e, "failed")
-            raise
+            returned = True
+        finally:
+            # Nothing is caught, so nothing can be swallowed: inside `finally`,
+            # sys.exception() is the exception in flight, and it propagates
+            # unchanged afterwards. `returned` guards the success path, where
+            # sys.exception() would instead report whatever exception a CALLER
+            # happens to be handling.
+            if not returned:
+                _record_raise(state, name, alog, started, sys.exception())
         ms = (time.perf_counter() - started) * 1000
         detail = live.summarize(name, out)
         _live(state, name, "ok", duration_ms=ms, detail=detail)
@@ -129,6 +118,40 @@ def _traced(name, fn, tracer):
         return out
     wrapped.__name__ = name
     return wrapped
+
+
+def _record_raise(state: dict, name: str, alog: activity.ActivityLogger, started: float,
+                  exc: BaseException | None) -> None:
+    """Record a node that raised `exc`: live status, activity span, failure record.
+
+    Called from `_traced`'s `finally` with the exception in flight; it never
+    raises `exc` itself -- the caller's `finally` lets it propagate unchanged.
+    Three outcomes, by what was raised:
+
+      * GraphBubbleUp -- interrupt() suspends by raising: the approval gate, not
+        a failure. The node is `waiting` and NO failure record is written.
+      * KeyboardInterrupt -- the run is recorded as `interrupted` (Ctrl-C).
+      * any other Exception -- recorded as `failed`, with its traceback in the
+        activity log. The graph has no failure edges (G9), so this record is how
+        a crashed run stays explainable.
+
+    Anything else outside Exception (SystemExit, a cancelled task) is not
+    recorded, exactly as before this was a `finally`.
+    """
+    ms = (time.perf_counter() - started) * 1000
+    if isinstance(exc, GraphBubbleUp):
+        _live(state, name, "waiting", duration_ms=ms)
+        alog.complete("waiting")
+    elif isinstance(exc, KeyboardInterrupt):
+        _live(state, name, "error", duration_ms=ms, error="interrupted (Ctrl-C)")
+        alog.record_error(exc, "interrupted (Ctrl-C)")
+        alog.complete()
+        _record_failure(state, name, exc, "interrupted")
+    elif isinstance(exc, Exception):
+        _live(state, name, "error", duration_ms=ms, error=f"{type(exc).__name__}: {exc}")
+        alog.record_error(exc, failure_source=_failure_source(exc))
+        alog.complete()
+        _record_failure(state, name, exc, "failed")
 
 
 def _record_failure(state: dict, name: str, exc: BaseException, outcome: str) -> None:

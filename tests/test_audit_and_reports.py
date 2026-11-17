@@ -13,14 +13,12 @@ import os
 
 import pytest
 
-pytest.importorskip("langgraph")
-
-import config  # noqa: E402, F401  -- must precede any surface override
-import registry  # noqa: E402
-from adapters.action_sinks import ReportSink  # noqa: E402
-from adapters.audit_jsonl import JsonlAuditSink  # noqa: E402
-from nodes._audit import build_record, write  # noqa: E402
-from tools import github_client  # noqa: E402
+import config
+import registry
+from adapters.action_sinks import ReportSink
+from adapters.audit_jsonl import JsonlAuditSink
+from nodes._audit import build_record, write
+from tools import github_client
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────────

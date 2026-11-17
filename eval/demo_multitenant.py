@@ -26,19 +26,23 @@ real input, and nothing was red because nothing ran this file.
 import os
 import sys
 
+import config
+from nodes.independent_review import independent_review
+from schemas.diagnosis import Citation, Diagnosis
+
 # Offline, like eval/harness.py. This script exists to show that POLICY decides,
 # so it must not need a model server. Since 2026-09-11 `independent_review`
 # resolves a judge from config rather than skipping the call when none is
 # injected -- and the judge's text cannot affect the outcome anyway, because four
 # Python booleans do. `setdefault`, so it can still be pointed at a real provider
 # deliberately.
+#
+# Set after the imports, and that is enough: config reads these three only when
+# a provider is resolved (inside its get_* functions), never at import time. They
+# must precede the first `config.get_*` call -- the tenant store just below.
 os.environ.setdefault("LLM_PROVIDER", "stub")
 os.environ.setdefault("RETRIEVER", "hybrid")   # the demo corpus, not a live index
 os.environ.setdefault("RERANKER", "none")
-
-import config  # noqa: E402  -- must follow the env default above
-from nodes.independent_review import independent_review  # noqa: E402
-from schemas.diagnosis import Citation, Diagnosis  # noqa: E402
 
 store = config.get_tenant_store()
 

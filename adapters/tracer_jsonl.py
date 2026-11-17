@@ -17,6 +17,7 @@ import contextlib
 import hashlib
 import json
 import os
+import sys
 import threading
 import time
 from datetime import UTC, datetime
@@ -37,6 +38,21 @@ def _interrupt_names() -> tuple[str, ...]:
     the normal, correct path.
     """
     return ("GraphInterrupt", "Interrupt", "GraphBubbleUp")
+
+
+def span_status(exc: BaseException | None) -> tuple[str, str | None]:
+    """(status, error) for a span that ended with `exc` in flight, or cleanly.
+
+    `ok` when nothing was raised; `suspended` for LangGraph's interrupt
+    exceptions (the approval gate, not a failure); otherwise `error`, with the
+    exception named. Any BaseException counts -- a Ctrl-C mid-node is still a
+    span, and still an error.
+    """
+    if exc is None:
+        return "ok", None
+    if type(exc).__name__ in _interrupt_names():
+        return "suspended", None
+    return "error", f"{type(exc).__name__}: {exc}"
 
 
 def prompts_enabled() -> bool:
@@ -88,18 +104,18 @@ class JsonlTracer:
         LangGraph's interrupt exceptions -- the approval gate, not a failure.
         """
         started = time.perf_counter()
-        status, error = "ok", None
+        finished = False
         try:
             yield self
-        except BaseException as e:
-            # Not a swallow: classify for the span, then ALWAYS re-raise below.
-            # BaseException on purpose -- a Ctrl-C mid-node is still a span.
-            if type(e).__name__ in _interrupt_names():
-                status = "suspended"                    # the approval gate, not a failure
-            else:
-                status, error = "error", f"{type(e).__name__}: {e}"
-            raise
+            finished = True
         finally:
+            # Nothing is caught: the block's exception, if any, keeps propagating
+            # unchanged once this `finally` ends. `sys.exception()` names it
+            # without catching it -- every BaseException, so a Ctrl-C mid-node is
+            # still a span. Read only when the block did NOT finish: on a clean
+            # exit it would report an exception the CALLER is handling around
+            # this span, and mark a successful block as failed.
+            status, error = span_status(None if finished else sys.exception())
             row = {
                 "schema_version": SCHEMA_VERSION,
                 "ts": datetime.now(UTC).isoformat(),

@@ -10,17 +10,8 @@ real code path.
 """
 import pytest
 
-pytest.importorskip("langgraph")
-
-# `config` must be imported BEFORE any test overrides a registered surface.
-# Importing it triggers `surfaces/__init__`, whose @surface decorators register
-# the real classes. The nodes import config lazily, so without this the FIRST
-# lazy import inside a run would re-register CodeReviewSurface and silently
-# clobber the override -- and the test would then exercise the real surface while
-# appearing to use the stub. Load-bearing, not tidy-uppable.
-import config  # noqa: E402, F401
-import registry  # noqa: E402
-from tools import github_client  # noqa: E402
+import registry
+from tools import github_client
 
 
 @pytest.fixture

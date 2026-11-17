@@ -34,6 +34,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import pathlib
+from dataclasses import dataclass
 
 # Large enough to hold a real function, small enough that an embedding stays
 # specific. Measured in characters because that is what the embedder charges for.
@@ -92,6 +93,77 @@ def _split_oversized(text: str, limit: int) -> list[str]:
     return parts or [text[:limit]]
 
 
+@dataclass(frozen=True)
+class _Span:
+    """A named, line-ranged region of one file that becomes one or more chunks.
+
+    Grouped so the chunk builder takes one value instead of five loose
+    arguments, and every piece of a split region carries the same location.
+    """
+
+    path: str
+    name: str
+    kind: str
+    start: int
+    end: int
+
+
+def _span_chunks(span: _Span, pieces: list[str]) -> list[dict]:
+    """One chunk per piece of `span`; a split region's names get `#n` suffixes.
+
+    Each piece keeps the WHOLE region's line span, so a citation to any piece
+    still opens the function it came from.
+    """
+    out = []
+    for n, piece in enumerate(pieces):
+        suffix = f"#{n + 1}" if len(pieces) > 1 else ""
+        out.append({
+            "id": _chunk_id(span.path, span.name + suffix, span.start, piece),
+            "text": piece,
+            "path": span.path,
+            "name": span.name + suffix,
+            "kind": span.kind,
+            "start_line": span.start,
+            "end_line": span.end,
+        })
+    return out
+
+
+def _def_span(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef, path: str) -> _Span:
+    """The lines a top-level def or class occupies, its decorators included.
+
+    Decorators carry real meaning in this codebase -- @task, @receiver,
+    @login_required -- so they belong in the chunk of what they decorate.
+    """
+    start, end = node.lineno, getattr(node, "end_lineno", node.lineno)
+    if node.decorator_list:
+        start = min(start, min(d.lineno for d in node.decorator_list))
+    kind = "class" if isinstance(node, ast.ClassDef) else "function"
+    return _Span(path, node.name, kind, start, end)
+
+
+def _def_chunks(span: _Span, lines: list[str]) -> list[dict]:
+    """The chunk(s) for a def's lines, split into `#n` pieces only when over
+    MAX_CHARS; a body under MIN_CHARS is dropped."""
+    body = "\n".join(lines[span.start - 1:span.end])
+    if len(body.strip()) < MIN_CHARS:
+        return []
+    pieces = [body] if len(body) <= MAX_CHARS else _split_oversized(body, MAX_CHARS)
+    return _span_chunks(span, pieces)
+
+
+def _module_chunks(lines: list[str], covered: set[int], path: str) -> list[dict]:
+    """Module-level code -- every line no top-level def or class covers -- as chunks.
+
+    Imports, constants, settings and URL tables live here, so it is indexed too.
+    """
+    module_src = "\n".join(ln for i, ln in enumerate(lines, 1) if i not in covered).strip()
+    if len(module_src) < MIN_CHARS:
+        return []
+    span = _Span(path, "<module>", "module", 1, len(lines))
+    return _span_chunks(span, _split_oversized(module_src, MAX_CHARS))
+
+
 def chunk_python(source: str, path: str) -> list[dict]:
     """One chunk per top-level function/class, plus one for module-level code."""
     try:
@@ -104,49 +176,12 @@ def chunk_python(source: str, path: str) -> list[dict]:
     lines = source.splitlines()
     out: list[dict] = []
     covered: set[int] = set()
-
-    def emit(name: str, start: int, end: int, kind: str) -> None:
-        """Append the chunk(s) for lines `start`..`end`, split into `#n` pieces
-        only when over MAX_CHARS; a body under MIN_CHARS is dropped."""
-        body ="\n".join(lines[start - 1:end])
-        if len(body.strip()) < MIN_CHARS:
-            return
-        pieces = [body] if len(body) <= MAX_CHARS else _split_oversized(body, MAX_CHARS)
-        for n, piece in enumerate(pieces):
-            suffix = f"#{n + 1}" if len(pieces) > 1 else ""
-            out.append({
-                "id": _chunk_id(path, name + suffix, start, piece),
-                "text": piece,
-                "path": path,
-                "name": name + suffix,
-                "kind": kind,
-                "start_line": start,
-                "end_line": end,
-            })
-
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            start, end = node.lineno, getattr(node, "end_lineno", node.lineno)
-            # Decorators carry real meaning in this codebase -- @task, @receiver,
-            # @login_required -- so include them in the chunk they belong to.
-            if node.decorator_list:
-                start = min(start, min(d.lineno for d in node.decorator_list))
-            kind = "class" if isinstance(node, ast.ClassDef) else "function"
-            emit(node.name, start, end, kind)
-            covered.update(range(start, end + 1))
-
-    module_lines = [ln for i, ln in enumerate(lines, 1) if i not in covered]
-    module_src = "\n".join(module_lines).strip()
-    if len(module_src) >= MIN_CHARS:
-        pieces = _split_oversized(module_src, MAX_CHARS)
-        for n, piece in enumerate(pieces):
-            suffix = f"#{n + 1}" if len(pieces) > 1 else ""
-            out.append({
-                "id": _chunk_id(path, "<module>" + suffix, 1, piece),
-                "text": piece, "path": path, "name": "<module>" + suffix,
-                "kind": "module", "start_line": 1, "end_line": len(lines),
-            })
-    return out
+            span = _def_span(node, path)
+            out += _def_chunks(span, lines)
+            covered.update(range(span.start, span.end + 1))
+    return out + _module_chunks(lines, covered, path)
 
 
 def chunk_text(source: str, path: str) -> list[dict]:

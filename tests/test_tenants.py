@@ -7,6 +7,7 @@ a broken merge would silently apply _default's thresholds to a stricter tenant.
 import pytest
 
 import config
+from schemas.policy import policy_errors
 
 
 @pytest.fixture
@@ -91,7 +92,7 @@ def _route_for(tenant, filename):
 
 def test_a_tenant_only_risky_area_reaches_the_investigation():
     """`subscription` is risky in Masterclass and in no default list."""
-    assert _route_for("masterclass", "Subscriptions/views.py") == "ai_investigation"
+    assert _route_for("merger_app", "Subscriptions/views.py") == "ai_investigation"
 
 
 def test_another_tenant_does_not_inherit_it():
@@ -107,7 +108,6 @@ def test_a_tenant_cannot_make_a_default_area_routine():
 
 
 # ── G11: the gate-relevant policy keys are validated ─────────────────────────
-from schemas.policy import policy_errors  # noqa: E402
 
 
 def test_every_shipped_policy_is_valid():

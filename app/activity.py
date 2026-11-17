@@ -55,6 +55,7 @@ import threading
 import time
 import traceback
 import uuid
+from dataclasses import dataclass, fields
 from datetime import UTC, datetime, timedelta
 
 from datadir import data_dir
@@ -197,24 +198,43 @@ def emit(record: dict) -> None:
 
 
 # ── the span ─────────────────────────────────────────────────────────────────
+@dataclass(frozen=True)
+class SpanContext:
+    """Where an operation sits: the service it called, the run and tenant it
+    belongs to, and the ids that join it to its request and its parent span.
+
+    Grouped because every one is carried onto the record unchanged and none
+    shapes the operation itself. `ActivityLogger` takes these by keyword
+    (`tenant=`, `run_id=`, ...) and builds this, so an unknown keyword is still a
+    TypeError rather than a silently dropped field.
+    """
+
+    target_service: str | None = None
+    correlation_id: str | None = None
+    parent_log_id: str | None = None
+    tenant: str | None = None
+    run_id: str | None = None
+
+
 class ActivityLogger:
     """One operation, timed, with its outcome. Sync context manager or explicit API."""
 
     def __init__(self, operation_type: str = "other", operation_name: str = "", *,
-                 target_service: str | None = None, correlation_id: str | None = None,
-                 parent_log_id: str | None = None, tenant: str | None = None,
-                 run_id: str | None = None, metadata: dict | None = None):
+                 metadata: dict | None = None, **context):
         """Describe the operation; nothing is timed or written until `start`/`complete`.
 
-        The correlation id falls back to the one bound by `correlation()`, then to
-        a fresh uuid, so a span logged outside any request or run is still
-        findable on its own. `metadata` is masked here, on the way in.
+        `context` is `SpanContext`'s fields by keyword (`target_service`,
+        `correlation_id`, `parent_log_id`, `tenant`, `run_id`). The correlation id
+        falls back to the one bound by `correlation()`, then to a fresh uuid, so a
+        span logged outside any request or run is still findable on its own.
+        `metadata` is masked here, on the way in.
         """
+        ctx = SpanContext(**context)
         self.log_id = str(uuid.uuid4())
         self.operation_type, self.operation_name = operation_type, operation_name
-        self.target_service, self.parent_log_id = target_service, parent_log_id
-        self.correlation_id = correlation_id or current_correlation() or str(uuid.uuid4())
-        self.tenant, self.run_id = tenant, run_id
+        self.target_service, self.parent_log_id = ctx.target_service, ctx.parent_log_id
+        self.correlation_id = ctx.correlation_id or current_correlation() or str(uuid.uuid4())
+        self.tenant, self.run_id = ctx.tenant, ctx.run_id
         self.metadata: dict = sanitize(dict(metadata or {}))
         self.status, self.is_error = "started", False
         self.error: dict = {}
@@ -327,68 +347,132 @@ def activity_log(operation_type: str, operation_name: str | None = None, **span_
     return wrap
 
 
-def log_event(operation_type: str, operation_name: str, *, severity: str = INFO,
-              message: str | None = None, exception: BaseException | None = None,
-              failure_source: str = "internal", metadata: dict | None = None,
-              tenant: str | None = None, run_id: str | None = None,
-              correlation_id: str | None = None) -> str:
-    """A point-in-time event (no duration). Returns its log_id."""
-    span = ActivityLogger(operation_type, operation_name, tenant=tenant, run_id=run_id,
-                          correlation_id=correlation_id, metadata=metadata).start()
-    if message:
-        span.add_metadata("message", message)
-    if severity == ERROR:
-        span.record_error(exception, message, failure_source)
-    elif exception is not None:
+@dataclass(frozen=True)
+class EventOutcome:
+    """What a point-in-time event reports: how severe it is, a message, and --
+    for a failure or a retry -- the exception and where the fault lies.
+
+    Unlike a span's, an event's severity is PASSED: there is no duration to
+    derive it from. `failure_source` is one of FAILURE_SOURCES (anything else is
+    recorded as `internal`).
+    """
+
+    severity: str = INFO
+    message: str | None = None
+    exception: BaseException | None = None
+    failure_source: str = "internal"
+
+
+_OUTCOME_FIELDS = frozenset(f.name for f in fields(EventOutcome))
+
+
+def _split_outcome(kwargs: dict) -> tuple[EventOutcome, dict]:
+    """(the `EventOutcome` named in `kwargs`, the rest -- `metadata` and the
+    `SpanContext` fields -- for `ActivityLogger`)."""
+    outcome = {k: v for k, v in kwargs.items() if k in _OUTCOME_FIELDS}
+    rest = {k: v for k, v in kwargs.items() if k not in _OUTCOME_FIELDS}
+    return EventOutcome(**outcome), rest
+
+
+def log_event(operation_type: str, operation_name: str, **kwargs) -> str:
+    """A point-in-time event (no duration). Returns its log_id.
+
+    Keywords are `EventOutcome`'s fields (`severity`, default INFO; `message`;
+    `exception`; `failure_source`, default `internal`), plus `metadata` and
+    `SpanContext`'s fields (`tenant`, `run_id`, `correlation_id`, ...) for the
+    span the event is written through. An unknown keyword is a TypeError.
+    """
+    outcome, span_kw = _split_outcome(kwargs)
+    span = ActivityLogger(operation_type, operation_name, **span_kw).start()
+    if outcome.message:
+        span.add_metadata("message", outcome.message)
+    if outcome.severity == ERROR:
+        span.record_error(outcome.exception, outcome.message, outcome.failure_source)
+    elif outcome.exception is not None:
         # A WARNING that carries an exception (a retry about to happen) keeps the
         # exception's type and message, but is not a failure: the caller is about
         # to try again. If it finally fails, THAT record is the ERROR.
-        span.add_metadata("exception_type", type(exception).__name__)
-        span.add_metadata("exception_message", _redact_text(str(exception)))
-    status = {ERROR: "failure", WARNING: "warning"}.get(severity, "success")
+        span.add_metadata("exception_type", type(outcome.exception).__name__)
+        span.add_metadata("exception_message", _redact_text(str(outcome.exception)))
+    status = {ERROR: "failure", WARNING: "warning"}.get(outcome.severity, "success")
     span.complete(status)
     return span.log_id
 
 
 # ── reading, for the admin page ──────────────────────────────────────────────
-def query(*, hours: float = 24, severity: str | None = None, operation_type: str | None = None,
-          q: str | None = None, correlation_id: str | None = None,
-          limit: int = 300) -> dict:
-    """Newest-first records in the window, filtered; plus facet counts for the UI.
+@dataclass(frozen=True)
+class ActivityFilter:
+    """The admin page's filters over activity rows. Each one left empty matches
+    everything; `q` is a case-insensitive substring of the whole record."""
 
-    Default window is the last 24 hours, as in the Masterclass admin -- an
-    unbounded error list is one nobody reads.
-    """
+    severity: str | None = None
+    operation_type: str | None = None
+    q: str | None = None
+    correlation_id: str | None = None
+
+    def matches(self, r: dict) -> bool:
+        """True when `r` passes every filter that is set."""
+        needle = (self.q or "").lower()
+        return ((not self.severity or r.get("severity") == self.severity)
+                and (not self.operation_type or r.get("operation_type") == self.operation_type)
+                and (not self.correlation_id or r.get("correlation_id") == self.correlation_id)
+                and (not needle or needle in json.dumps(r, default=str).lower()))
+
+
+def _day_rows(path: pathlib.Path, since_iso: str) -> list[dict]:
+    """One day file's records at or after `since_iso`. A missing or unreadable
+    file is no rows, and a line that is not JSON is skipped -- a torn write
+    must not hide the rest of the day."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    rows = []
+    for line in lines:
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if r.get("timestamp", "") >= since_iso:
+            rows.append(r)
+    return rows
+
+
+def _rows_in_window(hours: float) -> list[dict]:
+    """Every record from the last `hours`, read from each day file the window
+    can touch (one day either side, since files are per UTC day)."""
     since = datetime.now(UTC) - timedelta(hours=hours)
     days = {(since + timedelta(days=i)).strftime("%Y-%m-%d")
             for i in range(int(hours // 24) + 2)}
     rows: list[dict] = []
     for day in sorted(days):
-        path = log_dir() / f"{day}.jsonl"
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            continue
-        for line in lines:
-            try:
-                r = json.loads(line)
-            except ValueError:
-                continue
-            if r.get("timestamp", "") >= since.isoformat():
-                rows.append(r)
+        rows.extend(_day_rows(log_dir() / f"{day}.jsonl", since.isoformat()))
+    return rows
+
+
+def _facets(rows: list[dict]) -> dict:
+    """Counts by severity and by operation type, over the unfiltered window."""
     facets = {"severity": {}, "operation_type": {}}
     for r in rows:
         for f in facets:
             facets[f][r.get(f, "?")] = facets[f].get(r.get(f, "?"), 0) + 1
-    needle = (q or "").lower()
-    keep = [r for r in rows
-            if (not severity or r.get("severity") == severity)
-            and (not operation_type or r.get("operation_type") == operation_type)
-            and (not correlation_id or r.get("correlation_id") == correlation_id)
-            and (not needle or needle in json.dumps(r, default=str).lower())]
+    return facets
+
+
+def query(*, hours: float = 24, limit: int = 300, **filters) -> dict:
+    """Newest-first records in the window, filtered; plus facet counts for the UI.
+
+    `filters` are `ActivityFilter`'s fields by keyword (`severity`,
+    `operation_type`, `q`, `correlation_id`); an unknown one is a TypeError.
+    Default window is the last 24 hours, as in the Masterclass admin -- an
+    unbounded error list is one nobody reads.
+    """
+    flt = ActivityFilter(**filters)
+    rows = _rows_in_window(hours)
+    keep = [r for r in rows if flt.matches(r)]
     keep.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
     return {"total": len(rows), "matched": len(keep), "rows": keep[:limit],
-            "facets": facets, "hours": hours}
+            "facets": _facets(rows), "hours": hours}
 
 
 # ── third-party loggers -> the activity log ─────────────────────────────────

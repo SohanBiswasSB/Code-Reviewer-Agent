@@ -102,7 +102,7 @@ python -m app.doctor          # tells you what this machine is missing
 
 **Runs today:** the rule-based `classify` routing, the four-boolean gate (including
 tenant-policy resolution), the `execute` permission guard, `interrupt()`/resume on a real
-checkpointer with `POST /run` + `POST /approve` driving it, one immutable audit record per
+checkpointer with `POST /v1/run` + `POST /v1/approve` driving it, one immutable audit record per
 run, per-node tracing, checkpoint retention, the plugin registry, the filesystem tenant
 store, and namespaced hybrid retrieval (dense cosine + BM25, RRF-ordered) over an
 on-disk index built by `python -m tools.ingest --tenant <name>` -- built and tested, but

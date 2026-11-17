@@ -14,17 +14,15 @@ import json
 
 import pytest
 
-np = pytest.importorskip("numpy")
-
-from adapters.platforms import base  # noqa: E402
-from adapters.retriever_indexed import IndexedRetriever  # noqa: E402
-from adapters.vector_index_local import (  # noqa: E402
+from adapters.platforms import base
+from adapters.retriever_indexed import IndexedRetriever
+from adapters.vector_index_local import (
     LocalVectorIndex,
     fingerprint,
     namespace_dirname,
 )
-from tools.bm25 import BM25, tokenize  # noqa: E402
-from tools.chunking import MAX_CHARS, chunk_python, chunk_text  # noqa: E402
+from tools.bm25 import BM25, tokenize
+from tools.chunking import MAX_CHARS, chunk_python, chunk_text
 
 DIMS = 64
 

@@ -20,12 +20,17 @@ import platform as _platform
 import shutil
 import threading
 
-import adapters  # noqa: F401 -- side effect: adapters self-register  # pylint: disable=unused-import
+import adapters
 import registry
-import surfaces  # noqa: F401 -- side effect: surfaces self-register  # pylint: disable=unused-import
+import surfaces
 from adapters.llm_lmstudio import base_url as lmstudio_base_url
 from adapters.platforms import base as _profiles
 from nodes._render import FENCE_MARKERS
+
+# Imported for their side effect: importing each package runs every
+# @adapter/@surface decorator in it, which is what fills the registry this module
+# resolves from. Naming them here makes that dependency explicit.
+PLUGIN_PACKAGES = (adapters, surfaces)
 
 DEFAULT_SURFACES = "code_review,log_review"
 
@@ -126,7 +131,8 @@ def get_retriever():
     a caller makes, not a state the system defaults into.
     """
     return _shared(registry.get_adapter("retriever", os.getenv("RETRIEVER", "indexed")),
-                   "CRA_DATA_DIR", "LMSTUDIO_BASE_URL", "EMBEDDER", "VECTOR_INDEX")
+                   "CRA_DATA_DIR", "LMSTUDIO_BASE_URL", "LMSTUDIO_API_KEY", "EMBEDDER",
+                   "VECTOR_INDEX")
 
 
 def get_reranker():
@@ -147,8 +153,10 @@ def get_reranker():
     name = os.getenv("RERANKER", "none")
     if name == "none":
         return None
+    # LMSTUDIO_BASE_URL too: RERANKER=gateway posts there, and a test or shell
+    # that repoints it must get a new instance, not one bound to the old host.
     return _shared(registry.get_adapter("reranker", name), "RERANKER_MODEL",
-                   "RERANK_MAX_LENGTH", "CRA_PLATFORM", "CRA_PROFILE")
+                   "RERANK_MAX_LENGTH", "CRA_PLATFORM", "CRA_PROFILE", "LMSTUDIO_BASE_URL")
 
 
 def get_source(name: str):

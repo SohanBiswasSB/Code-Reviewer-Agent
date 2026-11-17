@@ -44,6 +44,7 @@ and fenced by `nodes/_render.py` before a model sees it.
 from __future__ import annotations
 
 import subprocess
+from dataclasses import dataclass
 
 from registry import adapter
 from tools.change_checks import split_diff
@@ -127,6 +128,91 @@ def _verify(root, rev: str) -> str:
     return _git(root, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}").strip()
 
 
+@dataclass(frozen=True)
+class _Change:
+    """A target resolved against the checkout: how git prints it, which files it
+    touches, where its old and new blobs live, and how to describe it.
+
+    `diff_args` reproduce the diff (`git diff --cached`, `git diff a...b`, `git
+    show sha`); `new_ref` / `base_ref` prefix a path to read a blob (`:` is the
+    index); `head` is the commit the change ends at, None for staged work, which
+    has no commit yet. `files` is git's raw name list, blanks included.
+    """
+
+    diff_args: tuple[str, ...]
+    files: list[str]
+    new_ref: str
+    base_ref: str
+    title: str
+    body: str
+    ref: str
+    head: str | None
+
+
+def _staged(root, codebase: dict) -> _Change:
+    """`staged`: what the next commit would contain (`git diff --cached`)."""
+    return _Change(
+        diff_args=("diff", "--cached"),
+        files=_git(root, "diff", "--cached", "--name-only").split("\n"),
+        new_ref=":",                       # the index: `git show :path`
+        base_ref="HEAD:",
+        title=f"Staged changes in {codebase.get('name') or root.name}",
+        body=_git(root, "diff", "--cached", "--stat"),
+        ref="staged",
+        head=None,                         # no commit yet: author is you
+    )
+
+
+def _span(root, target: str) -> _Change:
+    """`a..b` (the straight difference between two trees) or `a...b` (what b
+    changed since it branched from a -- a PR's view)."""
+    sep = "..." if "..." in target else ".."
+    a, b = target.split(sep, 1)
+    a, b = _verify(root, a), _verify(root, b)
+    span = f"{a}{sep}{b}"
+    # Three dots compare against where b branched from a, so the base is the
+    # merge base, not a itself.
+    base = _git(root, "merge-base", a, b).strip() if sep == "..." else a
+    files = _git(root, "diff", "--name-only", span).split("\n")
+    log = _git(root, "log", "--format=%h %s", f"{a}..{b}")
+    return _Change(diff_args=("diff", span), files=files, new_ref=f"{b}:",
+                   base_ref=f"{base}:",
+                   title=f"{target} ({len(log.splitlines())} commit(s))", body=log,
+                   ref=f"{a[:12]}..{b[:12]}", head=b)
+
+
+def _commit(root, target: str) -> _Change:
+    """`<rev>`: one commit, e.g. HEAD, HEAD~2, ec0d533."""
+    sha = _verify(root, target)
+    files = _git(root, "show", "--format=", "--name-only", sha).split("\n")
+    title = _git(root, "log", "-1", "--format=%s", sha).strip()
+    body = _git(root, "log", "-1", "--format=%b", sha).strip()
+    return _Change(diff_args=("show", "--format=", sha), files=files, new_ref=f"{sha}:",
+                   base_ref=f"{sha}^:", title=title, body=body, ref=sha[:12], head=sha)
+
+
+def _resolve(root, codebase: dict, target: str) -> _Change:
+    """Dispatch on the target's shape: staged, a span, or a single revision."""
+    if target == "staged":
+        return _staged(root, codebase)
+    if ".." in target:
+        return _span(root, target)
+    return _commit(root, target)
+
+
+def _packed_diff(root, change: _Change, files: list[str]) -> tuple[str, str]:
+    """The change's diff spent by priority within the budget; (diff, note).
+
+    The budget is spent file by file -- but the diffs are fetched in ONE git
+    call and split, not one call per file. `--no-renames` keeps each chunk
+    identical to what a per-path diff prints; `--` ends option parsing, so a
+    path is a path even if it starts with a dash.
+    """
+    args = change.diff_args
+    whole = split_diff(_git(root, *args, "--no-renames", "--", *files))
+    return pack_diff(files, lambda p: whole[p] if p in whole else _git(root, *args, "--", p))
+
+
 @adapter("source", "git_local")
 class GitLocalSource:
     """A diff from the tenant's checkout, in the shape the code_review surface reads."""
@@ -149,64 +235,22 @@ class GitLocalSource:
                 f"no git checkout at {str(root)!r}. Set CRA_CODEBASE_ROOT (or "
                 f"--root) to where this tenant's repo lives on this machine.")
         target = (target or "").strip()
+        change = _resolve(root, codebase, target)
 
-        if target == "staged":
-            diff_args = ("diff", "--cached")
-            files = _git(root, "diff", "--cached", "--name-only").split("\n")
-            new_ref = ":"                       # the index: `git show :path`
-            base_ref = "HEAD:"
-            title = f"Staged changes in {codebase.get('name') or root.name}"
-            body = _git(root, "diff", "--cached", "--stat")
-            ref = "staged"
-            head = None                         # no commit yet: author is you
-        elif ".." in target:
-            # `a...b` = what b changed since it branched from a (a PR's view);
-            # `a..b` = the straight difference between the two trees.
-            sep = "..." if "..." in target else ".."
-            a, b = target.split(sep, 1)
-            a, b = _verify(root, a), _verify(root, b)
-            span = f"{a}{sep}{b}"
-            new_ref = f"{b}:"
-            # Three dots compare against where b branched from a, so the base is
-            # the merge base, not a itself.
-            base = _git(root, "merge-base", a, b).strip() if sep == "..." else a
-            base_ref = f"{base}:"
-            diff_args = ("diff", span)
-            files = _git(root, "diff", "--name-only", span).split("\n")
-            log = _git(root, "log", "--format=%h %s", f"{a}..{b}")
-            title = f"{target} ({len(log.splitlines())} commit(s))"
-            body = log
-            ref = f"{a[:12]}..{b[:12]}"
-            head = b
-        else:
-            sha = _verify(root, target)
-            diff_args = ("show", "--format=", sha)
-            new_ref = f"{sha}:"
-            base_ref = f"{sha}^:"
-            files = _git(root, "show", "--format=", "--name-only", sha).split("\n")
-            title = _git(root, "log", "-1", "--format=%s", sha).strip()
-            body = _git(root, "log", "-1", "--format=%b", sha).strip()
-            ref = sha[:12]
-            head = sha
-
-        files = [f for f in (x.strip() for x in files) if f]
+        files = [f for f in (x.strip() for x in change.files) if f]
         if not files:
             raise GitTargetError(f"target {target!r} contains no changes to review")
 
-        # The budget is spent by priority, file by file -- but the diffs are fetched
-        # in ONE git call and split, not one call per file. `--no-renames` keeps
-        # each chunk identical to what a per-path diff prints; `--` ends option
-        # parsing, so a path is a path even if it starts with a dash.
-        whole = split_diff(_git(root, *diff_args, "--no-renames", "--", *files))
-        diff, note = pack_diff(
-            files, lambda p: whole[p] if p in whole else _git(root, *diff_args, "--", p))
+        diff, note = _packed_diff(root, change, files)
+        body = change.body
         if note:
             diff = f"{diff}\n\n{note}"
             body = f"{body}\n\n{note}".strip()
 
+        ref = change.ref
         return {
             "html_url": f"git-local://{codebase.get('repo') or root.name}@{ref}",
-            "title": title,
+            "title": change.title,
             "body": body,
             "diff": diff,
             "files": [{"filename": f} for f in files],
@@ -214,7 +258,7 @@ class GitLocalSource:
             # Where checks read the FULL change from (nodes/prepush_checks.py):
             # the packed `diff` above is cut to a budget, and a check must not
             # pass a file merely because it fell past the cut.
-            "revision": {"diff_args": list(diff_args), "new_ref": new_ref,
-                         "base_ref": base_ref, "head": head,
+            "revision": {"diff_args": list(change.diff_args), "new_ref": change.new_ref,
+                         "base_ref": change.base_ref, "head": change.head,
                          "commit": ref if ref != "staged" and ".." not in ref else None},
         }
