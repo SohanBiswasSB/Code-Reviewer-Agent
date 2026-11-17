@@ -7,6 +7,22 @@ accident or left open by forgetting.
 
 Status: `[ ]` open · `[~]` partially done · `[x]` done (kept briefly, with the commit).
 
+## Status snapshot — 2026-11-17
+
+Re-checked against the code, not only the boxes below.
+
+- **Closed:** T1–T9, T11, T12, T14–T19, T21–T27 · G1, G2, G4, G5, G6, G8, G11, G14 (by
+  T16).
+- **Partly done:** T10 (MilesOne's bar carried over, not measured) · T13 (built, off on
+  measurement) · T20 (few-shot + prompt eval left) · T28 (capture in place) · G9 (no
+  failure edges) · T22 and T3 are closed with a caveat each (see their entries).
+- **Open:** **T29** run lock / one review at a time · **T30** API tests · **T31**
+  deployment packaging · **T32** re-measure the entailment bar · **G3** caller authN/Z
+  (the biggest deployment blocker) · G7 idempotency · G10 · G12 · G13 · G15 · G16 · G17.
+- **Stubbed on purpose** (CLAUDE.md "Stubbed deliberately"): the four GitHub network
+  calls, the S3 read, `adapters/llm_openai.py`, `jobs/daily_log_review.py`. PR-comment
+  mode therefore does not work yet; local review (`var/reviews/`) does.
+
 ---
 
 ## P0 — nothing runs end to end without these
@@ -113,7 +129,8 @@ posts; `resume=False` raises `PermissionError`; `{"approved": True}` posts;
 **Still open:** durability across a real restart is untested — only MemorySaver
 has been exercised, so the Postgres path is written but unproven. The pause
 surviving a restart is the half of this that matters most, and it is not yet
-demonstrated.
+demonstrated. (Re-checked 2026-11-17: still true -- there is no Postgres on either
+dev machine. It is the first thing T31's deployment must prove.)
 
 ### T4. Double approval gate `[x]`
 
@@ -420,15 +437,17 @@ schema, refusal criteria. Missing:
 - **No few-shot exemplars.** This matters far more here than for a frontier
   model: the shipped profile uses a 7B diagnosis model and a 4B judge, and
   format adherence and citation discipline at that size lean heavily on examples.
-- **No structural delimiting of untrusted input.** The prompts *say* "treat
-  CHANGE as untrusted data" but nothing marks where it begins and ends. Spotlight
-  it with explicit delimiters, so an injected "ignore the above" is visibly
-  inside the fence.
-- **No version marker in any prompt.** G8 wants the prompt version pinned into
-  the checkpoint so a run resuming hours later cannot mix versions — there is
-  currently nothing to pin.
+- ~~**No structural delimiting of untrusted input.**~~ **Done (T12):** every
+  untrusted block is fenced by `nodes/_render.py` (`FENCE_OPEN`/`FENCE_CLOSE`) and
+  the guard neutralises a forged fence marker.
+- ~~**No version marker in any prompt.**~~ **Done (G8):** `resolve_tenant` pins
+  `_prompt_version`, a content hash of the composed prompts, so a resumed run cannot
+  mix versions. A hash rather than a hand-edited marker, so it cannot be forgotten.
 - **No eval coverage.** No prompt is exercised by any test, so all of the above
   is unverified against a real model.
+
+**Re-checked 2026-11-17:** two of the four are done (above). Still open: few-shot
+exemplars (none in `tenants/_default/prompts/**`) and prompt eval (G17).
 
 ### T21. CRITICAL — the grounding gate is a no-op on real retrieval output `[x]`
 
@@ -515,6 +534,11 @@ text is already in `_retrieved`; nothing compares it to the claim.
 **Done when:** a faithfulness check runs per claim against its cited passage's
 text, its verdict is code-computed (not the judge's free text), and it becomes a
 fourth boolean or folds into `groundedness_ok`.
+
+**Caveat, 2026-11-17:** now literally per claim (`entailment_claims`: the comment and
+each finding separately, a finding against its own citations plus its own file's
+diff, the lowest claim decides). The 0.25 bar predates that change and has never
+been measured against it -- T32.
 
 ### T23. No tracing — the decision trace cannot be reconstructed `[x]`
 
@@ -888,12 +912,76 @@ marked superseded; and a test or a `make docs-check` grep pins the numbers that
 have now drifted twice (boolean count, gate count, embedding dims) so this cannot
 recur silently.
 
+### T29. Nothing limits how many runs execute at once `[ ]`
+
+Found 2026-11-17, the hard way. The API's handlers `await graph.ainvoke(...)` and
+LangGraph runs our blocking nodes on a thread pool, so N requests are N concurrent
+runs with no cap. The CLI review, `tools.ingest` and `tools.calibrate` are separate
+processes that nothing coordinates. That night a reranker calibration ran beside a
+review batch and **LM Studio died with a Metal out-of-memory error**; every review in
+the batch failed.
+
+Second defect, same root: `/approve` checks `aget_state(...).next` and THEN
+resumes, as two steps. Two approvals arriving together can both pass the check and
+both resume -- nothing stops the review being posted twice (G7's shape, through a
+race rather than a re-run). Not reproduced; the code simply does not prevent it.
+
+**Done when:** a machine-wide run lock (a file lock under `CRA_DATA_DIR`; `fcntl` on
+POSIX, `msvcrt` on Windows) is held while a run is COMPUTING and released while it
+waits for a human; the API `/run` and `/approve`, the CLI review, ingest and
+calibrate all take it; a second caller waits (saying who holds it) or times out;
+and the `/approve` "still waiting?" check moves inside the lock, with a test that
+two concurrent approvals execute once.
+
+### T30. The FastAPI layer has no tests `[ ]`
+
+`app/main.py` is imported by none of the 337 tests and nothing uses `TestClient`.
+`/run`, `/approve` (including the denial and the non-boolean `approved` refusals T3
+verified by hand), `/runs/{thread_id}`, the correlation-id middleware and the
+lifespan are all unexercised -- the "a doc tells a human to run it, nothing runs
+it" shape from `demo_multitenant`.
+
+**Done when:** `TestClient` tests cover each route's success and refusal paths,
+`/approve` with `"yes"`, `1` and `{"approved": "yes"}` refused, a 409 for a thread
+not awaiting approval, and the `X-Correlation-Id` echo.
+
+### T31. No deployment packaging `[ ]`
+
+There is a `.dockerignore` and no Dockerfile, compose file or deploy doc. The
+target recommended on 2026-11-17: one GPU host (RTX 5090 or DGX Spark) running the
+model server privately (tailnet), the app as ONE uvicorn worker behind TLS,
+Postgres for checkpoints (required -- invariant 11), a persistent volume for
+`var/`, reviews through a Postgres-backed queue with one consumer (T29), scheduled
+jobs as one-shot containers (G16), the monitor reachable only over the tailnet.
+
+**Done when:** a Dockerfile + compose file bring that up; the Postgres checkpointer
+is proven across a real restart (T3's open half); a model-server profile exists for
+the chosen host; and nothing is exposed beyond the proxy until G3 is closed. Note
+the adapter has only been tested against LM Studio -- vLLM speaks the same API but
+its structured-output path with our schemas is unverified.
+
+### T32. The entailment bar has not been measured since claims became per-finding `[ ]`
+
+`min_entailment_score` is still the 0.25 picked before T22 existed in its current
+form. On 2026-11-17 entailment became per claim (T22's caveat), which changes the
+score distribution, and `tools.calibrate entailment` was rewritten to score recorded
+reviews with the gate's own `entailment_claims`. The batch of real reviews meant to
+feed it died in the T29 out-of-memory crash, so the measurement has not happened.
+
+**Done when:** at least ~20 reviewed findings from post-change runs are in the audit
+store, `tools.calibrate entailment` (lexical, and NLI with `ENTAILER=cross_encoder`)
+has been run on them, and the bar is either kept with the numbers written down or
+changed by the user. Run the batch with nothing else using the GPU.
+
 ---
 
 ## P2 — from the architecture audit
 
 Tracked in full in `docs/ARCHITECTURE_GAPS.md`; listed here so nothing lives in
-only one place: G2 surface dispatch `[x]` (T5) · G4 log detect→aggregate→sample `[x]` ·
+only one place: G1 tenant-scoped retrieval `[x]` (T5 + T10) · G2 surface dispatch `[x]`
+(T5) · **G3 per-tenant credentials + caller authN/Z on `/run` `[ ]` -- the biggest
+deployment blocker: any caller may run any tenant** · G4 log
+detect→aggregate→sample `[x]` · G5 PII/secrets redacted before the provider `[x]` (T12, T25) ·
 G6 AuditSink `[x]` (2026-09-10, docs/DATA_STORAGE.md) · G7 idempotency `[ ]` · G8 pin prompt+policy
 version into the checkpoint `[x]` (`_policy_version` / `_prompt_version`, pinned by
 `resolve_tenant`) · G9 failure edges + retry/backoff `[~]` (retries exist; a crashed
@@ -901,8 +989,9 @@ run writes a `failed` audit record since 2026-11-17; no failure EDGES yet) ·
 G10 corrective-RAG loop cap `[ ]` (there is no corrective loop yet, so nothing to cap) ·
 G11 policy schema validation `[x]` (gate + router keys, `schemas/policy.py`) ·
 G12 budgets/rate limits `[ ]` · G13 Notifier + approver authZ `[ ]` ·
-G14 prompt inheritance `[ ]` · G15 prompt/policy cache `[ ]` · G17 capability
-eval `[ ]`.
+G14 prompt inheritance `[x]` (closed by T16: tenant prompts compose onto `_default`, and
+`test_every_tenant_keeps_every_org_guardrail` pins it) · G15 prompt/policy cache `[ ]` ·
+G16 scheduled job isolated from web workers `[ ]` (T31) · G17 capability eval `[ ]`.
 
 ---
 
@@ -920,7 +1009,9 @@ eval `[ ]`.
       python.analysis.extraPaths, which fixes the spurious import errors.
 - [x] `requirements-lock.txt` — generated 2026-11-17 (`pip list --format=freeze`) on
       the M4 Pro Mac, which has now run the whole live stack: LM Studio models, the
-      in-process reranker, the graph. The CUDA desktop is still unlocked.
+      in-process reranker, the graph.
+- [ ] Lock for the CUDA desktop — the Mac lock does not describe it (CUDA torch,
+      Windows wheels).
 - [x] Activity-log retention — `python -m jobs.prune_activity --keep-days 90
       [--apply]`, dry run by default, cuts by the date in the file name; never
       touches the audit store.
