@@ -29,7 +29,7 @@ Adapters/surfaces self-register with `@adapter(kind, name)` / `@surface(name)`.
 
 ```
 LLM_PROVIDER=openai      # -> adapters/llm_openai.py
-RETRIEVER=hybrid         # -> adapters/retriever_hybrid.py  (swap: pinecone | pgvector)
+RETRIEVER=indexed        # -> adapters/retriever_indexed.py (offline demo: hybrid)
 SURFACES=code_review,log_review
 CHECKPOINTER=postgres
 ```
@@ -42,8 +42,9 @@ CHECKPOINTER=postgres
 - **New log detector:** add a `Detector` and register it; the log surface picks it up.
 
 ## Run modes (one image)
-- **web** — `uvicorn app.main:app` : `POST /run/{surface}` drives any registered surface to
-  the approval gate; `POST /approve` resumes; `GET /registered` lists plugins.
+- **web** — `uvicorn app.main:app` : `POST /v1/run/{surface}` drives any registered surface
+  to the approval gate; `POST /v1/approve` resumes; `GET /v1/registered` lists plugins.
+  Typed request/response models, `{success, message, data}` envelope (app/api_models.py).
 - **daily** — `python -m jobs.daily_log_review` on **EventBridge → ECS RunTask** (the exact
   MilesOne pattern): runs the `log_review` surface over yesterday's logs, emits the report.
 - **eval** — `python -m eval.harness`.

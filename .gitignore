@@ -9,6 +9,9 @@ dist/
 # Environments
 .env
 .env.*
+# The annotated settings reference IS committed: it holds no values, only
+# names and defaults, and TODO.md has long listed it as shipped.
+!.env.example
 .venv/
 venv/
 env/
@@ -20,7 +23,10 @@ env/
 .ipynb_checkpoints/
 
 # Editors / OS
-.vscode/
+# .vscode/settings.json IS committed (shared editor behaviour, see
+# docs/DECISIONS.md); everything else under .vscode is local.
+.vscode/*
+!.vscode/settings.json
 .idea/
 .DS_Store
 Thumbs.db
@@ -29,3 +35,8 @@ Thumbs.db
 *.log
 runs/
 reports/
+
+# Audit records, traces and log-review reports (docs/DATA_STORAGE.md). These hold
+# evidence-derived text and, until T12 (InputGuard) lands, nothing redacts PII or
+# secrets out of it. As sensitive as the source data -- never commit it.
+var/

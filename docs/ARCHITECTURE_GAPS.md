@@ -63,6 +63,12 @@ The graph has no error edges. If fetch/retrieval/LLM fails, there's no retry/bac
 fallback to `human_review`, no dead-letter.
 **Fix:** per-node failure policy; on unrecoverable error route to `human_review` with the
 error captured; retry transient calls with backoff + a circuit breaker.
+**PARTLY DONE.** Transient model calls retry with backoff (`with_retry`, 2026-09). Since
+2026-11-17 a crashed run is no longer invisible: `app/graph.py::_traced` writes an audit
+record with outcome `failed` (or `interrupted`), naming the node and the guarded error, then
+re-raises -- invariant 9 now holds for crashes. A CLI review left at the gate with no
+terminal is recorded as `abandoned`. Still open: failure EDGES (route to `human_review`
+instead of raising) and a circuit breaker.
 
 ### G10. Corrective-RAG loop (#7) has no cap  → infinite-loop / cost risk
 `reject_retrieve_more` re-retrieves; without a max-iteration counter it can loop forever.
@@ -72,6 +78,11 @@ error captured; retry transient calls with backoff + a circuit breaker.
 A typo'd `policy.json` key or a surface a tenant hasn't enabled fails silently at runtime.
 **Fix:** validate policy against a schema at load/onboarding (fail fast); `/run` rejects a
 surface not in the tenant's `enabled_surfaces`. *(enabled_surfaces check added.)*
+**DONE for the gate and router keys (2026-11-17)**, `schemas/policy.py`: the thresholds must
+be numbers in 0..1, the allowlists and `risky_areas` lists of strings (a bare string matches
+by SUBSTRING, so a typo would widen the rule), severities known. `resolve_tenant` raises
+`ConfigError` before any evidence is fetched; `doctor` reports it as FAIL. Keys owned by
+other code (prepush, codebase) are validated by that code.
 
 ## P2 — hardening
 - **G12.** No cost/token budget or per-tenant rate limiting → runaway cost; add budgets + limits.

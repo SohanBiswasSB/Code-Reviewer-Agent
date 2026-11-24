@@ -1,0 +1,28 @@
+# pylint 4.0.9 (pinned in requirements-dev.txt), run by `python check.py` over the
+# whole repo. Every default stays on, at its default value, with one exception:
+#
+# min-public-methods 2 -> 1 (the user's decision, 2026-11-24). The ports in
+# ports/interfaces.py are one-method Protocols (LLM.complete, Entailer.score,
+# Embedder.embed, ...) and their adapters implement exactly that method: the
+# standard Python shape for a pluggable strategy, which a second method would
+# only pad. Classes that hold state became @dataclass and classes that were really
+# one function became functions; this covers the genuine one-method classes that
+# remain. A class with NO public method is still flagged.
+#
+# Nothing else is configured here: no disabled message, no raised limit. Fix the
+# cause (CLAUDE.md, "Coding standards are enforced on this repo").
+
+[DESIGN]
+min-public-methods=1
+
+[MAIN]
+# Scope, not silence (the same list ruff.toml excludes): var/ is run data that may
+# hold evidence-derived text and is never committed.
+ignore=var,__pycache__,.git
+recursive=yes
+# The repo root is where `config`, `adapters`, `tests._llm_fakes`... resolve from.
+# pytest gets it from pytest.ini (pythonpath = .); without this pylint reports
+# every project import in tests/ as E0401 and hides what it would have inferred.
+# Relative to the working directory, so pylint runs from the repo root: check.py
+# does, and .vscode/settings.json points the editor's pylint there.
+source-roots=.

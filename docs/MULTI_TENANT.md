@@ -11,10 +11,10 @@ tenants/
     policy.json                     # thresholds, allowlists, allowed actions, enabled surfaces
     prompts/<surface>/<node>.md     # diagnosis.md, judge.md, ...
   milesone/                         # tenant A — its own rules
-    policy.json                     # e.g. min_relevance_score 0.40, risky_areas incl. zoom/webhook
+    policy.json                     # e.g. min_relevance_score 0.75, risky_areas incl. zoom/webhook
     prompts/code_review/diagnosis.md
-  project_b/                        # tenant B — stricter
-    policy.json                     # min_relevance_score 0.55, severity_allowlist ["low"], comment-only
+  project_b/                        # tenant B — different rules
+    policy.json                     # its own risky_areas (concurrency, auth, payments); placeholder, no repo
     prompts/code_review/diagnosis.md
 ```
 
@@ -31,8 +31,14 @@ allowlist — zero code change.
 
 ## Levels of guardrail (all per-tenant)
 1. **Prompt** (per surface/node) — the tenant's own instructions & emphasis.
-2. **Policy** (per surface) — `min_relevance_score`, `severity_allowlist`, `allowed_actions`,
-   `risky_areas`, `anomaly_threshold`, `enabled_surfaces`.
+2. **Policy** (per surface) — `min_relevance_score` (the bar for a COSINE),
+   `min_rerank_score` (the bar for a RERANKER score, T13 -- each retrieved passage says
+   which kind it carries, and the gate picks the matching bar), `min_entailment_score`,
+   `severity_allowlist`, `allowed_actions`, `risky_areas`, `anomaly_threshold`,
+   `enabled_surfaces`. `risky_areas` is ADDED to the surface's defaults (T27, 2026-11-17)
+   -- a tenant can make `subscription` risky but cannot make `migrations` routine. These
+   keys are validated when a run starts (G11, `schemas/policy.py`): a bad value fails the
+   run with the key named, instead of quietly changing what the gate does.
 3. **Code invariants** (org-wide, NOT tenant-overridable) — judge-explains/code-decides,
    the `execute` PermissionError guard, untrusted-input handling. Tenants tune *values*,
    never remove the *boundary*.
@@ -54,7 +60,35 @@ Project B = repo B, MilesOne = the backend repo). Each tenant's `policy.json` ca
 repo to pull the diff/files from. Onboarding a new codebase = add `tenants/<codebase>/`
 with its `codebase` binding, prompts, and rules.
 
+The same binding names the tenant's **retrieval namespace** (`repo`) — build it with
+`python -m tools.ingest --tenant <codebase>`. `codebase.index_exclude` lists path globs
+(a pattern also matches every parent directory) that must never enter the index — data
+exports and user-record reports that live beside the code. Redaction is pattern-based and
+an index is a durable copy, so excluding such files is the only complete fix.
+
 **Escalate-to-human is shared, not per-project.** Every codebase routes to human review
 on the same conditions — an ungroundable diagnosis, a risk/permission miss, or an explicit
 `escalate_to_human: true` safety default. It's the org-wide safety net; a codebase tunes
 its *thresholds and prompts*, but the escalate route is always there for A and B alike.
+
+## Pre-push checks per codebase (`code_review.prepush`)
+
+Every code review runs the GENERIC change checks -- N+1 queries in loops, new
+warning-silencing comments, line length / ASCII on added lines, new undocumented
+HTTP handlers, imports of files git does not track. A codebase that has its own
+pre-push conventions declares them, and the reviewer then FLAGS a change that
+skipped them:
+
+| key | what it enforces |
+|---|---|
+| `max_line_length`, `hygiene_suffixes`, `skip_dirs` | tune the generic checks |
+| `never_commit`, `read_only` | path prefixes / globs the change must not touch |
+| `docs` | per-app doc folder; which changed file needs which doc; dated change-log entry; the exact file set |
+| `postman` | collection + environments; API-file triggers; generator inputs; no secret values |
+| `tracker` | owner (git author) -> tracker file + key prefix; CSV header; required description blocks |
+| `commit_message` | file (staged) or the commit itself; subject regex; required blocks; no attribution |
+| `not_checkable` | `[name, step, why]` rows the reviewer cannot run (DB, Django, network) -- reported as `skip` |
+
+`tenants/merger_app/policy.json` is the worked example: it mirrors that repo's
+`.claude/skills/prepush-ritual`. A codebase without a block is held to the generic
+checks only -- it is never flagged for lacking someone else's conventions.

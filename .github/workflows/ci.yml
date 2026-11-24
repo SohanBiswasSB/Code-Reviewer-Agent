@@ -1,10 +1,66 @@
-name: ci
-on: [push, pull_request]
-jobs:
-  gates:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
-      - run: python3 -m eval.harness   # safety gates at a 100% bar
+# ─────────────────────────────────────────────────────────────────────────────
+# CI IS DISABLED (commented out 2026-09-10). This project is run LOCALLY only.
+#
+# Nothing in here runs. To re-enable, strip the leading "# " from every line
+# below the divider -- the pipeline itself is unchanged and was passing at the
+# time it was switched off (ruff clean, 164 tests including the strict-serialiser
+# run, 54/54 gates).
+#
+#   >>> Run `python check.py` instead. <<<
+#
+# check.py runs these same steps in this same order, and is the ONLY gate now.
+# Prefer it over running pytest alone, because these two are easy to forget and
+# are the ones that have actually caught things:
+#   · the safety-gate suite, which runs FIRST and with NO dependencies installed,
+#     precisely so a broken requirements file cannot mask a weakened gate
+#   · the second pytest run with LANGGRAPH_STRICT_MSGPACK=true -- the check that
+#     caught T15, where an unregistered state type comes back from a checkpoint
+#     as a plain dict instead of raising
+#
+# NOTE: an all-comment file has no `on:` trigger, so GitHub will list this as an
+# invalid workflow in the Actions tab. That is cosmetic. If you would rather it
+# be ignored silently, rename the file to `ci.yml.disabled` -- Actions only reads
+# `.yml`/`.yaml` -- and delete this note.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# name: ci
+# on: [push, pull_request]
+# jobs:
+#   gates:
+#     runs-on: ubuntu-latest
+#     steps:
+#       - uses: actions/checkout@v4
+#       - uses: actions/setup-python@v5
+#         with: { python-version: "3.11" }
+#
+#       # The safety gates need NO dependencies at all -- run them first and
+#       # unpinned, so a broken requirements file can never mask a weakened gate.
+#       - name: safety gates (100% bar, pass^k)
+#         run: python -m eval.harness
+#         env:
+#           CRA_PLATFORM: cpu
+#
+#       - name: install
+#         run: pip install -r requirements-dev.txt
+#
+#       - name: lint
+#         run: ruff check .
+#
+#       - name: unit tests
+#         run: pytest
+#
+#       # The durable pause is the basis of the approval gate, so run the suite
+#       # again with the SERIALISER SET TO STRICT. Without this an unregistered
+#       # state type only warns -- and the release that starts enforcing it would
+#       # make every paused run unresumable (T15).
+#       - name: unit tests (strict checkpoint serialiser)
+#         run: pytest
+#         env:
+#           LANGGRAPH_STRICT_MSGPACK: "true"
+#
+#       # Reports FAIL when the model server is absent, which is expected in CI --
+#       # so assert only that it runs and produces a report.
+#       - name: doctor (report only)
+#         run: python -m app.doctor --json || true
+#         env:
+#           CRA_PLATFORM: cpu

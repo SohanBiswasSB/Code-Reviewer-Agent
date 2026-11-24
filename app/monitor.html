@@ -1,0 +1,866 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Monitor</title>
+<style>
+:root{
+ --bg:#f4f5f9;--panel:#fff;--sunk:#f8f9fc;--hover:#f5f7fb;--ink:#101828;--ink2:#344054;--mute:#667085;
+ --line:#e4e7ec;--line2:#eef0f4;
+ --side:#0f1525;--side2:#161e33;--side-ink:#98a2b8;--side-hi:#fff;
+ --acc:#4f46e5;--acc-bg:#eef2ff;--acc-bd:#c7d2fe;
+ --ok:#067647;--ok-bg:#ecfdf3;--ok-bd:#abefc6;
+ --warn:#b54708;--warn-bg:#fffaeb;--warn-bd:#fedf89;
+ --err:#d92d20;--err-bg:#fef3f2;--err-bd:#fecdca;
+ --info:#175cd3;--info-bg:#eff8ff;--info-bd:#b2ddff;
+ --idle:#98a2b3;--idle-bg:#f2f4f7;--idle-bd:#e4e7ec;
+ --shadow:0 1px 2px rgba(16,24,40,.05);--shadow2:0 1px 3px rgba(16,24,40,.08),0 1px 2px rgba(16,24,40,.04);
+ --r:12px;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){:root{
+ --bg:#0b0f19;--panel:#121826;--sunk:#0f1420;--hover:#161d2d;--ink:#eef0f5;--ink2:#cdd2dc;--mute:#8d96a8;
+ --line:#222a3b;--line2:#1b2232;
+ --side:#080b13;--side2:#111727;--side-ink:#8d96a8;--side-hi:#fff;
+ --acc:#8b8dfc;--acc-bg:rgba(99,102,241,.14);--acc-bd:rgba(129,140,248,.35);
+ --ok:#47cd89;--ok-bg:rgba(23,178,106,.12);--ok-bd:rgba(71,205,137,.3);
+ --warn:#fdb022;--warn-bg:rgba(247,144,9,.12);--warn-bd:rgba(253,176,34,.3);
+ --err:#f97066;--err-bg:rgba(240,68,56,.12);--err-bd:rgba(249,112,102,.3);
+ --info:#53b1fd;--info-bg:rgba(46,144,250,.12);--info-bd:rgba(83,177,253,.3);
+ --idle:#6b7385;--idle-bg:rgba(152,162,179,.1);--idle-bd:#2a3244;
+ --shadow:none;--shadow2:none}}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Inter","Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit}
+.mono{font-family:var(--mono);font-size:12px}
+.mute{color:var(--mute)}.sm{font-size:12px}
+svg.i{width:16px;height:16px;flex:none;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;vertical-align:-3px}
+
+/* ── shell ── */
+.app{display:grid;grid-template-columns:248px minmax(0,1fr);min-height:100vh}
+.side{background:var(--side);color:var(--side-ink);position:sticky;top:0;height:100vh;display:flex;flex-direction:column;padding:18px 14px}
+.brand{display:flex;align-items:center;gap:10px;padding:4px 8px 18px;border-bottom:1px solid rgba(255,255,255,.06);margin-bottom:14px}
+.logo{width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,#6366f1,#8b5cf6);display:grid;place-items:center;color:#fff}
+.logo svg.i{width:18px;height:18px}
+.brand b{display:block;color:var(--side-hi);font-size:14px;font-weight:600;line-height:1.2}.brand span{font-size:12px}
+.navh{font-size:11px;text-transform:uppercase;letter-spacing:.08em;padding:8px 10px 6px;color:#5d6780}
+.nav{all:unset;box-sizing:border-box;display:flex;align-items:center;gap:10px;width:100%;padding:8px 10px;border-radius:8px;cursor:pointer;color:var(--side-ink);font-size:13.5px;margin-bottom:2px}
+.nav:hover{background:var(--side2);color:var(--side-hi)}.nav:focus-visible{outline:2px solid var(--acc)}
+.nav.on{background:var(--side2);color:var(--side-hi)}
+.nav .cnt{margin-left:auto;font-size:11px;padding:0 7px;border-radius:99px;background:rgba(255,255,255,.08);color:var(--side-hi)}
+.nav .cnt.err{background:rgba(240,68,56,.25)}.nav .cnt.warn{background:rgba(247,144,9,.25)}
+.side-foot{margin-top:auto;font-size:11.5px;padding:12px 10px 0;border-top:1px solid rgba(255,255,255,.06);word-break:break-all}
+.side-foot .mono{font-size:11px;color:#6f7a93}
+.main{min-width:0}
+.top{position:sticky;top:0;z-index:5;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(8px);border-bottom:1px solid var(--line);padding:14px 28px;display:flex;align-items:center;gap:14px}
+.top h1{font-size:18px;margin:0;font-weight:600;letter-spacing:-.01em}.top .grow{flex:1}
+.live{display:inline-flex;align-items:center;gap:8px;font-size:12px;color:var(--mute);background:var(--panel);border:1px solid var(--line);padding:5px 11px;border-radius:99px;box-shadow:var(--shadow)}
+.pulse{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 0 var(--ok);animation:pl 2s infinite}
+.pulse.off{background:var(--err);animation:none}
+@keyframes pl{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--ok) 60%,transparent)}70%{box-shadow:0 0 0 7px transparent}100%{box-shadow:0 0 0 0 transparent}}
+.content{padding:22px 28px 80px;max-width:1280px}
+.banner{display:none;margin-bottom:16px;padding:10px 14px;border-radius:10px;border:1px solid var(--err-bd);background:var(--err-bg);color:var(--err);font-size:13px}
+.banner.show{display:flex;gap:8px;align-items:center}
+
+/* ── kpis ── */
+.kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:22px}
+.kpi{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:16px 18px;box-shadow:var(--shadow);display:flex;gap:14px;align-items:flex-start;
+ font:inherit;color:inherit;text-align:left;width:100%;cursor:pointer;transition:border-color .15s,transform .15s}
+.kpi:hover{border-color:var(--acc,#6366f1);transform:translateY(-1px)}
+.kpi:focus-visible{outline:2px solid var(--acc,#6366f1);outline-offset:2px}
+.kpi[aria-pressed="true"]{border-color:var(--acc,#6366f1)}
+.kpi .ic{width:38px;height:38px;border-radius:10px;display:grid;place-items:center;flex:none}
+.kpi .ic svg.i{width:19px;height:19px}
+.kpi b{display:block;font-size:26px;line-height:1.1;font-weight:600;letter-spacing:-.02em}
+.kpi span{font-size:12.5px;color:var(--mute)}
+.t-acc{background:var(--acc-bg);color:var(--acc)}.t-ok{background:var(--ok-bg);color:var(--ok)}
+.t-warn{background:var(--warn-bg);color:var(--warn)}.t-err{background:var(--err-bg);color:var(--err)}
+.t-info{background:var(--info-bg);color:var(--info)}.t-idle{background:var(--idle-bg);color:var(--mute)}
+
+/* ── panels (collapsible) ── */
+details.panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);margin-bottom:18px;scroll-margin-top:80px}
+details.panel>summary{list-style:none;display:flex;align-items:center;gap:10px;padding:14px 18px;cursor:pointer;user-select:none;border-radius:var(--r)}
+details.panel>summary::-webkit-details-marker{display:none}
+details.panel>summary:focus-visible{outline:2px solid var(--acc);outline-offset:-2px}
+details.panel[open]>summary{border-bottom:1px solid var(--line);border-radius:var(--r) var(--r) 0 0}
+.ph-ic{width:30px;height:30px;border-radius:8px;display:grid;place-items:center;background:var(--acc-bg);color:var(--acc)}
+.ph-t{font-weight:600;font-size:15px}.ph-s{font-size:12.5px;color:var(--mute)}
+.chev{margin-left:auto;color:var(--mute);transition:transform .15s}
+details.panel[open]>summary .chev{transform:rotate(180deg)}
+.pb{padding:16px 18px}.pb.flush{padding:0}
+
+/* ── badges ── */
+.badge{display:inline-flex;align-items:center;gap:6px;padding:2px 9px;border-radius:99px;font-size:12px;font-weight:500;border:1px solid;white-space:nowrap;line-height:1.5}
+.badge::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+.badge.nodot::before{display:none}
+.b-ok{color:var(--ok);background:var(--ok-bg);border-color:var(--ok-bd)}
+.b-warn{color:var(--warn);background:var(--warn-bg);border-color:var(--warn-bd)}
+.b-err{color:var(--err);background:var(--err-bg);border-color:var(--err-bd)}
+.b-info{color:var(--info);background:var(--info-bg);border-color:var(--info-bd)}
+.b-acc{color:var(--acc);background:var(--acc-bg);border-color:var(--acc-bd)}
+.b-idle{color:var(--mute);background:var(--idle-bg);border-color:var(--idle-bd)}
+
+/* ── tables ── */
+.tw{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;font-weight:500;font-size:12px;color:var(--mute);background:var(--sunk);padding:10px 14px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:12px 14px;border-bottom:1px solid var(--line2);vertical-align:top}
+tr:last-child td{border-bottom:0}
+tbody tr:hover td{background:var(--hover)}
+tr.dim td{opacity:.62}
+.role{display:flex;align-items:center;gap:9px;font-weight:600;white-space:nowrap}
+.role .ic{width:28px;height:28px;border-radius:8px;display:grid;place-items:center}
+.note{margin-top:4px;font-family:var(--mono);font-size:11.5px;color:var(--mute)}
+
+/* ── toolbar ── */
+.toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:12px 18px;border-bottom:1px solid var(--line)}
+.seg{display:inline-flex;background:var(--sunk);border:1px solid var(--line);border-radius:9px;padding:3px;gap:2px}
+.seg button{all:unset;cursor:pointer;padding:5px 11px;border-radius:7px;font-size:12.5px;color:var(--mute);display:inline-flex;gap:6px;align-items:center}
+.seg button[aria-pressed=true]{background:var(--panel);color:var(--ink);box-shadow:var(--shadow2)}
+.seg button:focus-visible{outline:2px solid var(--acc)}
+.seg .n{font-size:11px;color:var(--mute)}
+.search{display:flex;align-items:center;gap:8px;background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:6px 10px;color:var(--mute);margin-left:auto;min-width:220px}
+.search input{all:unset;flex:1;color:var(--ink);font-size:13px}
+.search:focus-within{border-color:var(--acc);box-shadow:0 0 0 3px var(--acc-bg)}
+
+/* ── run rows ── */
+.rhead,.rrow{display:grid;grid-template-columns:118px minmax(150px,1.1fr) minmax(0,2.6fr) 128px 74px 86px 22px;gap:14px;align-items:center}
+.rhead{padding:9px 18px;background:var(--sunk);border-bottom:1px solid var(--line);font-size:12px;color:var(--mute);font-weight:500}
+.run{border-bottom:1px solid var(--line2)}.run:last-child{border-bottom:0}
+.rrow{all:unset;box-sizing:border-box;display:grid;grid-template-columns:118px minmax(150px,1.1fr) minmax(0,2.6fr) 128px 74px 86px 22px;gap:14px;align-items:center;width:100%;padding:13px 18px;cursor:pointer}
+.rrow:hover{background:var(--hover)}.rrow:focus-visible{outline:2px solid var(--acc);outline-offset:-2px}
+.run.open>.rrow{background:var(--hover)}
+.rrow>*,.rhead>*{min-width:0}
+.r-run{display:flex;flex-direction:column;gap:2px}
+.r-run b{font-weight:600;font-size:13.5px}
+.r-run .tg{font-family:var(--mono);font-size:12px;color:var(--ink2);overflow-wrap:anywhere;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical}
+.r-run .vs,.r-run .rid{font-size:11.5px;color:var(--mute);font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.r-verdict{font-size:13px;color:var(--ink2);overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical}
+.r-verdict.err{color:var(--err)}
+.r-t{font-size:12.5px;color:var(--mute);white-space:nowrap}
+.r-chev{color:var(--mute);transition:transform .15s}.run.open .r-chev{transform:rotate(180deg)}
+.strip{display:flex;gap:3px}.strip i{flex:1;height:6px;border-radius:3px;background:var(--idle-bg);border:1px solid var(--idle-bd)}
+.strip i.s-ok{background:var(--ok);border-color:var(--ok)}.strip i.s-error{background:var(--err);border-color:var(--err)}
+.strip i.s-waiting{background:var(--warn);border-color:var(--warn)}.strip i.s-retry{background:var(--warn);border-color:var(--warn)}
+.empty{padding:28px 18px;text-align:center;color:var(--mute);font-size:13px}
+
+/* ── run detail ── */
+.detail{background:var(--sunk);border-top:1px solid var(--line2);padding:16px 18px 18px;display:none}
+.run.open>.detail{display:block}
+.actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+.btn{all:unset;cursor:pointer;display:inline-flex;align-items:center;gap:7px;padding:7px 12px;border-radius:8px;font-size:13px;font-weight:500;border:1px solid var(--line);background:var(--panel);color:var(--ink);box-shadow:var(--shadow)}
+.btn:hover{background:var(--hover)}.btn:focus-visible{outline:2px solid var(--acc)}
+.btn.primary{background:var(--acc);border-color:var(--acc);color:#fff}.btn.primary:hover{filter:brightness(1.08)}
+.cmd{flex:1;min-width:240px;font-family:var(--mono);font-size:12px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:7px 10px;color:var(--ink2);overflow-x:auto;white-space:nowrap}
+.glance{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px 18px;padding:12px 16px;margin-bottom:14px}
+.glance div{min-width:0}.glance dt{font-size:11.5px;color:var(--mute);margin-bottom:2px}
+.glance dd{margin:0;font-size:13px;color:var(--ink);overflow-wrap:anywhere}.glance dd.mono{font-family:var(--mono);font-size:12px}
+.guide{margin-bottom:14px}.guide h4{margin:0 0 6px;font-size:13px;font-weight:600}
+.guide .whyl{margin:0 0 12px;padding-left:18px;font-size:13px;color:var(--ink2)}.guide .whyl li{margin:3px 0}
+.guide .cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}
+.guide .col{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px;min-width:0}
+.guide .col h5{margin:0 0 2px;font-size:13px;display:flex;gap:8px;align-items:center}
+.guide .col .who{font-size:12px;color:var(--mute);margin:0 0 8px}
+.guide ol{margin:0;padding-left:20px;font-size:13px;color:var(--ink2)}.guide ol>li{margin:0 0 10px}
+.guide ol ul{margin:4px 0 0;padding-left:16px;font-size:12px}.guide ol ul li{overflow-wrap:anywhere}
+.guide .cmdrow{display:flex;gap:8px;align-items:center;margin-top:6px}.guide .cmdrow .cmd{min-width:0}
+.linkbtn{all:unset;cursor:pointer;color:var(--acc);font-size:12.5px;font-weight:500;margin-left:4px}
+.linkbtn:hover{text-decoration:underline}.linkbtn:focus-visible{outline:2px solid var(--acc)}
+.callout{display:flex;gap:12px;border:1px solid var(--acc-bd);background:var(--acc-bg);border-radius:10px;padding:12px 14px;margin-bottom:14px}
+.callout .ic{color:var(--acc);margin-top:1px}.callout b{display:block;font-size:13px;margin-bottom:2px}
+.callout ul{margin:4px 0 0;padding-left:18px;font-size:13px;color:var(--ink2)}.callout li{margin:3px 0}
+.tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);margin-bottom:14px;overflow-x:auto}
+.tab{all:unset;cursor:pointer;padding:8px 12px;font-size:13px;color:var(--mute);border-bottom:2px solid transparent;margin-bottom:-1px;display:inline-flex;gap:7px;align-items:center;white-space:nowrap}
+.tab:hover{color:var(--ink)}.tab[aria-selected=true]{color:var(--acc);border-bottom-color:var(--acc);font-weight:500}
+.tab:focus-visible{outline:2px solid var(--acc)}
+.tab .n{font-size:11px;padding:0 6px;border-radius:99px;background:var(--idle-bg);color:var(--mute)}
+.tab .n.err{background:var(--err-bg);color:var(--err)}.tab .n.ok{background:var(--ok-bg);color:var(--ok)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow)}
+.card.pad{padding:14px 16px}
+
+/* steps */
+ol.steps{list-style:none;margin:0;padding:0}
+ol.steps li{display:grid;grid-template-columns:28px minmax(0,1fr) auto;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line2);position:relative}
+ol.steps li:last-child{border-bottom:0}
+.sic{width:26px;height:26px;border-radius:50%;display:grid;place-items:center}
+.sic svg.i{width:14px;height:14px;stroke-width:2.5}
+.s-name{font-weight:600;font-size:13.5px}.s-does{font-size:12.5px;color:var(--mute)}
+.s-det{font-size:12.5px;margin-top:5px;color:var(--ink2)}
+.s-t{font-size:12px;color:var(--mute);white-space:nowrap;font-variant-numeric:tabular-nums}
+.errbox{margin-top:8px;border:1px solid var(--err-bd);background:var(--err-bg);border-radius:8px;padding:10px 12px;font-size:12.5px}
+.errbox .h{color:var(--ink);margin-bottom:4px}.errbox .e{color:var(--err);font-family:var(--mono);font-size:12px}
+.retrybox{margin-top:8px;border:1px solid var(--warn-bd);background:var(--warn-bg);border-radius:8px;padding:8px 12px;font-size:12.5px;color:var(--ink2)}
+.retrybox b{color:var(--warn)}
+pre{white-space:pre-wrap;word-break:break-word;background:var(--sunk);border:1px solid var(--line);border-radius:8px;padding:12px;margin:8px 0 0;max-height:380px;overflow:auto;font:12px/1.5 var(--mono);color:var(--ink2)}
+details.more>summary{cursor:pointer;font-size:12.5px;color:var(--acc);margin-top:8px;list-style:none}
+details.more>summary::-webkit-details-marker{display:none}
+details.more>summary::before{content:"▸ "}details.more[open]>summary::before{content:"▾ "}
+
+/* gate */
+.gates{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.gate{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;box-shadow:var(--shadow)}
+.gate.fail{border-color:var(--err-bd);box-shadow:0 0 0 3px var(--err-bg)}
+.gate .top2{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.gate b{font-size:13.5px}.gate p{margin:0;font-size:12.5px;color:var(--mute)}
+.gate .why{margin-top:8px;font-size:12.5px;color:var(--err);font-family:var(--mono)}
+
+/* findings */
+.find{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:13px 15px;margin-bottom:10px;box-shadow:var(--shadow);border-left:3px solid var(--idle)}
+.find.high,.find.critical{border-left-color:var(--err)}.find.medium{border-left-color:var(--warn)}.find.low{border-left-color:var(--info)}
+.find .hd{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.find .loc{font-family:var(--mono);font-size:12.5px;font-weight:500}
+.find .is{margin-top:8px;font-size:13.5px}
+.find .sg{margin-top:8px;font-size:13px;color:var(--ink2);background:var(--sunk);border-radius:8px;padding:8px 10px}
+.find .sg b{color:var(--ok);font-weight:600}
+.find .ct{margin-top:8px;font-size:12px;color:var(--mute)}
+.summary{font-size:14px;margin:0 0 14px;color:var(--ink2)}
+.tags{display:flex;gap:6px;flex-wrap:wrap}
+.score{display:flex;align-items:center;gap:10px;min-width:170px}
+.bar{position:relative;flex:1;height:7px;background:var(--idle-bg);border-radius:99px}
+.bar>i{position:absolute;inset:0 auto 0 0;border-radius:99px;background:var(--acc)}
+.bar>u{position:absolute;top:-4px;bottom:-4px;width:2px;background:var(--ink);opacity:.45;border-radius:1px}
+dl.kv{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:8px 20px;margin:0;font-size:13px}
+dl.kv dt{color:var(--mute)}dl.kv dd{margin:0;font-family:var(--mono);font-size:12px;word-break:break-all}
+
+/* live */
+.job{padding:16px 18px;border-bottom:1px solid var(--line2)}.job:last-child{border-bottom:0}
+.job-h{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.job-h b{font-size:14px}
+.lst{display:grid;grid-template-columns:22px 210px minmax(0,1fr) 120px;gap:12px;align-items:center;padding:5px 0}
+.lst .t{text-align:right;font-size:12px;color:var(--mute);font-variant-numeric:tabular-nums}
+.lbar{height:6px;background:var(--idle-bg);border-radius:99px;overflow:hidden}
+.lbar>i{display:block;width:0;height:100%;background:var(--acc);border-radius:99px}
+.lst .d{grid-column:2/5;font-size:12px;color:var(--mute);margin:-3px 0 3px}
+.lst .d.err{color:var(--err)}
+.spin{animation:sp 1s linear infinite}@keyframes sp{to{transform:rotate(360deg)}}
+.foot{margin-top:10px;font-size:12.5px;color:var(--mute)}
+
+@media (max-width:1100px){.rhead{display:none}
+ .rrow{grid-template-columns:auto minmax(0,1fr) auto auto;grid-template-areas:"st run t chev" "v v v v"}
+ .r-st{grid-area:st}.r-run{grid-area:run}.r-t.when{grid-area:t}.r-chev{grid-area:chev}.r-verdict{grid-area:v}
+ .r-strip,.r-t.dur{display:none}.gates{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:860px){.app{grid-template-columns:1fr}.side{position:static;height:auto;flex-direction:row;flex-wrap:wrap;align-items:center;gap:4px;padding:10px 12px}
+ .brand{border:0;margin:0;padding:0 8px 0 0}.navh,.side-foot,.brand span{display:none}.nav{width:auto}
+ .top,.content{padding-left:16px;padding-right:16px}.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}
+ .lst{grid-template-columns:22px minmax(0,1fr) 90px}.lst .lbar{display:none}.search{min-width:0;flex:1 1 100%;margin-left:0}}
+@media (max-width:520px){.gates{grid-template-columns:1fr}}
+/* activity log */
+.atable{width:100%;border-collapse:collapse;font-size:13px}
+.atable th{text-align:left;font-weight:500;color:var(--mute);padding:8px 12px;border-bottom:1px solid var(--line)}
+.atable td{padding:8px 12px;border-bottom:1px solid var(--line2);vertical-align:top}
+.arow{cursor:pointer}.arow:hover,.arow:focus-visible{background:var(--hover);outline:none}
+.arow.aerr td:first-child{box-shadow:inset 3px 0 0 var(--err)}
+.adetail td{background:var(--sunk)}
+.apre{max-height:320px;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:8px;
+ padding:10px 12px;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;word-break:break-word;margin:4px 0 10px}
+.acid{padding:0 16px}.acid:empty{display:none}
+#atype,#ahours{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:6px 8px;font:inherit;font-size:13px}
+@media (max-width:640px){.atable td:nth-child(6),.atable th:nth-child(6),.atable td:nth-child(7),.atable th:nth-child(7){display:none}}
+</style></head><body>
+<div class="app">
+<aside class="side">
+ <div class="brand"><div class="logo" data-ico="shield"></div><div><b>Code Reviewer Agent</b><span>Agent monitor</span></div></div>
+ <div class="navh">Monitor</div>
+ <button class="nav" data-go="sec-running"><span data-ico="activity"></span>Now running<span class="cnt" id="nav-running">0</span></button>
+ <button class="nav" data-go="sec-models"><span data-ico="server"></span>Model server<span class="cnt" id="nav-models">–</span></button>
+ <button class="nav" data-go="sec-history"><span data-ico="history"></span>Review history<span class="cnt" id="nav-history">0</span></button>
+ <div class="navh">Admin</div>
+ <button class="nav" data-go="sec-activity"><span data-ico="list"></span>Activity log<span class="cnt" id="nav-activity">–</span></button>
+ <div class="side-foot"><div>Reading</div><div class="mono" id="where">connecting…</div></div>
+</aside>
+
+<div class="main">
+ <header class="top">
+  <div><h1>Overview</h1><div class="sm mute">Runs, models and reviews, live from the agent's own records</div></div>
+  <div class="grow"></div>
+  <div class="live"><span class="pulse" id="pulse"></span><span id="clock">connecting…</span></div>
+ </header>
+
+ <div class="content">
+  <div class="banner" id="banner"><span data-ico="alert"></span><span id="banner-t"></span></div>
+  <div class="kpis" id="kpis"></div>
+
+  <details class="panel" id="sec-running" open>
+   <summary><span class="ph-ic" data-ico="activity"></span><div><div class="ph-t">Now running</div><div class="ph-s" id="peek-running"></div></div><span class="chev" data-ico="down"></span></summary>
+   <div class="pb flush" id="jobs"></div>
+  </details>
+
+  <details class="panel" id="sec-models" open>
+   <summary><span class="ph-ic" data-ico="server"></span><div><div class="ph-t">Model server</div><div class="ph-s" id="peek-models"></div></div><span class="chev" data-ico="down"></span></summary>
+   <div class="pb flush"><div class="tw"><table id="mtable"></table></div></div>
+  </details>
+
+  <details class="panel" id="sec-history" open>
+   <summary><span class="ph-ic" data-ico="history"></span><div><div class="ph-t">Review history</div><div class="ph-s" id="peek-history"></div></div><span class="chev" data-ico="down"></span></summary>
+   <div class="toolbar"><div class="seg" id="filters"></div>
+    <label class="search"><span data-ico="search"></span><input id="q" type="search" placeholder="Search tenant, target, file, error…" aria-label="Search runs"></label></div>
+   <div class="rhead"><span>Status</span><span>Run</span><span>Outcome</span><span>Steps</span><span>Duration</span><span>When</span><span></span></div>
+   <div id="history"></div>
+  </details>
+
+  <details class="panel" id="sec-activity" open>
+   <summary><span class="ph-ic" data-ico="list"></span><div><div class="ph-t">Activity log</div><div class="ph-s" id="peek-activity">Every operation the agent ran, with errors and tracebacks</div></div><span class="chev" data-ico="down"></span></summary>
+   <div class="toolbar"><div class="seg" id="asev"></div>
+    <label class="search"><span data-ico="search"></span><input id="aq" type="search" placeholder="Search operation, error, tenant, correlation id…" aria-label="Search activity"></label>
+    <select id="atype" aria-label="Operation type"><option value="">All operations</option></select>
+    <select id="ahours" aria-label="Time window"><option value="1">Last hour</option><option value="24" selected>Last 24 hours</option><option value="168">Last 7 days</option><option value="720">Last 30 days</option></select></div>
+   <div class="acid" id="acid"></div>
+   <div class="tw"><table class="atable" id="atable"></table></div>
+  </details>
+ </div>
+</div>
+</div>
+<script>
+"use strict";
+/* ── icons: built as SVG nodes, never parsed from strings ───────────────── */
+const ICONS={
+ shield:"M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z",
+ activity:"M22 12h-4l-3 9L9 3l-3 9H2",
+ server:"M4 2h16a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zM4 14h16a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2zM6 6h.01M6 18h.01",
+ history:"M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5M12 7v5l3 3",
+ list:"M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01",
+ down:"M6 9l6 6 6-6",check:"M20 6 9 17l-5-5",x:"M18 6 6 18M6 6l12 12",
+ alert:"M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0zM12 9v4M12 17h.01",
+ user:"M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z",
+ search:"M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM21 21l-4.3-4.3",
+ cpu:"M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2M6 4h12a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM9 9h6v6H9z",
+ scale:"M12 3v18M5 7h14M5 7l-3 7a4 4 0 0 0 6 0zM19 7l-3 7a4 4 0 0 0 6 0zM8 21h8",
+ layers:"M12 2 2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5",
+ tool:"M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.8-3.8a6 6 0 0 1-7.9 7.9l-6.9 6.9a2.1 2.1 0 0 1-3-3l6.9-6.9a6 6 0 0 1 7.9-7.9z",
+ sort:"M3 6h18M7 12h10M10 18h4",link:"M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7",
+ play:"M6 4l14 8-14 8V4z",retry:"M21 12a9 9 0 1 1-3-6.7L21 8M21 3v5h-5",copy:"M9 9h11v11H9zM5 15H4V4h11v1",
+ bulb:"M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z",
+ dot:"M12 12h.01",pause:"M8 5v14M16 5v14",clock:"M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 6v6l4 2"};
+const NS="http://www.w3.org/2000/svg";
+function ico(name){const s=document.createElementNS(NS,"svg");s.setAttribute("viewBox","0 0 24 24");s.setAttribute("class","i");s.setAttribute("aria-hidden","true");
+ const p=document.createElementNS(NS,"path");p.setAttribute("d",ICONS[name]||ICONS.dot);s.append(p);return s}
+for(const n of document.querySelectorAll("[data-ico]"))n.append(ico(n.dataset.ico));
+
+/* ── vocabulary: what each step and check MEANS, in plain words ─────────── */
+// The stage plan comes from app/graph.py via /api/status (one source, tested
+// against the compiled graph). This fallback only covers the first paint.
+let PLAN={base:["resolve_tenant","fetch_evidence","normalize_evidence","prepush_checks","classify"],
+ deterministic:["await_approval","execute","audit"],human_review:["audit"],
+ ai_investigation:["generate_diagnosis","independent_review","await_approval","execute","audit"],
+ "ai_investigation:escalate_to_human":["generate_diagnosis","independent_review","audit"]};
+/* The stages a run will pass through. Before routing is known, the AI path up
+   to the gate is the best guess; stages that ran anyway are appended. */
+function planFor(route,decision,done){
+ const rest=route?(PLAN[route+":"+decision]||PLAN[route]||["audit"]):PLAN["ai_investigation:escalate_to_human"];
+ // Runs from before prepush_checks existed did not skip it; they never had it.
+ const base=done.includes("classify")&&!done.includes("prepush_checks")?PLAN.base.filter(n=>n!=="prepush_checks"):PLAN.base;
+ const all=[...base,...rest];for(const n of done)if(!all.includes(n))all.push(n);return all;
+}
+const STEP={
+ resolve_tenant:["Load codebase policy","Picks this codebase's thresholds, allowlists and prompts."],
+ fetch_evidence:["Read the diff","Collects the changed files from git."],
+ normalize_evidence:["Prepare evidence","Shapes the diff into the form the router and models read."],
+ prepush_checks:["Pre-push checks","Code-only detectors: N+1 queries, silenced warnings, docstrings, untracked imports, and this codebase's pre-push ritual."],
+ classify:["Route the change","Rule-based, no model: decides whether AI should look at it."],
+ generate_diagnosis:["Diagnose","Finds related code in the index, then the diagnosis model writes summary, severity and findings."],
+ independent_review:["Judge + gate","A second model explains; Python computes the four pass/fail checks."],
+ await_approval:["Your approval","Pauses for your y/n in the terminal."],
+ execute:["Write the review","Writes the approved review to var/reviews/."],
+ audit:["Audit record","Writes the permanent record of this run."]};
+const LABEL=n=>(STEP[n]||[n])[0];
+const GATE=[
+ ["groundedness_ok","Grounded","Every citation was really retrieved and scores above the relevance bar.",/citation/i],
+ ["entailment_ok","Entailed","The review's claims actually follow from the passages it cites.",/entail/i],
+ ["risk_ok","Risk","Severity is one this codebase lets through without a human.",/severity/i],
+ ["permission_ok","Permission","The proposed action type is on this codebase's allowlist.",/action/i]];
+const PRECHECK={n_plus_one:"N+1 queries",suppressions:"Silenced warnings",line_length:"Line length",ascii:"Non-ASCII characters",
+ handler_docstrings:"Handler docstrings",untracked_import:"Import of an untracked file",docs_updated:"Docs updated",
+ docs_changelog:"Changelog entry",docs_four_files:"The four doc files",postman:"Postman",postman_collection:"Postman collection",
+ postman_env:"Postman environment",postman_env_secret:"Secret in Postman env",postman_hand_edit:"Postman hand edit",
+ postman_structure:"Postman structure",tracker:"Tracker",tracker_row:"Tracker row",tracker_csv:"Tracker CSV",tracker_md:"Tracker markdown",
+ tracker_key:"Tracker key",tracker_blocks:"Tracker blocks",tracker_attribution:"Tracker attribution",commit_message:"Commit message",
+ commit_subject:"Commit subject",commit_line_length:"Commit line length",commit_ascii:"Commit ASCII",commit_attribution:"Commit attribution",
+ commit_blocks:"Commit blocks",never_commit:"No never-commit paths",read_only:"No edits to read-only history",
+ broad_except:"No broad except",size_limits:"Function size (SRP)",match_capture:"match/case capture",
+ api_envelope:"Response envelope",response_keys:"snake_case response keys",api_versioning:"Versioned routes",
+ strict_input:"Strict input",v2_imports_v1:"V2 never imports V1",css_empty_rules:"No empty CSS rules",
+ solid:"SOLID (design)",duplicate_code:"Duplicate code",control_flow:"Control-flow choice",
+ serializer_per_url:"Serializer per URL",query_count:"O(1) queries"};
+/* Framework pack checks arrive as "<pack>:<concern>" (tools/prepush/standards/packs). */
+const PACKNAME={django:"Django",fastapi:"FastAPI"};
+const pname=c=>{const s=String(c||""),i=s.indexOf(":");
+ if(i>0)return`${PACKNAME[s.slice(0,i)]||s.slice(0,i)} · ${s.slice(i+1).replace(/_/g," ")}`;
+ return PRECHECK[s]||s.replace(/_/g," ")};
+const ROUTE={ai_investigation:"AI investigation",deterministic:"Deterministic fix",human_review:"Straight to a human"};
+const STATUS={executed:["Approved","b-ok"],escalated:["Escalated","b-warn"],denied:["Declined","b-idle"],
+ human_review:["Human review","b-warn"],ended:["Ended","b-idle"],crashed:["Crashed","b-err"],
+ incomplete:["Stopped","b-err"],in_progress:["In progress","b-info"],
+ awaiting_approval:["Awaiting approval","b-info"],abandoned:["Not approved","b-idle"]};
+const FILTERS=[["all","All"],["to_human","Sent to a human"],["executed","Approved"],["failed","Crashed / stopped"]];
+/* A filter key -> does run r belong. "to_human" is escalated OR routed straight to a
+   human, the same two buckets the "Sent to a human" card counts, so a card and its
+   chip always show the same number. */
+const inFilter=(r,k)=>k==="all"||(k==="to_human"?["escalated","human_review"].includes(bucket(r)):bucket(r)===k);
+const ROLEICO={diagnosis:["cpu","t-acc"],judge:["scale","t-info"],embedding:["layers","t-ok"],utility:["tool","t-idle"],
+ reranker:["sort","t-idle"],entailer:["link","t-warn"],"(none)":["dot","t-idle"]};
+
+/* ── helpers: textContent only, never markup (pinned by a test) ─────────── */
+const el=(t,c,txt)=>{const e=document.createElement(t);if(c)e.className=c;if(txt!=null)e.textContent=txt;return e};
+const add=(p,...k)=>{for(const x of k)if(x!=null&&x!==false)p.append(x);return p};
+const fmt=ms=>{if(ms==null)return"";const s=ms/1000;return s<1?Math.round(ms)+" ms":s<90?s.toFixed(1)+" s":Math.floor(s/60)+"m "+Math.round(s%60)+"s"};
+const when=ts=>{if(!ts)return"";const d=new Date(ts),t=new Date();
+ return d.toDateString()===t.toDateString()?d.toLocaleTimeString([],{hour:"numeric",minute:"2-digit"}):d.toLocaleString([],{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"})};
+const badge=(txt,cls,nodot)=>el("span","badge "+cls+(nodot?" nodot":""),txt);
+const iconBox=(name,cls,box="ic")=>{const d=el("span",box+" "+cls);d.append(ico(name));return d};
+function srcParts(id){const s=String(id||""),i=s.indexOf(":");return i<0?[s,""]:[s.slice(0,i),s.slice(i+1).replace(/:[0-9a-f]{8}$/,"")]}
+function firstLine(msg){const m=String(msg||"");const cut=m.search(/\\n|\n|Traceback/);return(cut>0?m.slice(0,cut):m).slice(0,240)}
+/* "base...head" (or "base..head") -> [head, base]: the branch under review first,
+   because that is what someone scanning the list is looking for. */
+function targetParts(t){const s=String(t||"staged"),m=s.match(/^(.+?)\.\.\.?(.+)$/);return m?[m[2],m[1]]:[s,""]}
+const tally=cs=>({flag:cs.filter(c=>c.status==="flag").length,pass:cs.filter(c=>c.status==="pass").length,skip:cs.filter(c=>c.status==="skip").length});
+const retriesOf=r=>r.steps.reduce((n,s)=>n+((s.retries||[]).length),0);
+/* A finding about file X that cites only passages from other files: retrieval found
+   nothing for X, so the claim cannot follow from what it cites. */
+function offTarget(f){const c=f.citation_ids||[];return !!(f.file&&c.length&&!c.some(x=>srcParts(x)[0]===f.file))}
+const sevCls=s=>s==="high"||s==="critical"?"b-err":s==="low"?"b-info":"b-warn";
+
+/* ── KPIs ──────────────────────────────────────────────────────────────── */
+/* Each card is a shortcut: it opens Review history filtered to exactly the runs it counts. */
+function showHistory(key){
+ filter=key;lastSig="";render(latest);
+ const sec=document.getElementById("sec-history");sec.open=true;sec.scrollIntoView({behavior:"smooth",block:"start"});
+}
+function renderKpis(recent){
+ const k=document.getElementById("kpis");k.replaceChildren();
+ const n=key=>recent.filter(r=>inFilter(r,key)).length;
+ for(const[key,l,icn,t]of[["all","Recent runs","history","t-acc"],["executed","Approved & written","check","t-ok"],
+  ["to_human","Sent to a human","user","t-warn"],["failed","Crashed or stopped","alert","t-err"]]){
+  const d=el("button","kpi"),txt=el("div");d.type="button";
+  d.title=`Show ${l.toLowerCase()} in Review history`;d.setAttribute("aria-pressed",String(filter===key));
+  txt.append(el("b",null,String(n(key))),el("span",null,l));d.append(iconBox(icn,t),txt);
+  d.onclick=()=>showHistory(key);k.append(d)}
+}
+
+/* ── model server ──────────────────────────────────────────────────────── */
+const MSTATE={ready:["Ready","b-ok"],not_loaded:["Not loaded","b-warn"],missing:["Missing","b-err"],
+ unknown:["Unknown","b-idle"],unused:["Not used yet","b-idle"],off:["Off","b-idle"],extra:["Loaded, unused","b-idle"]};
+function renderModels(m){
+ const t=document.getElementById("mtable");t.replaceChildren();
+ const th=el("thead"),hr=el("tr");for(const c of["Role","What it does","Model","Where it runs","Status"])hr.append(el("th",null,c));th.append(hr);
+ const tb=el("tbody");
+ for(const r of m.table||[]){
+  const tr=el("tr",["extra","unused","off"].includes(r.state)?"dim":null),[lbl,cls]=MSTATE[r.state]||[r.state,"b-idle"],[ic,tc]=ROLEICO[r.role]||ROLEICO["(none)"];
+  const role=el("td"),rd=el("div","role");rd.append(iconBox(ic,tc),el("span",null,r.role));role.append(rd);
+  const st=el("td");st.append(badge(lbl,cls));if(r.note)st.append(el("div","note",r.note));
+  tr.append(role,el("td","sm",r.does),el("td","mono",r.model),el("td","sm mute",r.where),st);tb.append(tr)}
+ t.append(th,tb);
+}
+
+/* ── live work ─────────────────────────────────────────────────────────── */
+function plan(job){
+ const route=(job.stages.find(s=>s.detail&&s.detail.route)||{}).detail?.route;
+ const dec=(job.stages.find(s=>s.detail&&s.detail.decision)||{}).detail?.decision;
+ return planFor(route,dec,job.stages.map(s=>s.name));
+}
+function describe(d){
+ if(!d)return"";const p=[];
+ if(d.files!=null)p.push(`${d.files} files`);if(d.route)p.push(`route → ${ROUTE[d.route]||d.route}`);
+ if(d.checks_summary){const c=d.checks_summary;p.push(`${c.flag} flagged, ${c.pass} passed, ${c.skip} not checked`)}
+ if(d.retrieved)p.push(`retrieved ${d.retrieved.length} passages`);
+ if(d.severity)p.push(`severity ${d.severity}, ${d.findings} finding(s)`);
+ if(d.checks)p.push(Object.entries(d.checks).map(([k,v])=>`${k.replace("_ok","")} ${v?"✓":"✕"}`).join("  "));
+ if(d.decision)p.push(`→ ${d.decision.replace(/_/g," ")}`);
+ if(d.approved!=null)p.push(d.approved?"approved":"declined");return p.join(" · ");
+}
+function liveIcon(status){
+ const m={ok:["check","t-ok"],error:["x","t-err"],waiting:["pause","t-warn"],running:["retry","t-acc"],pending:["dot","t-idle"]}[status]||["dot","t-idle"];
+ const b=iconBox(m[0],m[1],"sic");if(status==="running")b.firstChild.classList.add("spin");return b}
+function liveJob(job,est,now){
+ const box=el("div","job"),h=el("div","job-h"),st=job.status||"running";
+ h.append(badge(st==="waiting"?"Waiting for you":st==="error"?"Error":"Running",st==="error"?"b-err":st==="waiting"?"b-warn":"b-info"),
+  el("b",null,`${job.tenant||"?"} · ${job.target||""}`),el("span","grow"),el("span","sm mute",`updated ${fmt((job.age_s||0)*1000)} ago`));
+ h.children[2].style.flex="1";box.append(h);
+ let left=0,anyRunning=false;
+ for(const name of plan(job)){
+  const s=[...job.stages].reverse().find(x=>x.name===name),status=s?s.status:"pending",row=el("div","lst");
+  if(status==="running")anyRunning=true;
+  row.append(liveIcon(status),el("span",status==="pending"?"mute":null,LABEL(name)));
+  const bar=el("div","lbar"),fill=el("i"),t=el("span","t");
+  if(status==="running"){const elapsed=now-Date.parse(s.started_at),e=est[name];
+   fill.style.width=e?Math.min(98,elapsed/e*100)+"%":"30%";t.textContent=fmt(elapsed)+(e?` / ~${fmt(e)}`:"");if(e)left+=Math.max(0,e-elapsed)}
+  else if(s&&s.duration_ms!=null){fill.style.width="100%";fill.style.background=`var(--${status==="error"?"err":status==="waiting"?"warn":"ok"})`;t.textContent=fmt(s.duration_ms)}
+  else{t.textContent=est[name]?`~${fmt(est[name])}`:"";if(est[name])left+=est[name]}
+  bar.append(fill);row.append(bar,t);
+  const rt=(s&&s.retries)||[];
+  const d=s&&(s.error?firstLine(s.error):[describe(s.detail),rt.length?`↻ retried ${rt.length}× (${rt[rt.length-1].reason})`:""].filter(Boolean).join(" · "));
+  if(d)row.append(el("div","d"+(s.error?" err":""),d));box.append(row)}
+ const foot=el("div","foot");
+ foot.textContent=st==="waiting"?"Paused at the approval step. Answer the prompt in the terminal that started the review.":(anyRunning&&left?`About ${fmt(left)} left, based on the median of past runs.`:"");
+ if(job.age_s>600&&anyRunning)foot.textContent+=` No update for ${fmt(job.age_s*1000)}. The process may have died.`;
+ box.append(foot);return box;
+}
+/* Any job that is not a review: ingest, calibrate, and whatever kind comes next.
+   They share one shape (app/live.py): status, phase, done/total, eta_s, error. */
+function progressJob(job){
+ const box=el("div","job"),h=el("div","job-h"),st=job.status||"running",ingest=job.kind==="ingest";
+ const title=job.title||(ingest?`Ingest · ${job.tenant} → ${job.namespace}`:`${job.kind||"Job"}${job.tenant?" · "+job.tenant:""}`);
+ h.append(badge(st==="finished"?"Finished":st==="error"?"Error":"Running",st==="finished"?"b-ok":st==="error"?"b-err":"b-info"),
+  el("b",null,title),add(el("span","sm mute"),job.phase?`phase: ${job.phase}`:null));box.append(h);
+ const done=Number(job.done)||0,total=Number(job.total)||0,unit=job.unit||(ingest?"chunks":"");
+ if(total){const pct=Math.min(100,done/total*100),bar=el("div","lbar"),fill=el("i");
+  fill.style.width=pct+"%";if(st==="finished")fill.style.background="var(--ok)";if(st==="error")fill.style.background="var(--err)";bar.append(fill);box.append(bar);
+  box.append(el("div","foot",[`${done.toLocaleString()} / ${total.toLocaleString()}${unit?" "+unit:""} (${pct.toFixed(1)}%)`,
+   job.rate!=null?`${job.rate}/s`:null,st==="running"&&job.eta_s!=null?`about ${fmt(job.eta_s*1000)} left`:null,
+   job.elapsed_s?`took ${fmt(job.elapsed_s*1000)}`:null].filter(Boolean).join(" · ")))}
+ else box.append(el("div","foot",[job.files&&`${job.files} files`,job.chunks&&`${job.chunks} chunks`].filter(Boolean).join(" · ")||"Preparing…"));
+ if(st==="running"&&job.age_s>600)box.append(el("div","foot",`No update for ${fmt(job.age_s*1000)}. The process may have died.`));
+ if(job.error)box.append(el("div","foot",job.error));return box;
+}
+/* A review has stages; everything else is a progress job. Routing on `stages` as
+   well as kind keeps a job without stages from reaching liveJob, which would throw
+   and blank the whole page. */
+const isReview=x=>x.kind==="run"||Array.isArray(x.stages);
+const liveJobs=s=>s.jobs.filter(x=>isReview(x)?(["running","waiting"].includes(x.status)&&x.age_s<900):(x.status!=="finished"||x.age_s<900));
+function renderJobs(s){
+ const now=Date.parse(s.now),j=document.getElementById("jobs");j.replaceChildren();
+ const live=liveJobs(s);
+ if(!live.length){const e=el("div","empty");e.append(el("div",null,"Nothing running."),el("div","mono",`python -m app.review --tenant <name>   ·   python -m tools.ingest --tenant <name> --root <repo>`));j.append(e)}
+ for(const job of live)j.append(isReview(job)?liveJob(job,s.estimates,now):progressJob(job));
+}
+
+/* ── history ───────────────────────────────────────────────────────────── */
+let filter="all",query="",lastSig="",openRuns=new Set(),tabOf=new Map(),seeded=false,latest=null;
+function bucket(r){return r.status==="crashed"||r.status==="incomplete"?"failed":r.status}
+function expected(r){return planFor(r.route,r.decision,r.steps.map(s=>s.name))}
+function verdict(r){
+ const a=r.audit||{},fails=GATE.filter(c=>(a.review||{})[c[0]]===false).map(c=>c[1].toLowerCase());
+ const pf=tally(a.checks||[]).flag,pre=pf?` ${pf} pre-push flag(s).`:"",rt=retriesOf(r),rtx=rt?` Recovered from ${rt} model-server retr${rt>1?"ies":"y"}.`:"";
+ switch(r.status){
+  case"executed":return"Passed all four checks; you approved it and the review was written."+pre+rtx;
+  case"escalated":return`Escalated: ${fails.length} of 4 checks failed (${fails.join(", ")}). Nothing was posted.`+pre+rtx;
+  case"denied":return"Passed the checks, but you declined it at the approval prompt."+pre+rtx;
+  case"human_review":return"Routed straight to a human. No model looked at it."+pre;
+  case"crashed":return`Crashed at ${LABEL(r.error.step)}${rt?` after ${rt} retr${rt>1?"ies":"y"}`:""}: ${firstLine(r.error.message)}`;
+  case"incomplete":{const l=r.steps[r.steps.length-1];return`Stopped after ${l?LABEL(l.name):"start"} without writing a record. The process was probably killed.`}
+  case"in_progress":return"Still running, or just finished.";
+  case"awaiting_approval":return`Passed ${a.review?GATE.filter(c=>a.review[c[0]]).length:"?"} of 4 checks and is waiting at the approval prompt. Nothing is written until you answer.`;
+  case"abandoned":return`Passed ${a.review?GATE.filter(c=>a.review[c[0]]).length:"?"} of 4 checks, then stopped at the approval prompt with nobody to answer it. Nothing was written.`;
+  default:return r.outcome||""}
+}
+function stepDetail(name,a){
+ const d=a.diagnosis,v=a.review;
+ if(name==="prepush_checks"&&a.checks){const t=tally(a.checks);return a.checks.length?`${t.flag} flagged · ${t.pass} passed · ${t.skip} not checked`:"No checks apply to this surface."}
+ if(name==="classify"&&a.route)return`Route → ${ROUTE[a.route]||a.route}`;
+ if(name==="generate_diagnosis"&&d)return`Retrieved ${(a.retrieved||[]).length} passages · severity ${d.severity} · ${d.findings_count??0} finding(s) · ${(d.citations||[]).length} citation(s)`;
+ if(name==="independent_review"&&v){const ok=GATE.filter(c=>v[c[0]]).length;return`${ok} of 4 checks passed → ${a.decision==="approve"?"approve":"escalate to a human"}`}
+ if(name==="await_approval"&&a.approved!=null)return a.approved?"You approved":"You declined";
+ if(name==="await_approval"&&a.provisional)return"Paused here for your answer";
+ if(name==="audit"&&a.outcome)return`Recorded outcome: ${a.outcome}`;
+ return null;
+}
+function stepIcon(st){const m={ok:["check","t-ok"],error:["x","t-err"],waiting:["pause","t-warn"],suspended:["pause","t-warn"],skip:["dot","t-idle"],pending:["dot","t-idle"]}[st]||["dot","t-idle"];return iconBox(m[0],m[1],"sic")}
+function stepsTab(r){
+ const a=r.audit||{},ol=el("ol","steps"),seen=new Set(),stopped=r.status==="crashed"||r.status==="incomplete";
+ for(const name of expected(r)){
+  if(seen.has(name))continue;seen.add(name);
+  const s=[...r.steps].reverse().find(x=>x.name===name);
+  const st=s?(s.status==="error"?"error":s.status==="ok"?"ok":s.status):(stopped?"skip":"pending");
+  const li=el("li"),[lbl,does]=STEP[name]||[name,""],mid=el("div");
+  mid.append(el("div","s-name"+(st==="skip"?" mute":""),lbl),el("div","s-does",does));
+  if(st==="skip")mid.append(el("div","s-det mute","Not reached: the run stopped earlier."));
+  const det=s&&stepDetail(name,a);if(det)mid.append(el("div","s-det",det));
+  const rt=(s&&s.retries)||[];
+  if(rt.length){const b=el("div","retrybox");b.append(el("b",null,`↻ ${rt.length} retr${rt.length>1?"ies":"y"}`),
+   document.createTextNode(" — "+rt.map(x=>`attempt ${x.attempt} of ${x.of} after ${x.wait_s}s (${x.reason})`).join("; ")+(st==="ok"?". Recovered.":". Gave up.")));mid.append(b)}
+  if(s&&s.error){const b=el("div","errbox"),h=r.error&&r.error.step===name?r.error.hint:null;if(h)b.append(el("div","h",h));b.append(el("div","e",firstLine(s.error)));
+   const dd=el("details","more");dd.append(el("summary",null,"Full error"),el("pre",null,String(s.error).replace(/\\n/g,"\n")));b.append(dd);mid.append(b)}
+  li.append(stepIcon(st),mid,el("span","s-t",s&&s.duration_ms!=null?fmt(s.duration_ms):""));ol.append(li)}
+ if(!r.steps.length)ol.append(el("li","mute","No trace spans kept for this run; the audit record is all there is."));
+ const c=el("div","card");c.append(ol);return c;
+}
+function prepushTab(a){
+ const cs=a.checks||[];if(!cs.length)return el("div","empty","No pre-push checks ran for this run.");
+ const t=tally(cs),box=el("div"),top=el("div","tags");top.style.marginBottom="12px";
+ top.append(badge(`${t.flag} flagged`,t.flag?"b-err":"b-idle"),badge(`${t.pass} passed`,"b-ok"),badge(`${t.skip} not checked`,"b-idle"),
+  el("span","sm mute","Computed by code. They inform the review; they do not decide it."));box.append(top);
+ const flags=cs.filter(c=>c.status==="flag").sort((x,y)=>(x.step??0)-(y.step??0));
+ if(flags.length){const card=el("div","card tw"),tb=el("table"),th=el("thead"),hr=el("tr"),body=el("tbody");
+  for(const c of["Check","Where","What's wrong"])hr.append(el("th",null,c));th.append(hr);
+  for(const c of flags){const tr=el("tr"),n=el("td");n.append(badge(pname(c.check),"b-err"));
+   tr.append(n,el("td","mono",c.file?c.file+(c.line?`:${c.line}`:""):"(whole change)"),el("td",null,c.message||""));body.append(tr)}
+  tb.append(th,body);card.append(tb);box.append(card)}
+ const passed=[...new Set(cs.filter(c=>c.status==="pass").map(c=>c.check))];
+ if(passed.length){const d=el("div","tags");d.style.marginTop="14px";for(const p of passed)d.append(badge(pname(p),"b-ok"));box.append(d)}
+ const skips=cs.filter(c=>c.status==="skip");
+ if(skips.length){const dd=el("details","more"),ul=el("ul");ul.style.margin="6px 0 0";ul.style.paddingLeft="18px";ul.className="sm";
+  for(const c of skips){const li=el("li");li.append(el("b",null,pname(c.check)+": "),document.createTextNode(c.message||""));ul.append(li)}
+  dd.append(el("summary",null,`Why ${skips.length} check(s) were not run`),ul);box.append(dd)}
+ return box;
+}
+function gateTab(a){
+ const v=a.review;if(!v)return el("div","empty","The run did not reach the gate.");
+ const g=el("div","gates"),fails=v.failures||[];
+ for(const[k,name,what,re]of GATE){const ok=v[k],c=el("div","gate"+(ok===false?" fail":"")),top=el("div","top2");
+  top.append(el("b",null,name),badge(ok?"Pass":ok===false?"Fail":"—",ok?"b-ok":ok===false?"b-err":"b-idle"));c.append(top,el("p",null,what));
+  if(ok===false){const why=fails.filter(f=>re.test(f));if(why.length)c.append(el("div","why",why.join("; ")))}g.append(c)}
+ const box=el("div");box.append(g);
+ if(v.reasoning){const dd=el("details","more");dd.append(el("summary",null,"The judge model's explanation (advice only, never the verdict)"),el("pre",null,v.reasoning));box.append(dd)}
+ return box;
+}
+function findingsTab(a){
+ const d=a.diagnosis;if(!d)return el("div","empty","No diagnosis for this run.");
+ const box=el("div"),top=el("div","tags");top.style.marginBottom="10px";
+ top.append(badge(`Severity ${d.severity}`,sevCls(d.severity)),badge(`${d.findings_count??0} finding(s)`,"b-idle","nodot"));box.append(top);
+ if(d.summary)box.append(el("p","summary",d.summary));
+ const list=d.findings;
+ if(Array.isArray(list)&&list.length){for(const f of list){
+  const c=el("div","find "+(f.severity||"medium")),h=el("div","hd");
+  h.append(badge(f.severity||"?",sevCls(f.severity)),el("span","loc",(f.file||"(no file)")+(f.line?`:${f.line}`:"")));
+  const sp=el("span");sp.style.flex="1";h.append(sp);
+  if(offTarget(f)){const b=badge("cites a different file","b-warn");b.title="Every passage this finding cites comes from another file. Retrieval found no code for this one, so the claim cannot follow from its citations.";h.append(b)}
+  const g=badge(f.grounded?"model says grounded":"model: not grounded","b-idle","nodot");g.title="The model's own claim. The Grounded gate check is computed by code from real retrieval scores.";h.append(g);c.append(h);
+  if(f.issue)c.append(el("div","is",f.issue));
+  if(f.suggestion){const s=el("div","sg");s.append(el("b",null,"Suggestion  "),document.createTextNode(f.suggestion));c.append(s)}
+  if(f.citation_ids&&f.citation_ids.length)c.append(el("div","ct","Cites: "+f.citation_ids.map(x=>srcParts(x)[0]).join(", ")));
+  box.append(c)}}
+ else if(d.findings_count)box.append(el("div","empty",`This run predates finding text being recorded. Only the count (${d.findings_count}) was kept. Retry the review to see them.`));
+ else box.append(el("div","empty","The model reported no individual findings."));
+ if(d.proposed_comment){const dd=el("details","more");dd.append(el("summary",null,"The comment it would have posted"),el("pre",null,d.proposed_comment));box.append(dd)}
+ return box;
+}
+function evidenceTab(a){
+ const hits=a.retrieved||[];if(!hits.length)return el("div","empty","Nothing was retrieved, so no claim could be grounded.");
+ const cited=new Set(((a.diagnosis||{}).citations||[]).map(c=>c.snippet_id)),bar=(a.gates||{}).min_relevance_score;
+ const card=el("div","card tw"),t=el("table"),th=el("thead"),hr=el("tr"),tb=el("tbody");
+ for(const c of["#","Source","Relevance",""])hr.append(el("th",null,c));th.append(hr);
+ hits.forEach((h,i)=>{const tr=el("tr"),[path,rest]=srcParts(h.id),src=el("td");
+  src.append(el("div","mono",path));if(rest)src.append(el("div","note",rest));
+  const sc=el("td"),wrap=el("div","score"),b=el("div","bar"),f=el("i");f.style.width=Math.max(0,Math.min(1,+h.score))*100+"%";
+  if(bar!=null&&+h.score<bar)f.style.background="var(--err)";b.append(f);
+  if(bar!=null){const u=el("u");u.style.left=bar*100+"%";u.title=`relevance bar ${bar}`;b.append(u)}
+  wrap.append(b,el("span","mono",(+h.score).toFixed(3)));sc.append(wrap);
+  const ct=el("td");if(cited.has(h.id))ct.append(badge("cited","b-acc"));
+  tr.append(el("td","mute",String(i+1)),src,sc,ct);tb.append(tr)});
+ t.append(th,tb);card.append(t);const box=el("div");box.append(card);
+ if(bar!=null){const n=el("div","sm mute",`The marker is this codebase's relevance bar (${bar}). A cited passage below it fails the Grounded check.`);n.style.marginTop="8px";box.append(n)}
+ return box;
+}
+function detailsTab(r){
+ const a=r.audit||{},dl=el("dl","kv"),rt=a.runtime||{},g=a.guard||{};
+ const kv=(k,v)=>{if(v==null||v==="")return;dl.append(el("dt",null,k),el("dd",null,String(v)))};
+ kv("Run id",r.run_id);kv("Thread id",r.thread_id);
+ if(rt.models)kv("Models used",`diagnosis ${rt.models.diagnosis} · judge ${rt.models.judge} · entailer ${rt.entailer||"lexical"}`);
+ if(g.total_redactions!=null)kv("Redacted before any model saw it",g.total_redactions?Object.entries(g.redacted||{}).map(([k,v])=>`${v} ${k}`).join(", "):"nothing");
+ if(g.injection_suspected&&Object.keys(g.injection_suspected).length)kv("Injection phrasing seen",JSON.stringify(g.injection_suspected));
+ const gt=a.gates||{},ent=gt.min_entailment_score??(((a.review||{}).failures||[]).join(" ").match(/entailed.*< ([0-9.]+)/)||[])[1];
+ if(Object.keys(gt).length)kv("Bars it was held to",`relevance ≥ ${gt.min_relevance_score??"default"} · entailment ≥ ${ent??"default (0.25)"} · severities ${(gt.severity_allowlist||[]).join("/")}`);
+ kv("Policy / prompt version",a.policy_version&&`${a.policy_version} / ${a.prompt_version}`);
+ const box=el("div","card pad");box.append(dl);
+ if(r.audit){const dd=el("details","more");dd.append(el("summary",null,"Raw audit record (JSON)"),el("pre",null,JSON.stringify(r.audit,null,2)));box.append(dd)}
+ return box;
+}
+/* The facts an admin asks first, before opening any tab. */
+function glance(r){
+ const a=r.audit||{},rt=a.runtime||{},v=a.review,t=tally(a.checks||[]),[head,base]=targetParts(r.target);
+ const box=el("dl","card glance"),kv=(k,val,mono)=>{if(val==null||val==="")return;const d=el("div");d.append(el("dt",null,k),el("dd",mono?"mono":null,String(val)));box.append(d)};
+ const end=r.ended_at?new Date(r.ended_at):null,start=end&&r.total_ms?new Date(end.getTime()-r.total_ms):null;
+ const posted={executed:"Review written",escalated:"Nothing posted: a human decides",denied:"Declined: nothing written",
+  awaiting_approval:"Waiting for your y/n",abandoned:"Nothing written",human_review:"Sent to a human",crashed:"Nothing written",incomplete:"Nothing written"}[r.status];
+ kv("Codebase",`${r.tenant||"?"}${r.surface&&r.surface!=="code_review"?" · "+r.surface:""}`);
+ kv(base?"Branch under review":"Change",head,true);kv("Compared with",base,true);
+ kv("Result",[(STATUS[r.status]||[r.status])[0],posted].filter(Boolean).join(" — "));
+ kv("Checks",[v?`${GATE.filter(c=>v[c[0]]).length} of 4 gate checks passed`:null,(a.checks||[]).length?`${t.flag} pre-push flag(s)`:null].filter(Boolean).join(" · "));
+ kv("Ran",start?`${when(start.toISOString())} → ${when(r.ended_at)} (${fmt(r.total_ms)})`:when(r.ended_at));
+ kv("Model server",rt.model_server,true);
+ if(rt.models)kv("Models",`diagnosis ${rt.models.diagnosis} · judge ${rt.models.judge} · entailer ${rt.entailer||"lexical"}`);
+ kv("Run id",r.run_id,true);
+ return box;
+}
+/* Why it ended this way and who does what next. Built server-side from the audit
+   record (app/monitor_guidance.py::guidance), so the reason quoted is the gate's own. */
+function guidePanel(r,openTab){
+ const g=r.guidance||{},why=g.why||[],steps=g.steps||[];if(!why.length&&!steps.length)return null;
+ const box=el("div","guide");
+ if(why.length){box.append(el("h4",null,"Why it ended this way"));const ul=el("ul","whyl");for(const w of why)ul.append(el("li",null,w));box.append(ul)}
+ const cols=el("div","cols");
+ for(const[who,title,sub,icon]of[["reviewer","Reviewer","Whoever reads this change","list"],["admin","Admin","Whoever runs the agent and owns its config","tool"]]){
+  const mine=steps.filter(s=>s.who===who);if(!mine.length)continue;
+  const col=el("div","col"),h=el("h5");h.append(iconBox(icon,"","ic"),el("span",null,`${title}: next steps`));col.append(h,el("p","who",sub));
+  const ol=el("ol");
+  for(const s of mine){const li=el("li");li.append(document.createTextNode(s.text));
+   if(s.tab){const b=el("button","linkbtn",`Open ${({findings:"Findings",evidence:"Evidence",prepush:"Pre-push checks",steps:"Steps",gate:"Gate"})[s.tab]||s.tab} →`);b.onclick=e=>{e.stopPropagation();openTab(s.tab)};li.append(b)}
+   if(s.items&&s.items.length){const ul=el("ul");for(const it of s.items)ul.append(el("li",null,it));li.append(ul)}
+   if(s.command){const row=el("div","cmdrow"),cb=el("button","btn");cb.append(ico("retry"),el("span",null,"Copy"));
+    cb.onclick=e=>{e.stopPropagation();copy(s.command,cb)};row.append(cb,el("div","cmd",s.command));li.append(row)}
+   ol.append(li)}
+  col.append(ol);cols.append(col)}
+ box.append(cols);return box;
+}
+async function copy(text,btn){
+ let ok=false;try{await navigator.clipboard.writeText(text);ok=true}catch(e){}
+ const lbl=btn.lastChild;const old=lbl.textContent;lbl.textContent=ok?"Copied":"Select and copy";setTimeout(()=>{lbl.textContent=old},1600);
+}
+function actionsBar(r){
+ if(!r.retry_command)return null;
+ const bar=el("div","actions"),b=el("button","btn"+(["crashed","incomplete","escalated"].includes(r.status)?" primary":""));
+ b.append(ico("retry"),el("span",null,"Copy retry command"));b.onclick=e=>{e.stopPropagation();copy(r.retry_command,b)};
+ const cmd=el("div","cmd",r.retry_command);cmd.title="Run this in a terminal in the agent's directory. The monitor itself never starts a run.";
+ bar.append(b,cmd);return bar;
+}
+function detailFor(r){
+ const a=r.audit||{},box=el("div"),t=tally(a.checks||[]),fs=((a.diagnosis||{}).findings||[]).length||(a.diagnosis||{}).findings_count||0;
+ let show=()=>{};   // assigned below, once the tabs exist; guidance links call it
+ add(box,glance(r),guidePanel(r,k=>{show(k);tabsEl.scrollIntoView({block:"nearest",behavior:"smooth"})}),actionsBar(r));
+ if(a.provisional){const n=el("div","banner show");n.style.cssText="display:flex;border-color:var(--info-bd);background:var(--info-bg);color:var(--ink2)";
+  n.append(ico("pause"),el("span",null,"This run stopped at the approval prompt, so it wrote no audit record yet. The checks and evidence below come from its live snapshot: ids and scores only, no finding text."));box.append(n)}
+ const gateOk=a.review?GATE.filter(c=>a.review[c[0]]).length:null;
+ const TABS=[["steps","Steps",String(r.steps.length),r.status==="crashed"||r.status==="incomplete"?"err":""],
+  ["prepush","Pre-push checks",(a.checks||[]).length?String(t.flag):null,t.flag?"err":"ok"],
+  ["gate","Gate",gateOk!=null?`${gateOk}/4`:null,gateOk===4?"ok":gateOk!=null?"err":""],
+  ["findings","Findings",a.diagnosis?String(fs):null,""],["evidence","Evidence",a.retrieved?String((a.retrieved||[]).length):null,""],
+  ["details","Details",null,""]];
+ const tabs=el("div","tabs"),panel=el("div"),tabsEl=tabs;tabs.setAttribute("role","tablist");
+ const cur=tabOf.get(r.run_id)||"steps";
+ show=k=>{tabOf.set(r.run_id,k);for(const b of tabs.children)b.setAttribute("aria-selected",String(b.dataset.k===k));
+  panel.replaceChildren(({steps:()=>stepsTab(r),prepush:()=>prepushTab(a),gate:()=>gateTab(a),findings:()=>findingsTab(a),evidence:()=>evidenceTab(a),details:()=>detailsTab(r)})[k]())};
+ for(const[k,l,n,cls]of TABS){const b=el("button","tab");b.dataset.k=k;b.setAttribute("role","tab");b.append(el("span",null,l));
+  if(n!=null)b.append(el("span","n "+cls,n));b.onclick=()=>show(k);tabs.append(b)}
+ box.append(tabs,panel);show(cur);return box;
+}
+function runRow(r){
+ const isOpen=openRuns.has(r.run_id),wrap=el("div","run"+(isOpen?" open":"")),row=el("button","rrow");
+ row.setAttribute("aria-expanded",String(isOpen));
+ const[lbl,cls]=STATUS[r.status]||[r.status,"b-idle"],stc=el("span","r-st");stc.append(badge(lbl,cls));
+ const run=el("span","r-run"),[head,base]=targetParts(r.target),tg=el("span","tg",head);
+ run.title=`${r.tenant||"?"} · ${r.target||"staged"}`;
+ add(run,el("b",null,r.tenant||"?"),tg,base&&el("span","vs","vs "+base),el("span","rid",String(r.run_id||"").slice(0,8)));
+ const strip=el("span","strip r-strip");
+ for(const n of expected(r)){const s=[...r.steps].reverse().find(x=>x.name===n);
+  const i=el("i",s?"s-"+(s.status==="ok"?((s.retries||[]).length?"retry":"ok"):s.status):null);i.title=LABEL(n)+(s?`: ${s.status}${(s.retries||[]).length?`, ${s.retries.length} retry`:""}`:": not reached");strip.append(i)}
+ const chev=el("span","r-chev");chev.append(ico("down"));
+ row.append(stc,run,el("span","r-verdict"+(bucket(r)==="failed"?" err":""),verdict(r)),strip,el("span","r-t dur",fmt(r.total_ms)),el("span","r-t when",when(r.ended_at)),chev);
+ const det=el("div","detail");if(isOpen)det.append(detailFor(r));
+ row.onclick=()=>{const o=!wrap.classList.contains("open");wrap.classList.toggle("open",o);row.setAttribute("aria-expanded",String(o));
+  if(o){openRuns.add(r.run_id);if(!det.childElementCount)det.append(detailFor(r))}else openRuns.delete(r.run_id)};
+ wrap.append(row,det);return wrap;
+}
+function matches(r,q){if(!q)return true;const a=r.audit||{};
+ const hay=[r.tenant,r.target,r.status,r.run_id,verdict(r),(r.error||{}).message,...(a.checks||[]).map(c=>`${c.check} ${c.file} ${c.message}`),
+  ...(((a.diagnosis||{}).findings)||[]).map(f=>`${f.file} ${f.issue}`)].join(" ").toLowerCase();return hay.includes(q)}
+function renderFilters(recent){
+ const f=document.getElementById("filters");f.replaceChildren();
+ for(const[k,l]of FILTERS){const n=recent.filter(r=>inFilter(r,k)).length;
+  const b=el("button");b.append(el("span",null,l),el("span","n",String(n)));b.setAttribute("aria-pressed",String(filter===k));
+  b.onclick=()=>{filter=k;lastSig="";render(latest)};f.append(b)}
+}
+function renderHistory(recent){
+ const sig=filter+"|"+query+"|"+JSON.stringify(recent);if(sig===lastSig)return;lastSig=sig;
+ if(!seeded&&recent.length){openRuns.add(recent[0].run_id);seeded=true}
+ renderFilters(recent);
+ const h=document.getElementById("history");h.replaceChildren();
+ const shown=recent.filter(r=>inFilter(r,filter)&&matches(r,query));
+ if(!shown.length)h.append(el("div","empty",recent.length?"No runs match.":"No runs yet. Start one with python -m app.review --tenant <name>"));
+ for(const r of shown)h.append(runRow(r));
+}
+
+/* ── sidebar, peeks, folds ─────────────────────────────────────────────── */
+function renderChrome(s){
+ const live=liveJobs(s),m=s.models,tbl=m.table||[],ready=tbl.filter(r=>r.state==="ready").length,bad=tbl.filter(r=>["missing","not_loaded"].includes(r.state)).length;
+ const f=s.recent.filter(r=>bucket(r)==="failed").length,set=(id,t)=>{document.getElementById(id).textContent=t};
+ set("peek-running",live.length?`${live.length} in progress`:"Nothing running");
+ const local=/localhost|127\.0\.0\.1/.test(m.url||"");
+ set("peek-models",!m.reachable?(local?`LM Studio not reachable at ${m.url}. Start it with: lms server start`:`Model server not reachable at ${m.url}: ${firstLine(m.error)||"no answer"}`):
+  (m.api==="openai"?`Model gateway up at ${m.url} · ${m.served} model${m.served===1?"":"s"} served`:
+   `LM Studio up at ${m.url} · ${m.loaded.length} of ${m.available} downloaded models loaded`)+` · profile ${(m.runtime||{}).profile||"?"} `+
+  ((m.runtime||{}).source==="run"?`(as used by the review at ${when(m.runtime.as_of)})`:"(from this shell; no review has recorded its models yet)"));
+ const n=s.recent.length;
+ set("peek-history",`${n} recent run${n===1?"":"s"}${f?` · ${f} crashed or stopped`:""}`);
+ const nr=document.getElementById("nav-running");nr.textContent=String(live.length);nr.className="cnt"+(live.length?" warn":"");
+ const nm=document.getElementById("nav-models");nm.textContent=!m.reachable?"off":bad?`${bad} !`:`${ready}`;nm.className="cnt"+(!m.reachable||bad?" err":"");
+ const nh=document.getElementById("nav-history");nh.textContent=String(s.recent.length);nh.className="cnt"+(f?" err":"");
+}
+/* Folded sections are a per-viewer convenience: remembered in this browser
+   when storage works, and the page is fine when it does not. */
+const FOLD_KEY="cra-monitor-folded";
+(function folds(){
+ let folded=[];try{folded=JSON.parse(localStorage.getItem(FOLD_KEY)||"[]")}catch(e){}
+ for(const d of document.querySelectorAll("details.panel")){if(folded.includes(d.id))d.open=false;
+  d.addEventListener("toggle",()=>{try{localStorage.setItem(FOLD_KEY,JSON.stringify([...document.querySelectorAll("details.panel")].filter(x=>!x.open).map(x=>x.id)))}catch(e){}})}
+ for(const b of document.querySelectorAll("[data-go]"))b.onclick=()=>{const d=document.getElementById(b.dataset.go);d.open=true;d.scrollIntoView({behavior:"smooth",block:"start"});
+  for(const x of document.querySelectorAll(".nav"))x.classList.toggle("on",x===b)};
+ document.getElementById("q").addEventListener("input",e=>{query=e.target.value.trim().toLowerCase();renderHistory((latest||{}).recent||[])});
+})();
+
+/* ── loop: poll every second; on failure say so and back off ───────────── */
+let fails=0;
+function render(s){if(!s)return;if(s.stage_plan)PLAN=s.stage_plan;renderKpis(s.recent);renderJobs(s);renderModels(s.models);renderHistory(s.recent);renderChrome(s)}
+/* ── activity log (admin) ─────────────────────────────────────────────────
+   Read-only. Every value is set with textContent, never parsed as HTML: rows
+   carry error messages and tracebacks, which can quote caller input. */
+const A={sev:"",type:"",q:"",hours:"24",cid:"",open:new Set(),sig:""};
+const SEVCLS={ERROR:"b-err",WARNING:"b-warn",INFO:"b-ok",DEBUG:"b-idle"};
+function aParams(){const p=new URLSearchParams();for(const[k,v]of[["severity",A.sev],["type",A.type],["q",A.q],["hours",A.hours],["cid",A.cid]])if(v)p.set(k,v);return p.toString()}
+function aRow(r,tb){
+ const tr=el("tr","arow"+(r.is_error?" aerr":""));tr.tabIndex=0;
+ const ts=new Date(r.timestamp);
+ add(tr,el("td","mono mute",ts.toLocaleString()),
+  (()=>{const td=el("td");td.append(badge(r.severity||"?",SEVCLS[r.severity]||"b-idle"));return td})(),
+  (()=>{const td=el("td");add(td,el("div",null,r.operation_name||""),el("div","sm mute",`${r.operation_type||""}${r.target_service?" · "+r.target_service:""}`));return td})(),
+  el("td",r.is_error?"t-err":"mute",r.is_error?firstLine(`${r.exception_type||"Error"}: ${r.error_message||""}`):(r.status||"")),
+  el("td","mono",r.duration_ms!=null?fmt(r.duration_ms):""),
+  (()=>{const td=el("td");const b=el("button","btn mono",String(r.correlation_id||"").slice(0,13));b.title="Show every record of this run/request";
+   b.onclick=e=>{e.stopPropagation();A.cid=r.correlation_id;loadActivity(true)};td.append(b);return td})(),
+  el("td","mute",r.tenant||""));
+ const toggle=()=>{A.open.has(r.log_id)?A.open.delete(r.log_id):A.open.add(r.log_id);loadActivity(true)};
+ tr.onclick=toggle;tr.onkeydown=e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();toggle()}};
+ tb.append(tr);
+ if(A.open.has(r.log_id)){
+  const dt=el("tr","adetail"),td=el("td");td.colSpan=7;
+  const dl=el("dl","kv"),kv=(k,v)=>{if(v==null||v==="")return;dl.append(el("dt",null,k),el("dd","mono",String(v)))};
+  kv("log id",r.log_id);kv("correlation",r.correlation_id);kv("run id",r.run_id);kv("status",r.status);
+  kv("started",r.start_time);kv("ended",r.end_time);kv("failure source",r.failure_source);kv("exception",r.exception_type);kv("message",r.error_message);
+  td.append(dl);
+  if(r.traceback){td.append(el("div","sm mute","Traceback"));td.append(el("pre","apre",r.traceback))}
+  if(r.metadata){td.append(el("div","sm mute","Metadata"));td.append(el("pre","apre",JSON.stringify(r.metadata,null,2)))}
+  const cp=el("button","btn","Copy for a bug report");
+  cp.onclick=e=>{e.stopPropagation();copy(`[${r.timestamp}] ${r.exception_type||r.severity} @ ${r.operation_name} | ${(r.error_message||r.status||"").slice(0,200)} | ref=${r.correlation_id} log=${r.log_id}`,cp)};
+  td.append(cp);dt.append(td);tb.append(dt);
+ }
+}
+function renderActivity(d){
+ const seg=document.getElementById("asev");seg.replaceChildren();
+ const facets=d.facets||{severity:{},operation_type:{}};
+ for(const[k,l]of[["","All"],["ERROR","Errors"],["WARNING","Warnings"],["INFO","Info"]]){
+  const n=k?(facets.severity[k]||0):d.total;const b=el("button");b.append(el("span",null,l),el("span","n",String(n)));
+  b.setAttribute("aria-pressed",String(A.sev===k));b.onclick=()=>{A.sev=k;loadActivity(true)};seg.append(b)}
+ const sel=document.getElementById("atype"),have=new Set([...sel.options].map(o=>o.value));
+ for(const t of Object.keys(facets.operation_type).sort())if(!have.has(t)){const o=el("option",null,`${t} (${facets.operation_type[t]})`);o.value=t;sel.append(o)}
+ const c=document.getElementById("acid");c.replaceChildren();
+ if(A.cid){const b=el("button","btn",`Showing one run/request: ${A.cid} — clear`);b.onclick=()=>{A.cid="";loadActivity(true)};c.append(b)}
+ const t=document.getElementById("atable");t.replaceChildren();
+ const h=el("tr");for(const x of["When","Severity","Operation","Outcome","Duration","Correlation","Tenant"])h.append(el("th",null,x));t.append(h);
+ const tb=el("tbody");for(const r of d.rows)aRow(r,tb);t.append(tb);
+ if(!d.rows.length){const tr=el("tr"),td=el("td","empty",d.total?"No records match these filters.":"No activity recorded in this window yet.");td.colSpan=7;tr.append(td);t.append(tr)}
+ const errs=facets.severity.ERROR||0,na=document.getElementById("nav-activity");
+ na.textContent=errs?`${errs} !`:String(d.total);na.className="cnt"+(errs?" err":"");
+ document.getElementById("peek-activity").textContent=`${d.matched} of ${d.total} records in the last ${d.hours>=24?Math.round(d.hours/24)+" day(s)":d.hours+" h"}${errs?` · ${errs} error${errs>1?"s":""}`:""}`;
+}
+async function loadActivity(force){
+ try{const r=await fetch("/api/activity?"+aParams(),{cache:"no-store"});if(!r.ok)return;const d=await r.json();
+  const sig=JSON.stringify([d.total,d.matched,d.rows.slice(0,3).map(x=>x.log_id),[...A.open]]);
+  if(force||sig!==A.sig){A.sig=sig;renderActivity(d)}}catch(e){/* the status banner already reports a lost server */}
+}
+(function wireActivity(){
+ let deb;document.getElementById("aq").addEventListener("input",e=>{clearTimeout(deb);deb=setTimeout(()=>{A.q=e.target.value.trim();loadActivity(true)},250)});
+ document.getElementById("atype").addEventListener("change",e=>{A.type=e.target.value;loadActivity(true)});
+ document.getElementById("ahours").addEventListener("change",e=>{A.hours=e.target.value;loadActivity(true)});
+ loadActivity(true);setInterval(()=>loadActivity(false),3000);
+})();
+async function tick(){
+ try{const r=await fetch("/api/status",{cache:"no-store"});if(!r.ok)throw new Error("HTTP "+r.status);latest=await r.json();fails=0}
+ catch(e){fails++;const wait=Math.min(30,2**Math.min(fails,5));
+  document.getElementById("banner").classList.add("show");
+  document.getElementById("banner-t").textContent=`Lost contact with the monitor server (${fails} failed attempt${fails>1?"s":""}). Retrying in ${wait}s. If it stopped, restart it: python -m app.monitor`;
+  document.getElementById("pulse").classList.add("off");document.getElementById("clock").textContent="disconnected";
+  setTimeout(tick,wait*1000);return}
+ document.getElementById("banner").classList.remove("show");document.getElementById("pulse").classList.remove("off");
+ document.getElementById("where").textContent=latest.data_dir;
+ document.getElementById("clock").textContent="Live · "+new Date().toLocaleTimeString();
+ render(latest);setTimeout(tick,1000);
+}
+tick();
+</script></body></html>

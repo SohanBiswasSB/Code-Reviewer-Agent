@@ -3,10 +3,17 @@
     python -m jobs.daily_log_review --date 2026-09-01
 """
 from __future__ import annotations
-import argparse, datetime as dt
+
+import argparse
+import datetime as dt
 
 
 def main() -> None:
+    """Parse `--date` (default: yesterday), then raise NotImplementedError.
+
+    Stubbed deliberately and visibly: a scheduled job that reported success
+    without running the surface would be the fake success this repo refuses.
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", default=str(dt.date.today() - dt.timedelta(days=1)))
     args = ap.parse_args()

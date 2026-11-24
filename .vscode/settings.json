@@ -1,0 +1,34 @@
+{
+  // Committed on purpose: both machines should get the same editor behaviour.
+  // NOTE: python.defaultInterpreterPath is deliberately absent -- it would be
+  // wrong on one of the two machines. Pick the interpreter per machine with
+  // Ctrl/Cmd+Shift+P -> "Python: Select Interpreter". Paths are in
+  // docs/DECISIONS.md section 1.
+
+  // Without this the IDE reports "Unable to import 'config'" for every
+  // root-level module, because the project root is not on the analysis path.
+  "python.analysis.extraPaths": ["."],
+  // pylint reads .pylintrc (and resolves its `source-roots=.`) from its working
+  // directory, so run it from this repo even when a parent folder is the workspace.
+  "pylint.cwd": "${fileWorkspaceFolder}",
+  "python.analysis.typeCheckingMode": "basic",
+
+  "python.testing.pytestEnabled": true,
+  "python.testing.pytestArgs": ["tests"],
+  "python.testing.unittestEnabled": false,
+
+  // Matches ruff.toml, so the ruler shows the real limit.
+  "editor.rulers": [100],
+  "files.eol": "\n",
+  "files.trimTrailingWhitespace": true,
+  "files.insertFinalNewline": true,
+
+  "[python]": {
+    "editor.codeActionsOnSave": { "source.organizeImports": "explicit" }
+  },
+
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/*.pyc": true
+  }
+}

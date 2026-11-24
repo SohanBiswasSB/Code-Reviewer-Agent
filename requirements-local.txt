@@ -1,0 +1,30 @@
+# The local-model stack. Now notes only: every library an adapter imports moved to
+# requirements.txt under the imports-at-top rule. Kept as a layer so the install
+# instructions (and requirements-dev.txt's -r) stay stable.
+#
+#   conda activate CodeReviewerAgent
+#   pip install -r requirements-local.txt
+
+-r requirements.txt
+
+# `openai` and `numpy` moved to requirements.txt: adapters import them at module
+# level, so everything that imports `config` needs them.
+
+# sentence-transformers (the in-process reranker, T13) moved to requirements.txt:
+# the adapter imports it at module level. Its model, BAAI/bge-reranker-v2-m3
+# (~2.3 GB), is fetched once into the Hugging Face cache, never by a review.
+
+# --- torch, and which build you actually want -------------------------------
+# Installed transitively by sentence-transformers. The default PyPI wheel is
+# what you want on BOTH machines, for different reasons:
+#
+#   Windows / GTX 1060 6 GB -> CPU build is the deliberate choice. LM Studio
+#     already owns all 6 GB of VRAM for the diagnosis model; loading a 568M
+#     cross-encoder beside it risks an OOM during generation. Reranking a
+#     top-100 candidate set on a Ryzen 1700 is a second or two, and it happens
+#     once per run, before any LLM call. See adapters/platforms/cuda.py.
+#     A CUDA build would need:  --index-url https://download.pytorch.org/whl/cu121
+#
+#   Mac / M4 Pro -> the default wheel already carries Metal (mps) support.
+#     Caution: torch and any other OpenMP-shipping wheel loaded in one process
+#     abort on macOS. That is what the doctor check exists for.

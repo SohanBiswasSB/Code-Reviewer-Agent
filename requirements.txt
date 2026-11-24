@@ -1,16 +1,50 @@
-# Core service. NOTE: intentionally unpinned in this first commit — pin exact
-# versions (pip freeze) before anything is deployed.
+# Core runtime: the graph + the API.
+#
+#   requirements.txt        this file
+#   requirements-local.txt  local models: LM Studio client + in-process reranker
+#   requirements-dev.txt    tests + lint
+#
+# The safety-gate suite (python -m eval.harness) needs this file and nothing more:
+# no model and no server. (torch IS installed -- see sentence-transformers below.)
+#
+# ── why these are pinned (2026-09-10) ────────────────────────────────────────
+# These were unpinned "until anything is deployed". That turned out to be the
+# wrong bar: the checkpoint SERIALISER's treatment of unregistered types changed
+# under us between releases, and because a blocked type comes back as a plain
+# dict rather than raising, the change was silent. An unpinned dependency whose
+# behaviour the approval gate's durability depends on is not a deployment
+# concern -- it is a correctness concern from the first run.
+#
+# `app.state.CHECKPOINT_TYPES` now registers our state types explicitly, so the
+# behaviour no longer depends on the default. The pin is belt-and-braces: it
+# makes a serialiser change show up as a deliberate upgrade rather than as a
+# resumed run quietly losing its types.
+#
+# requirements-lock.txt (full `pip freeze`) is still owed and is NOT this file --
+# it cannot be generated honestly until one machine has the local-model stack
+# installed too. See TODO.md Hygiene.
 
-# --- needed to run the graph + API ---
-langgraph
-langgraph-checkpoint-postgres   # AsyncPostgresSaver: durable paused runs (never SQLite/file)
-fastapi
-uvicorn[standard]
-pydantic>=2                     # schemas/ still uses dataclasses; migration is on the roadmap
+langgraph==1.2.11
+langgraph-checkpoint==4.2.0        # the serialiser lives here; see the note above
+langgraph-checkpoint-postgres==3.1.2   # AsyncPostgresSaver: durable paused runs (never SQLite/file)
+psycopg-binary==3.3.5                  # bundles libpq: app/deps.py imports the Postgres saver at top level
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+pydantic==2.13.5                  # schemas/ are Pydantic v2 models (T11)
+httpx==0.28.1                     # tools/github_client.py
+boto3==1.43.91                    # adapters/source_s3logs.py (log_review surface)
 
-# --- providers (all adapters are stubs today; add as each is wired) ---
-httpx                           # tools/github_client.py
-openai                          # adapters/llm_openai.py
-boto3                           # adapters/source_s3logs.py
+# Imported at MODULE level by adapters (embed_lmstudio, vector_index_local), and
+# `import config` imports every adapter -- so the graph, the API and the gate
+# suite all need these, not just the local-model stack. Top-level imports are the
+# project rule (lazy only where an import is genuinely circular), and this file
+# has to say what that costs.
+numpy==2.5.3
+openai==3.13.0
 
-# The eval suite (python -m eval.harness) deliberately needs NONE of the above.
+# The in-process reranker (T13) and the NLI entailer import these at MODULE level
+# too, so the same rule puts them here rather than in -local. The cost is real and
+# accepted: torch (~2.5 GB) in every install, and ~3 s on every `import config`.
+# The models themselves are NOT fetched by pip; see adapters/rerank_cross_encoder.py.
+sentence-transformers==6.0.1
+torch==2.14.0
