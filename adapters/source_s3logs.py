@@ -22,7 +22,9 @@ kilobytes. `normalize_evidence` then validates that into a `LogWindow`.
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass, field
 
+import registry
 from registry import adapter
 from schemas.evidence import MAX_LINE_CHARS
 
@@ -51,73 +53,16 @@ def _candidates(counts: dict, severity_of: dict, samples: dict) -> tuple[list, l
     ]
 
 
-class _WindowReducer:
-    """The running state of one day's reduction: buffers per stream, and what
-    the detector found so far (counts, first severity, capped samples).
+@dataclass
+class _SignalTally:
+    """What the detector found so far: counts, first severity and capped samples per signal."""
 
-    Buffered per (service, ref) so each detector call sees a contiguous window
-    with correct line offsets. Memory is bounded by MAX_BUFFERED_LINES across all
-    streams, never by the size of the day.
-    """
+    counts: dict[str, int] = field(default_factory=dict)
+    severity_of: dict[str, str] = field(default_factory=dict)
+    samples: dict[str, list[dict]] = field(default_factory=dict)
+    truncated: bool = False
 
-    def __init__(self, detector):
-        """Start empty; `detector` is called once per flushed window."""
-        self.detector = detector
-        self.digest = hashlib.sha256()
-        self.line_count = 0
-        self.services: dict[str, None] = {}
-        self.counts: dict[str, int] = {}
-        self.severity_of: dict[str, str] = {}
-        self.samples: dict[str, list[dict]] = {}
-        self.truncated = False
-        self.buffers: dict[tuple[str, str], list[str]] = {}
-        self.starts: dict[tuple[str, str], int] = {}
-        self.per_stream_count: dict[tuple[str, str], int] = {}
-        self.buffered = 0
-
-    def add(self, service: str, ref: str, line: str) -> None:
-        """Take one line: hash it, buffer it, and flush when a cap is reached.
-
-        A stream flushes alone at WINDOW_LINES; when ALL streams together reach
-        MAX_BUFFERED_LINES, every stream flushes (see MAX_BUFFERED_LINES).
-        """
-        self.line_count += 1
-        self.services.setdefault(service, None)
-        self.digest.update(line.encode("utf-8", "replace"))
-        key = (service, ref)
-        self.starts.setdefault(key, 0)
-        self.per_stream_count[key] = self.per_stream_count.get(key, 0) + 1
-        self.buffers.setdefault(key, []).append(line)
-        self.buffered += 1
-        if len(self.buffers[key]) >= WINDOW_LINES:
-            self.flush(key)
-        elif self.buffered >= MAX_BUFFERED_LINES:
-            self.flush_all()
-
-    def flush_all(self) -> None:
-        """Flush every stream's buffer, in the order the streams first appeared."""
-        for key in list(self.buffers):
-            self.flush(key)
-
-    def flush(self, key: tuple[str, str]) -> None:
-        """Run the detector over one stream's buffer and fold its hits in.
-
-        Empties the buffer and advances that stream's start offset so the next
-        window's line numbers continue where this one stopped.
-        """
-        lines = self.buffers.get(key)
-        if not lines:
-            return
-        self.buffered -= len(lines)
-        service, ref = key
-        hits = self.detector.detect({"service": service, "ref": ref,
-                                     "start": self.starts[key], "lines": lines})
-        for hit in hits:
-            self._fold(hit)
-        self.buffers[key] = []
-        self.starts[key] = self.per_stream_count[key]
-
-    def _fold(self, hit: dict) -> None:
+    def fold(self, hit: dict) -> None:
         """Count one detector hit and keep it as a sample while its signal has room."""
         signal = hit["signal"]
         self.counts[signal] = self.counts.get(signal, 0) + 1
@@ -137,6 +82,84 @@ class _WindowReducer:
         })
 
 
+@dataclass
+class _StreamBuffers:
+    """Lines waiting for the detector, per (service, ref) stream.
+
+    `starts` is each stream's line offset for its next window and `seen` its
+    running line count, so a window flushed early still numbers its lines right.
+    `buffered` is the total across every stream -- the number MAX_BUFFERED_LINES
+    bounds.
+    """
+
+    lines: dict[tuple[str, str], list[str]] = field(default_factory=dict)
+    starts: dict[tuple[str, str], int] = field(default_factory=dict)
+    seen: dict[tuple[str, str], int] = field(default_factory=dict)
+    buffered: int = 0
+
+
+class _WindowReducer:
+    """The running state of one day's reduction: the stream buffers, and the
+    tally of what the detector found so far.
+
+    Buffered per (service, ref) so each detector call sees a contiguous window
+    with correct line offsets. Memory is bounded by MAX_BUFFERED_LINES across all
+    streams, never by the size of the day.
+    """
+
+    def __init__(self, detector):
+        """Start empty; `detector` is called once per flushed window."""
+        self.detector = detector
+        self.digest = hashlib.sha256()
+        self.line_count = 0
+        self.services: dict[str, None] = {}
+        self.tally = _SignalTally()
+        self.streams = _StreamBuffers()
+
+    def add(self, service: str, ref: str, line: str) -> None:
+        """Take one line: hash it, buffer it, and flush when a cap is reached.
+
+        A stream flushes alone at WINDOW_LINES; when ALL streams together reach
+        MAX_BUFFERED_LINES, every stream flushes (see MAX_BUFFERED_LINES).
+        """
+        self.line_count += 1
+        self.services.setdefault(service, None)
+        self.digest.update(line.encode("utf-8", "replace"))
+        key, s = (service, ref), self.streams
+        s.starts.setdefault(key, 0)
+        s.seen[key] = s.seen.get(key, 0) + 1
+        s.lines.setdefault(key, []).append(line)
+        s.buffered += 1
+        if len(s.lines[key]) >= WINDOW_LINES:
+            self.flush(key)
+        elif s.buffered >= MAX_BUFFERED_LINES:
+            self.flush_all()
+
+    def flush_all(self) -> None:
+        """Flush every stream's buffer, in the order the streams first appeared."""
+        for key in list(self.streams.lines):
+            self.flush(key)
+
+    def flush(self, key: tuple[str, str]) -> None:
+        """Run the detector over one stream's buffer and fold its hits in.
+
+        Empties the buffer and advances that stream's start offset so the next
+        window's line numbers continue where this one stopped.
+        """
+        s = self.streams
+        lines = s.lines.get(key)
+        if not lines:
+            return
+        s.buffered -= len(lines)
+        service, ref = key
+        hits = self.detector.detect({"service": service, "ref": ref,
+                                     "start": s.starts[key], "lines": lines})
+        for hit in hits:
+            self.tally.fold(hit)
+        s.lines[key] = []
+        s.starts[key] = s.seen[key]
+
+
 @adapter("source", "s3logs")
 class S3LogSource:
     """Read the day's CloudWatch->S3 exports and reduce them to a LogWindow.
@@ -149,14 +172,13 @@ class S3LogSource:
         self._detector = detector
 
     def detector(self):
-        """The injected Detector, else `config.get_detector()`.
+        """The injected Detector, else the configured one (`config.get_detector`).
 
-        `config` is imported inside the method because it is circular at module
-        level: config imports `adapters`, which imports this module.
+        Through `registry.provider`, not `import config`: config imports
+        `adapters`, which imports this module.
         """
         if self._detector is None:
-            import config
-            self._detector = config.get_detector()
+            self._detector = registry.provider("detector")
         return self._detector
 
     def _read(self, target: str, **opts):
@@ -189,7 +211,8 @@ class S3LogSource:
             window.add(service, ref, line)
         window.flush_all()
 
-        ordered, candidates = _candidates(window.counts, window.severity_of, window.samples)
+        tally = window.tally
+        ordered, candidates = _candidates(tally.counts, tally.severity_of, tally.samples)
 
         return {
             "date": target,
@@ -199,5 +222,5 @@ class S3LogSource:
             "services": sorted(window.services),
             "counts": dict(ordered),
             "candidates": candidates,
-            "truncated": window.truncated or len(ordered) > MAX_CANDIDATES,
+            "truncated": tally.truncated or len(ordered) > MAX_CANDIDATES,
         }

@@ -8,6 +8,9 @@
   // Without this the IDE reports "Unable to import 'config'" for every
   // root-level module, because the project root is not on the analysis path.
   "python.analysis.extraPaths": ["."],
+  // pylint reads .pylintrc (and resolves its `source-roots=.`) from its working
+  // directory, so run it from this repo even when a parent folder is the workspace.
+  "pylint.cwd": "${fileWorkspaceFolder}",
   "python.analysis.typeCheckingMode": "basic",
 
   "python.testing.pytestEnabled": true,

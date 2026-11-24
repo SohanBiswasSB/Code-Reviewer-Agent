@@ -183,7 +183,7 @@ def _strongest(kinds) -> str | None:
     return max(present, key=RANK.get) if present else None
 
 
-class _Module:
+class ModuleIndex:
     """Per-module index: which local functions do a round trip (and of what kind)."""
 
     def __init__(self, tree: ast.Module):
@@ -224,10 +224,10 @@ class _Module:
         return None
 
 
-class _LoopVisitor(ast.NodeVisitor):
+class LoopVisitor(ast.NodeVisitor):
     """Finds round trips inside `n`-shaped loops, following module-local helpers."""
 
-    def __init__(self, index: _Module):
+    def __init__(self, index: ModuleIndex):
         """Empty loop stack; `found` collects (line, loop line, kind, how) per hit."""
         self.index, self.loops, self.cls = index, [], None
         self.local_containers: set[str] = set()
@@ -364,7 +364,7 @@ def _shown_fields(cls: ast.ClassDef) -> set[str]:
     return shown
 
 
-def _db_call_lines(fn: ast.AST, cls_name: str, index: _Module) -> set[int]:
+def _db_call_lines(fn: ast.AST, cls_name: str, index: ModuleIndex) -> set[int]:
     """The lines inside a hook that make it a db round trip, directly or via a helper.
 
     A db call ADDED inside an existing hook is new even though the `def` line
@@ -375,7 +375,7 @@ def _db_call_lines(fn: ast.AST, cls_name: str, index: _Module) -> set[int]:
                  or index.kind.get(index.resolve(c, cls_name) or "") == "db")}
 
 
-def _class_hooks(cls: ast.ClassDef, index: _Module) -> list[tuple[int, str, str, set]]:
+def _class_hooks(cls: ast.ClassDef, index: ModuleIndex) -> list[tuple[int, str, str, set]]:
     """`_per_row_hooks` for one class: none unless it is a serializer or an admin."""
     bases = [ast.unparse(b) for b in cls.bases]
     is_ser = any(b.split(".")[-1].endswith("Serializer") for b in bases)
@@ -396,7 +396,7 @@ def _class_hooks(cls: ast.ClassDef, index: _Module) -> list[tuple[int, str, str,
     return out
 
 
-def _per_row_hooks(tree: ast.Module, index: _Module) -> list[tuple[int, str, str, set]]:
+def _per_row_hooks(tree: ast.Module, index: ModuleIndex) -> list[tuple[int, str, str, set]]:
     """Serializer `get_*`/`to_representation` and admin `list_display` callables
     that do a db round trip: they run once per row with no visible loop."""
     out = []
@@ -411,8 +411,8 @@ def _file_hits(tree: ast.Module) -> list[tuple[int, int, str, str, set]]:
     Each hit is (line, loop line, kind, message, the lines whose being NEW makes
     the finding new): loop hits from the visitor, then per-row framework hooks.
     """
-    index = _Module(tree)
-    visitor = _LoopVisitor(index)
+    index = ModuleIndex(tree)
+    visitor = LoopVisitor(index)
     visitor.visit(tree)
     hits = [(ln, lp, k, f"{k} round trip {how} inside a loop (loop at line {lp})", {ln, lp})
             for ln, lp, k, how in visitor.found]

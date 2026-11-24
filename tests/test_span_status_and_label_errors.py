@@ -24,6 +24,7 @@ def _rows(tracer):
 
 
 def test_a_span_that_succeeds_inside_an_unrelated_except_is_ok(tmp_path):
+    """A span that succeeds while the caller handles its own exception is recorded ok."""
     tracer = JsonlTracer(root=str(tmp_path))
     try:
         raise KeyError("the caller's own, already handled")
@@ -35,6 +36,7 @@ def test_a_span_that_succeeds_inside_an_unrelated_except_is_ok(tmp_path):
 
 
 def test_a_keyboard_interrupt_is_still_a_span_and_still_raises(tmp_path):
+    """KeyboardInterrupt still closes the span as error and propagates; nothing swallows it."""
     tracer = JsonlTracer(root=str(tmp_path))
     with pytest.raises(KeyboardInterrupt), tracer.span("node.diagnose"):
         raise KeyboardInterrupt("ctrl-c")
@@ -42,23 +44,30 @@ def test_a_keyboard_interrupt_is_still_a_span_and_still_raises(tmp_path):
     assert row["status"] == "error" and row["error"].startswith("KeyboardInterrupt")
 
 
-@pytest.fixture
-def posted(monkeypatch):
+@pytest.fixture(name="posted")
+def fixture_posted(monkeypatch):
+    """Make the comment post succeed, so only the label path can fail."""
     monkeypatch.setattr(github_client, "post_comment",
                         lambda url, body, token=None: {"body": body})
 
 
+@pytest.mark.usefixtures("posted")
 @pytest.mark.parametrize("exc", [PermissionError("403"), RuntimeError("403"),
                                  NotImplementedError("stub"), ValueError("bad key")])
-def test_an_expected_label_failure_is_a_partial_success(posted, monkeypatch, exc):
+def test_an_expected_label_failure_is_a_partial_success(monkeypatch, exc):
+    """A LABEL_ERRORS failure after the comment posted keeps the comment and reports the label
+    skipped."""
     def fail(url, label, token=None):
         raise exc
     monkeypatch.setattr(github_client, "add_label", fail)
     out = PRCommentSink().emit({"comment": "posted", "label": "bug"}, target="u")
-    assert out["comment"] == {"body": "posted"} and "skipped" in out["label"]
+    assert out["comment"] == {"body": "posted"}
+    assert out["label"] == {"skipped": f"{type(exc).__name__}: {exc}"}
 
 
-def test_a_bug_in_the_label_path_propagates(posted, monkeypatch):
+@pytest.mark.usefixtures("posted")
+def test_a_bug_in_the_label_path_propagates(monkeypatch):
+    """A TypeError in the label path is a bug, outside LABEL_ERRORS, so it propagates."""
     def broken(url, label, token=None):
         raise TypeError("a bug, not a provider failure")
     monkeypatch.setattr(github_client, "add_label", broken)

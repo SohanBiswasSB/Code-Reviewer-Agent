@@ -17,8 +17,17 @@ from __future__ import annotations
 
 import ast
 
-from tools.prepush.change import FLAG, SKIP, Change, _skip_path, report, result
-from tools.prepush.standards.engine import Finding, dotted, enabled, own_nodes, run_rules, scoped
+from tools.prepush.change import FLAG, SKIP, Change, report, result
+from tools.prepush.standards.engine import (
+    Finding,
+    changed_trees,
+    defs,
+    dotted,
+    enabled,
+    own_nodes,
+    run_rules,
+    scoped,
+)
 
 BROAD = {"Exception", "BaseException"}
 
@@ -88,10 +97,7 @@ def measure(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, int]:
 def oversized(tree: ast.Module, limits: dict[str, int]) -> dict[str, tuple[int, int]]:
     """`function:metric` -> (value, line) for every metric over its limit."""
     out = {}
-    for node, scope in scoped(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        name = f"{scope}.{node.name}".lstrip(".")
+    for node, name in defs(tree):
         for metric, value in measure(node).items():
             if value > limits[metric]:
                 out[f"{name}:{metric}"] = (value, node.lineno)
@@ -108,12 +114,8 @@ def check_size_limits(change: Change, config: dict) -> list[dict]:
         return [result("size_limits", 1, SKIP, "disabled in this codebase's standards config")]
     limits = {**LIMITS, **((config.get("standards") or {}).get("limits") or {})}
     flags = []
-    for path in change.py_files():
-        new_tree = change.tree_for(path)
-        if _skip_path(path, config) or new_tree is None:
-            continue
-        old = oversized(change.tree_for(path, "base") or ast.Module(body=[], type_ignores=[]),
-                        limits)
+    for path, new_tree, old_tree in changed_trees(change, config):
+        old = oversized(old_tree, limits)
         for key, (value, line) in oversized(new_tree, limits).items():
             if value > old.get(key, (0, 0))[0]:
                 fn, metric = key.rsplit(":", 1)

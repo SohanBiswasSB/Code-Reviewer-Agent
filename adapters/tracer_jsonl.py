@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 
 from datadir import data_dir
 from errors import WRITE_ERRORS
+from ports.interfaces import Tracer
 from registry import adapter
 
 SCHEMA_VERSION = 1
@@ -135,10 +136,14 @@ class JsonlTracer:
 
 
 @adapter("tracer", "null")
-class NullTracer:
+class NullTracer(Tracer):
     """Records nothing. Registered rather than improvised, so CRA_TRACE=null is
     visible in `config.registered()` instead of being a no-op somebody has to
-    discover by reading code."""
+    discover by reading code.
+
+    Declared as a `Tracer`, so `span`'s ignored `name` and `attrs` read as what
+    they are: the port's signature, honoured and deliberately unused.
+    """
 
     @contextlib.contextmanager
     def span(self, name: str, **attrs):

@@ -95,6 +95,21 @@ def scoped(tree: ast.AST) -> Iterator[tuple[ast.AST, str]]:
     yield from visit(tree, "")
 
 
+FUNCTION_DEFS = (ast.FunctionDef, ast.AsyncFunctionDef)
+
+
+def defs(tree: ast.AST, kinds: tuple[type, ...] = FUNCTION_DEFS) -> Iterator[tuple[ast.AST, str]]:
+    """(def, its dotted name) for every def of `kinds` in `tree`, nested ones included.
+
+    The name ("View.get") is what a finding's key starts with, so every rule
+    names a function the same way -- a rule that spelled it differently would
+    turn a moved function into a "new" finding.
+    """
+    for node, scope in scoped(tree):
+        if isinstance(node, kinds):
+            yield node, f"{scope}.{node.name}".lstrip(".")
+
+
 def own_nodes(fn: ast.AST) -> Iterator[ast.AST]:
     """A def's own nodes: a nested def, class or lambda is yielded but not entered,
     because its body is its own unit and is measured on its own."""
@@ -128,6 +143,22 @@ def all_findings(tree: ast.Module, path: str, rules: Iterable[Rule], cfg: dict) 
     return [f for rule in rules for f in rule(tree, path, cfg)]
 
 
+def changed_trees(change: Change, config: dict) -> Iterator[tuple[str, ast.Module, ast.Module]]:
+    """(path, new tree, base tree) for each changed Python file a check should read.
+
+    Skipped: paths the codebase's config excludes, and files with no new tree
+    (deleted, or not parseable). A file the change ADDED has an empty base, so
+    everything in it counts as new. Shared by `run_rules` and `size_limits`,
+    which compare the two trees differently but must agree on which files.
+    """
+    for path in change.py_files():
+        new_tree = change.tree_for(path)
+        if _skip_path(path, config) or new_tree is None:
+            continue
+        yield path, new_tree, change.tree_for(path, "base") or ast.Module(body=[],
+                                                                           type_ignores=[])
+
+
 def run_rules(change: Change, config: dict, spec: tuple[str, int, tuple[Rule, ...]],
               wording: tuple[str, str]) -> list[dict]:
     """Flag what each changed Python file ADDED against `spec`'s rules.
@@ -141,11 +172,7 @@ def run_rules(change: Change, config: dict, spec: tuple[str, int, tuple[Rule, ..
         return [result(check, step, SKIP, "disabled in this codebase's standards config")]
     cfg = standards_config(config)
     flags = []
-    for path in change.py_files():
-        new_tree = change.tree_for(path)
-        if _skip_path(path, config) or new_tree is None:
-            continue
-        old_tree = change.tree_for(path, "base") or ast.Module(body=[], type_ignores=[])
+    for path, new_tree, old_tree in changed_trees(change, config):
         for f in added_findings(all_findings(new_tree, path, rules, cfg),
                                 all_findings(old_tree, path, rules, cfg)):
             flags.append(result(check, step, FLAG, f.message, path, f.line))

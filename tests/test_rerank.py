@@ -6,6 +6,7 @@ FakeEmbedder stands in for LM Studio in test_index.py. One test, marked
 """
 import json
 import urllib.error
+from dataclasses import dataclass, field
 
 import pytest
 
@@ -20,8 +21,8 @@ from nodes.independent_review import _bar_for, _groundedness, effective_gates
 from tests.test_index import CORPUS, FakeEmbedder, _build
 
 
-@pytest.fixture
-def built(tmp_path):
+@pytest.fixture(name="built")
+def fixture_built(tmp_path):
     """The test_index corpus, built here rather than imported: importing another
     module's fixture only works by shadowing it, which is what a lint rule flags."""
     index = LocalVectorIndex(root=tmp_path / "index")
@@ -29,14 +30,19 @@ def built(tmp_path):
     return index
 
 
+@dataclass
 class FakeReranker:
     """Scores a passage by whether it contains a keyword; records what it saw."""
 
-    def __init__(self, keyword: str):
-        self.keyword = keyword
-        self.seen: list[int] = []
+    keyword: str
+    seen: list[int] = field(default_factory=list)
 
-    def rerank(self, query, candidates, top_n=8):
+    def rerank(self, _query, candidates, top_n=8):
+        """The `Reranker` port: copies with a `rerank` score, best first, at most top_n.
+
+        The retriever passes the query positionally; the fake scores on the
+        keyword alone, so the query is deliberately unused.
+        """
         self.seen.append(len(candidates))
         scored = [{**c, "rerank": 0.97 if self.keyword in c["text"] else 0.02}
                   for c in candidates]
@@ -45,6 +51,7 @@ class FakeReranker:
 
 
 def test_the_reranker_supplies_the_gate_score_and_says_so(built):
+    """With a reranker, its order wins and `score` is its score, labelled `rerank` (T13)."""
     rr = FakeReranker("hmac")
     r = IndexedRetriever(embedder=FakeEmbedder(), index=built, reranker=rr)
     hits = r.retrieve("oauth callback state", k=2, namespace="org/backend")
@@ -57,6 +64,7 @@ def test_the_reranker_supplies_the_gate_score_and_says_so(built):
 
 
 def test_the_reranker_sees_the_wide_pool_not_just_k(built):
+    """The reranker is handed the wide fused pool, so it can change which k win."""
     rr = FakeReranker("x")
     IndexedRetriever(embedder=FakeEmbedder(), index=built, reranker=rr).retrieve(
         "oauth", k=1, namespace="org/backend")
@@ -64,12 +72,14 @@ def test_the_reranker_sees_the_wide_pool_not_just_k(built):
 
 
 def test_without_a_reranker_the_score_is_the_cosine(built):
+    """No reranker: the gate reads the cosine, and the hit says that is what it is."""
     hits = IndexedRetriever(embedder=FakeEmbedder(), index=built, reranker=None).retrieve(
         "oauth", k=2, namespace="org/backend")
     assert all(h["score_kind"] == "cosine" and h["score"] == h["cosine"] for h in hits)
 
 
 def test_reranker_none_is_honoured(monkeypatch):
+    """RERANKER=none is how offline callers declare no model: it must yield no reranker."""
     monkeypatch.setenv("RERANKER", "none")
     assert config.get_reranker() is None
 
@@ -81,18 +91,21 @@ def test_the_reranker_is_off_by_default(monkeypatch):
 
 
 def test_the_cross_encoder_is_selectable_and_loads_nothing_until_used(monkeypatch):
+    """Selecting the cross-encoder must not load 2.3 GB; the model waits for first use."""
     monkeypatch.setenv("RERANKER", "cross_encoder")
     r = config.get_reranker()
-    assert isinstance(r, CrossEncoderReranker) and r._encoder is None
+    assert isinstance(r, CrossEncoderReranker) and not r.loaded
 
 
-def test_a_missing_model_is_a_clear_error_not_a_download(monkeypatch):
+def test_a_missing_model_is_a_clear_error_not_a_download():
+    """An uncached model is a ProviderError naming the fix; a review never downloads."""
     r = CrossEncoderReranker(model="no-such-org/no-such-reranker", device="cpu")
     with pytest.raises(ProviderError, match="never downloads"):
         r.scores("q", ["p"])
 
 
 def test_the_passage_carries_its_path_and_name():
+    """The reranker reads path and name too, since the query itself starts with a path."""
     assert passage_text({"path": "app/x.py", "name": "f", "text": "body"}) == \
         "app/x.py :: f\nbody"
     assert passage_text({"text": "body"}) == "body"
@@ -100,6 +113,7 @@ def test_the_passage_carries_its_path_and_name():
 
 # ── the gate: one bar per KIND of score ─────────────────────────────────────
 def test_each_kind_of_score_is_gated_on_its_own_bar():
+    """Each score kind has its own bar; a hit with no kind keeps the cosine bar."""
     bars = effective_gates({"min_relevance_score": 0.75, "min_rerank_score": 0.5})
     assert _bar_for({"score_kind": "rerank"}, bars) == 0.5
     assert _bar_for({"score_kind": "cosine"}, bars) == 0.75
@@ -121,6 +135,7 @@ def test_a_rerank_score_is_never_compared_with_the_cosine_bar():
 
 @pytest.mark.needs_model
 def test_the_real_cross_encoder_separates_relevant_from_irrelevant():
+    """Live model: the relevant passage outscores the irrelevant one by a wide margin."""
     r = CrossEncoderReranker()
     q = ("Masterclass/models.py\n+class QuestionBank(models.Model):\n"
          "+    unique_together = ('course', 'name')")
@@ -142,6 +157,7 @@ class _Resp:
         self._b = json.dumps(payload).encode()
 
     def read(self):
+        """The response body, as urllib's response object would return it."""
         return self._b
 
     def __enter__(self):
@@ -154,7 +170,8 @@ class _Resp:
 def _gateway(monkeypatch, results=None, error=None):
     sent = []
 
-    def urlopen(request, timeout=None):
+    def urlopen(request, **_kwargs):
+        """The adapter's call is `urlopen(request, timeout=...)`; the timeout is unused here."""
         sent.append(json.loads(request.data))
         if error:
             raise error
@@ -174,6 +191,7 @@ def test_gateway_scores_map_by_index_through_the_same_sigmoid(monkeypatch):
 
 
 def test_gateway_rerank_orders_and_keeps_top_n(monkeypatch):
+    """The gateway's scores order the candidates, and only the top_n come back."""
     _gateway(monkeypatch, [{"index": 0, "relevance_score": -5.0},
                            {"index": 1, "relevance_score": 4.0}])
     out = GatewayReranker(url="https://gw.example/v1").rerank(
@@ -182,12 +200,14 @@ def test_gateway_rerank_orders_and_keeps_top_n(monkeypatch):
 
 
 def test_a_missing_score_is_an_error_never_a_default(monkeypatch):
+    """A passage the gateway did not score raises; a default score could pass the gate."""
     _gateway(monkeypatch, [{"index": 0, "relevance_score": 1.0}])
     with pytest.raises(ProviderError, match="scored 1 of 2"):
         GatewayReranker(url="https://gw.example/v1").scores("q", ["a", "b"])
 
 
 def test_a_refused_key_is_an_auth_error_not_retried(monkeypatch):
+    """HTTP 401 is ProviderAuthError on the first attempt: retrying a wrong key is futile."""
     err = urllib.error.HTTPError("u", 401, "Unauthorized", {}, None)
     sent = _gateway(monkeypatch, error=err)
     with pytest.raises(ProviderAuthError, match="refused the API key"):
@@ -196,14 +216,20 @@ def test_a_refused_key_is_an_auth_error_not_retried(monkeypatch):
 
 
 def test_reranker_gateway_is_selectable(monkeypatch):
+    """RERANKER=gateway resolves to the gateway adapter."""
     monkeypatch.setenv("RERANKER", "gateway")
     assert isinstance(config.get_reranker(), GatewayReranker)
 
 
 @pytest.mark.needs_server
 def test_the_real_gateway_separates_relevant_from_irrelevant():
-    good, bad = GatewayReranker().scores(
+    """Live gateway: relevant above 0.5, irrelevant below."""
+    scores = GatewayReranker().scores(
         "Masterclass/models.py\n+class QuestionBank(models.Model):",
         ["class QuestionBank(models.Model):\n    course = models.ForeignKey(Course)",
          "def send_email(user):\n    smtp.send(user.email)"])
+    # Indexed, not unpacked: `scores` returns [] for no passages, and an unpack
+    # would read as if that branch could reach here.
+    assert len(scores) == 2
+    good, bad = scores[0], scores[1]
     assert good > 0.5 > bad

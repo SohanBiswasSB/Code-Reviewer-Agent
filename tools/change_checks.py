@@ -36,13 +36,13 @@ from tools.prepush.change import (
     split_diff,
 )
 from tools.prepush.conventions import (
-    _author,
     check_commit_message,
     check_docs,
     check_not_checkable,
     check_paths,
     check_postman,
     check_tracker,
+    commit_author,
 )
 from tools.prepush.hygiene import (
     check_handler_docstrings,
@@ -50,15 +50,15 @@ from tools.prepush.hygiene import (
     check_suppressions,
     check_untracked_imports,
 )
-from tools.prepush.n_plus_one import _LoopVisitor, _Module, check_n_plus_one
+from tools.prepush.n_plus_one import LoopVisitor, ModuleIndex, check_n_plus_one
 from tools.prepush.standards import STANDARDS_CHECKS
 
 # The public surface. `ast` and `subprocess` are here because the tests reach the
 # parser and count git calls through this module; listing a name in __all__ is
 # what marks it exported rather than unused.
 __all__ = [
-    "CHECKS", "FLAG", "MAX_REPORTED", "PASS", "SKIP", "Change", "_LoopVisitor", "_Module",
-    "_author", "added_lines", "ast", "check_commit_message", "check_docs",
+    "CHECKS", "FLAG", "MAX_REPORTED", "PASS", "SKIP", "Change", "LoopVisitor", "ModuleIndex",
+    "commit_author", "added_lines", "ast", "check_commit_message", "check_docs",
     "check_handler_docstrings", "check_line_hygiene", "check_n_plus_one",
     "check_not_checkable", "check_paths", "check_postman", "check_suppressions",
     "check_tracker", "check_untracked_imports", "result", "run_all", "split_diff",

@@ -11,12 +11,14 @@ from tools.calibrate import suggest
 
 
 def test_a_clean_separation_is_found():
+    """Fully separated scores give J = 1 and a cut between them that admits no negatives."""
     out = suggest(pos=[0.70, 0.72, 0.75, 0.80, 0.81], neg=[0.40, 0.45, 0.50, 0.52])
     assert 0.52 < out["youden_cut"] <= 0.70 and out["youden_j"] == 1.0
     assert out["negatives_passing_that_cut"] == 0.0
 
 
 def test_too_little_data_says_so_rather_than_guessing():
+    """With no negatives there is nothing to separate, so the result carries a note."""
     assert "note" in suggest(pos=[0.5], neg=[])
 
 

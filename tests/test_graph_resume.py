@@ -8,61 +8,33 @@ Only the GitHub *network calls* are stubbed. Everything else — the graph, the
 checkpointer, `interrupt()`, the gate booleans, the permission guard — is the
 real code path.
 """
-import pytest
+import inspect
 
-import registry
+import pytest
+from langgraph.types import Command
+from pydantic import BaseModel
+
+from adapters.audit_jsonl import iter_records
+from app.graph import build_graph
+from app.state import CHECKPOINT_TYPES, checkpoint_serde
+from schemas import diagnosis, evidence
+from schemas.diagnosis import Citation, Diagnosis, Finding, ReviewResult
+from schemas.evidence import CheckRun, IssueEvidence
+from tests._graph_fakes import fresh_graph, issue_surface_registered, stub_github
 from tools import github_client
 
 
-@pytest.fixture
-def posted(monkeypatch):
+@pytest.fixture(name="posted")
+def fixture_posted(monkeypatch):
     """Capture what would have been written, and guarantee no real call escapes."""
-    sent = []
-    monkeypatch.setattr(github_client, "fetch_issue", lambda url, token=None: {
-        "html_url": url,
-        "title": "OAuth callback returns 500 when state param missing",
-        "body": "help",                      # sparse -> ai_investigation
-        "labels": [{"name": "bug"}],
-    })
-    monkeypatch.setattr(github_client, "get_check_runs", lambda url, token=None: [])
-    monkeypatch.setattr(github_client, "post_comment",
-                        lambda url, body, token=None: (sent.append(body), {"posted": body})[1])
-    monkeypatch.setattr(github_client, "add_label",
-                        lambda url, label, token=None: {"labelled": label})
-    return sent
+    return stub_github(monkeypatch)
 
 
-@pytest.fixture
-def issue_surface(monkeypatch):
-    """A surface whose classify matches ISSUE-shaped evidence.
-
-    The real `code_review` surface routes on `touched_areas`, which issue
-    evidence does not carry — it therefore returns `human_review` and never
-    reaches the gate. That mismatch is T5; it fails safe, but it means the gate
-    cannot be exercised through that surface yet.
-    """
-    class IssueShaped:
-        name = "code_review"
-        source_name, sink_name = "github", "pr_comment"
-        diagnosis_prompt = judge_prompt = "diagnosis"
-
-        def build_query(self, ev):
-            return ev.get("title", "")
-
-        def classify(self, ev):
-            if ev.get("has_failing_ci"):
-                return "deterministic"
-            return "ai_investigation" if ev.get("is_information_sparse") else "human_review"
-
-    monkeypatch.setitem(registry._SURFACES, "code_review", IssueShaped)
-    return IssueShaped
-
-
-def _graph():
-    from langgraph.checkpoint.memory import MemorySaver
-
-    from app.graph import build_graph
-    return build_graph(checkpointer=MemorySaver())
+@pytest.fixture(name="issue_surface")
+def fixture_issue_surface():
+    """A surface whose classify matches ISSUE-shaped evidence (T5; see _graph_fakes)."""
+    with issue_surface_registered() as surface:
+        yield surface
 
 
 def _cfg(name):
@@ -77,22 +49,24 @@ def _start(graph, cfg, tenant="_default", surface="code_review", target="https:/
 def test_build_graph_refuses_without_a_checkpointer():
     """interrupt() suspends by persisting; with nowhere to persist, the gate
     would evaporate on restart. Refuse loudly instead of compiling."""
-    from app.graph import build_graph
     with pytest.raises(ValueError, match="requires a checkpointer"):
         build_graph()
 
 
-def test_run_suspends_at_the_single_gate(posted, issue_surface):
-    g, cfg = _graph(), _cfg("t-suspend")
+@pytest.mark.usefixtures("issue_surface")
+def test_run_suspends_at_the_single_gate(posted):
+    """T4: one gate, reached before anything is written -- not a second, earlier pause."""
+    g, cfg = fresh_graph(), _cfg("t-suspend")
     _start(g, cfg)
     assert g.get_state(cfg).next == ("await_approval",), "must suspend at await_approval"
     assert posted == [], "nothing may be written before approval"
 
 
-def test_the_human_is_shown_what_they_are_approving(posted, issue_surface):
+@pytest.mark.usefixtures("posted", "issue_surface")
+def test_the_human_is_shown_what_they_are_approving():
     """A gate whose contents the approver cannot see is a rubber stamp -- which
     is why interrupt() carries a payload and interrupt_before was dropped."""
-    g, cfg = _graph(), _cfg("t-payload")
+    g, cfg = fresh_graph(), _cfg("t-payload")
     out = _start(g, cfg)
     payload = out["__interrupt__"][0].value
     assert payload["proposed_action"]["comment"]
@@ -101,15 +75,18 @@ def test_the_human_is_shown_what_they_are_approving(posted, issue_surface):
 
 
 # ── T14: the tenant is actually resolved ─────────────────────────────────────
-def test_policy_is_resolved_into_state(posted, issue_surface):
-    g, cfg = _graph(), _cfg("t-policy")
+@pytest.mark.usefixtures("posted", "issue_surface")
+def test_policy_is_resolved_into_state():
+    """T14: the tenant's policy, surface and policy version land in state for later nodes."""
+    g, cfg = fresh_graph(), _cfg("t-policy")
     out = _start(g, cfg)
     assert out["_policy"]["min_relevance_score"] == 0.35
     assert out["_surface_name"] == "code_review"
     assert out["_policy_version"]
 
 
-def test_a_tenant_with_a_codebase_forces_namespaced_retrieval(posted, issue_surface):
+@pytest.mark.usefixtures("issue_surface")
+def test_a_tenant_with_a_codebase_forces_namespaced_retrieval(posted):
     """G1, end to end: a tenant bound to a codebase retrieves in its namespace.
 
     project_a's policy declares `codebase.repo = org/project-a`, so
@@ -126,35 +103,37 @@ def test_a_tenant_with_a_codebase_forces_namespaced_retrieval(posted, issue_surf
     `_default` declares no codebase, so it retrieves un-namespaced and proceeds —
     which is why the other tests in this file use it.
     """
-    g = _graph()
+    g = fresh_graph()
     with pytest.raises(NotImplementedError, match="namespace-scoped"):
         _start(g, _cfg("t-namespaced"), tenant="project_a")
     assert posted == []
 
 
-def test_default_tenant_retrieves_unnamespaced_and_reaches_the_gate(posted, issue_surface):
+@pytest.mark.usefixtures("posted", "issue_surface")
+def test_default_tenant_retrieves_unnamespaced_and_reaches_the_gate():
     """The counterpart: no codebase binding means no namespace, so the demo
     retriever can serve it and the run reaches the approval gate."""
-    g, cfg = _graph(), _cfg("t-unnamespaced")
+    g, cfg = fresh_graph(), _cfg("t-unnamespaced")
     out = _start(g, cfg, tenant="_default")
     assert out["_policy"].get("codebase") in ({}, None)
     assert g.get_state(cfg).next == ("await_approval",)
 
 
-def test_a_surface_the_tenant_has_not_enabled_is_refused_in_the_graph(posted):
+@pytest.mark.usefixtures("posted")
+def test_a_surface_the_tenant_has_not_enabled_is_refused_in_the_graph():
     """project_b enables code_review only. Checked in the graph, not just at the
     HTTP boundary -- the scheduled job does not go through HTTP."""
-    g = _graph()
+    g = fresh_graph()
     with pytest.raises(PermissionError, match="has not enabled surface"):
         _start(g, _cfg("t-blocked"), tenant="project_b",
                surface="log_review", target="2026-09-01")
 
 
 # ── T3: resume actually sets `approved`, and only a human can ────────────────
-def test_approval_executes_and_posts_verbatim(posted, issue_surface):
-    from langgraph.types import Command
-
-    g, cfg = _graph(), _cfg("t-approve")
+@pytest.mark.usefixtures("issue_surface")
+def test_approval_executes_and_posts_verbatim(posted):
+    """T3/invariant 4: resuming True sets `approved` and posts exactly the shown comment."""
+    g, cfg = fresh_graph(), _cfg("t-approve")
     out = _start(g, cfg)
     shown = out["__interrupt__"][0].value["proposed_action"]["comment"]
 
@@ -163,33 +142,33 @@ def test_approval_executes_and_posts_verbatim(posted, issue_surface):
     assert posted == [shown], "what executed must be exactly what was approved"
 
 
-def test_denial_refuses_and_writes_nothing(posted, issue_surface):
-    from langgraph.types import Command
-
-    g, cfg = _graph(), _cfg("t-deny")
+@pytest.mark.usefixtures("issue_surface")
+def test_denial_refuses_and_writes_nothing(posted):
+    """A False resume reaches `execute`, whose own guard refuses: nothing is posted."""
+    g, cfg = fresh_graph(), _cfg("t-deny")
     _start(g, cfg)
     with pytest.raises(PermissionError):
         g.invoke(Command(resume=False), config=cfg)
     assert posted == []
 
 
+@pytest.mark.usefixtures("issue_surface")
 @pytest.mark.parametrize("resume_value", ["yes please", 1, {"approved": "yes"}])
-def test_truthy_is_not_approval(posted, issue_surface, resume_value):
+def test_truthy_is_not_approval(posted, resume_value):
     """A truthy resume value must not become an approval.
 
     These all resume the graph, so `execute`'s `is not True` check is what stops
     them — which is exactly the defence-in-depth the guard exists for.
     """
-    from langgraph.types import Command
-
-    g, cfg = _graph(), _cfg(f"t-junk-{resume_value!r}")
+    g, cfg = fresh_graph(), _cfg(f"t-junk-{resume_value!r}")
     _start(g, cfg)
     with pytest.raises(PermissionError):
         g.invoke(Command(resume=resume_value), config=cfg)
     assert posted == []
 
 
-def test_a_falsy_resume_does_not_resume_at_all(posted, issue_surface):
+@pytest.mark.usefixtures("issue_surface")
+def test_a_falsy_resume_does_not_resume_at_all(posted):
     """Measured LangGraph behaviour: a falsy resume value is treated as "no
     resume provided", so the run stays parked at the gate rather than continuing.
 
@@ -203,20 +182,17 @@ def test_a_falsy_resume_does_not_resume_at_all(posted, issue_surface):
     langgraph/pregel/_loop.py — an upstream bug, not our behaviour. `/approve`
     coerces to a real bool so it can never send None.)
     """
-    from langgraph.types import Command
-
-    g, cfg = _graph(), _cfg("t-falsy")
+    g, cfg = fresh_graph(), _cfg("t-falsy")
     _start(g, cfg)
     g.invoke(Command(resume={}), config=cfg)
     assert g.get_state(cfg).next == ("await_approval",), "should still be parked"
     assert posted == []
 
 
-def test_dict_shaped_approval_is_accepted(posted, issue_surface):
+@pytest.mark.usefixtures("issue_surface")
+def test_dict_shaped_approval_is_accepted(posted):
     """A JSON body {"approved": true} is a legitimate resume shape."""
-    from langgraph.types import Command
-
-    g, cfg = _graph(), _cfg("t-dict")
+    g, cfg = fresh_graph(), _cfg("t-dict")
     _start(g, cfg)
     resumed = g.invoke(Command(resume={"approved": True}), config=cfg)
     assert resumed["approved"] is True
@@ -225,10 +201,10 @@ def test_dict_shaped_approval_is_accepted(posted, issue_surface):
 
 # ── T15: paused runs must survive a stricter serialiser ──────────────────────
 @pytest.mark.parametrize("value_factory", [
-    lambda: __import__("schemas.evidence", fromlist=["x"]).IssueEvidence(url="u", title="t"),
-    lambda: __import__("schemas.diagnosis", fromlist=["x"]).Citation(snippet_id="i", score=0.5),
-    lambda: __import__("schemas.diagnosis", fromlist=["x"]).Diagnosis(summary="s"),
-    lambda: __import__("schemas.diagnosis", fromlist=["x"]).ReviewResult(reasoning="r"),
+    lambda: IssueEvidence(url="u", title="t"),
+    lambda: Citation(snippet_id="i", score=0.5),
+    lambda: Diagnosis(summary="s"),
+    lambda: ReviewResult(reasoning="r"),
 ])
 def test_every_state_type_round_trips_through_the_checkpoint_serialiser(value_factory):
     """The durable pause is the basis of the approval gate, so every type that
@@ -246,8 +222,6 @@ def test_every_state_type_round_trips_through_the_checkpoint_serialiser(value_fa
     would test the default rather than what the service actually runs -- and
     would pass under strict mode only by returning dicts.
     """
-    from app.state import checkpoint_serde
-
     serde = checkpoint_serde()
     original = value_factory()
     restored = serde.loads_typed(serde.dumps_typed(original))
@@ -263,23 +237,19 @@ def test_nested_models_survive_the_round_trip():
     via `has_failing_ci`. If a nested model came back as a dict, the failure
     would surface as an AttributeError inside a node, far from the cause.
     """
-    from app.state import checkpoint_serde
-    from schemas.diagnosis import Citation, Diagnosis, Finding
-    from schemas.evidence import CheckRun, IssueEvidence
-
     serde = checkpoint_serde()
 
     diag = Diagnosis(summary="s", citations=[Citation(snippet_id="i", score=0.5)],
                      findings=[Finding(file="f.py")])
     back = serde.loads_typed(serde.dumps_typed(diag))
-    assert type(back.citations[0]) is Citation
-    assert type(back.findings[0]) is Finding
+    assert type(back.citations[0]) is type(diag.citations[0])
+    assert type(back.findings[0]) is type(diag.findings[0])
     assert back == diag
 
     ev = IssueEvidence(url="u", title="t",
                        check_runs=[CheckRun(name="ci", conclusion="failure")])
     back_ev = serde.loads_typed(serde.dumps_typed(ev))
-    assert type(back_ev.check_runs[0]) is CheckRun
+    assert type(back_ev.check_runs[0]) is type(ev.check_runs[0])
     # The computed property is what the route depends on, so assert the property
     # rather than only the field it is derived from.
     assert back_ev.has_failing_ci is True
@@ -294,14 +264,6 @@ def test_every_schema_model_is_registered_for_the_checkpoint():
     to register it is exactly the kind of omission that only shows up when a
     paused run resumes -- which is the one moment it must not.
     """
-    import inspect
-
-    from pydantic import BaseModel
-
-    import schemas.diagnosis as diagnosis
-    import schemas.evidence as evidence
-    from app.state import CHECKPOINT_TYPES
-
     registered = set(CHECKPOINT_TYPES)
     missing = []
     for module in (evidence, diagnosis):
@@ -319,8 +281,8 @@ def test_every_schema_model_is_registered_for_the_checkpoint():
 
 
 # ── T25: nothing unredacted reaches the checkpoint ──────────────────────────
-def test_a_secret_in_the_evidence_never_reaches_any_checkpoint(posted, issue_surface,
-                                                              monkeypatch):
+@pytest.mark.usefixtures("posted", "issue_surface")
+def test_a_secret_in_the_evidence_never_reaches_any_checkpoint(monkeypatch):
     """The CHECKPOINT, not just the prompt. A Postgres saver keeps every
     super-step, so a secret written to `_raw` by fetch_evidence would stay on
     disk even if a later node dropped it. Checked over the whole HISTORY."""
@@ -328,7 +290,7 @@ def test_a_secret_in_the_evidence_never_reaches_any_checkpoint(posted, issue_sur
     monkeypatch.setattr(github_client, "fetch_issue", lambda url, token=None: {
         "html_url": url, "title": f"OAuth 500 for {email} with key {secret}",
         "body": "help", "labels": [{"name": "bug"}]})
-    g, cfg = _graph(), _cfg("t-t25")
+    g, cfg = fresh_graph(), _cfg("t-t25")
     _start(g, cfg)
     snapshots = list(g.get_state_history(cfg))
     assert len(snapshots) > 3, "the run must have checkpointed several super-steps"
@@ -346,16 +308,15 @@ def test_a_secret_in_the_evidence_never_reaches_any_checkpoint(posted, issue_sur
 
 
 # ── G9: a crashed run still writes its audit record ─────────────────────────
-def test_a_node_that_crashes_still_leaves_an_audit_record(posted, issue_surface, monkeypatch):
+@pytest.mark.usefixtures("posted", "issue_surface")
+def test_a_node_that_crashes_still_leaves_an_audit_record(monkeypatch):
     """No failure edges exist, so the record is written from the one wrapper every
     node runs in -- and the exception still propagates unchanged."""
-    from adapters.audit_jsonl import iter_records
-
     def broken(url, token=None):
         raise ConnectionError("github down for token ghp_" + "A" * 36)
     monkeypatch.setattr(github_client, "fetch_issue", broken)
     with pytest.raises(ConnectionError):
-        _start(_graph(), _cfg("t-g9"))
+        _start(fresh_graph(), _cfg("t-g9"))
     records = [r for r in iter_records() if r.get("outcome") == "failed"]
     assert len(records) == 1, "exactly one record for the crashed run"
     err = records[0]["error"]

@@ -31,7 +31,7 @@ from __future__ import annotations
 import pathlib
 import re
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -109,9 +109,27 @@ class _Postings:
         tfs = np.fromiter((f for _, f in flat), dtype=np.float32, count=len(flat))
         return cls(terms, offsets, docs, tfs, lengths)
 
+    @classmethod
+    def from_saved(cls, saved) -> _Postings:
+        """The arrays of an open `bm25.npz` (`np.load`'s NpzFile).
+
+        Each array goes through `np.asarray`, which returns NpzFile's ndarray
+        as it is: it states the type, which pylint cannot infer from NpzFile's
+        `__getitem__` (it read `terms` as the `np.array` FUNCTION). A missing
+        key is a KeyError, which `BM25.load` treats as an unusable file.
+        """
+        return cls(np.asarray(saved["terms"]).tolist(), np.asarray(saved["offsets"]),
+                   np.asarray(saved["docs"]), np.asarray(saved["tfs"]),
+                   np.asarray(saved["lengths"]))
+
 
 class BM25:
-    """Okapi BM25 over a fixed set of documents, as an inverted index."""
+    """Okapi BM25 over a fixed set of documents, as an inverted index.
+
+    State: the `postings` arrays as built or loaded, the parameters `k1` and
+    `b`, and what is derived from them once -- `vocab` (term -> row), `idf`,
+    the document count `n` and the mean length `avg_len`.
+    """
 
     def __init__(self, corpus: list[list[str]], k1: float = K1, b: float = B):
         """Build from one token list per document (corpus order = row order)."""
@@ -131,13 +149,11 @@ class BM25:
         differ from a freshly built one in anything but how it got its arrays.
         """
         self.k1, self.b = float(k1), float(b)
-        self.terms = list(arrays.terms)
-        self.vocab = {t: i for i, t in enumerate(self.terms)}
-        self.offsets, self.docs, self.tfs = arrays.offsets, arrays.docs, arrays.tfs
-        self.lengths = arrays.lengths
-        self.n = len(self.lengths)
-        self.avg_len = float(self.lengths.mean()) if self.n else 0.0
-        df = np.diff(self.offsets).astype(np.float64)
+        self.postings = replace(arrays, terms=list(arrays.terms))
+        self.vocab = {t: i for i, t in enumerate(self.postings.terms)}
+        self.n = len(self.postings.lengths)
+        self.avg_len = float(self.postings.lengths.mean()) if self.n else 0.0
+        df = np.diff(self.postings.offsets).astype(np.float64)
         # Lucene's IDF variant: always positive, so a term appearing in every
         # document contributes ~0 rather than going negative and actively
         # penalising documents that contain it.
@@ -152,13 +168,14 @@ class BM25:
         out =np.zeros(self.n, dtype=np.float32)
         if not self.n:
             return out
-        norm = self.k1 * (1 - self.b + self.b * self.lengths / (self.avg_len or 1))
+        arrays = self.postings
+        norm = self.k1 * (1 - self.b + self.b * arrays.lengths / (self.avg_len or 1))
         for term in tokenize(query):
             t = self.vocab.get(term)
             if t is None:
                 continue
-            lo, hi = self.offsets[t], self.offsets[t + 1]
-            docs, tf = self.docs[lo:hi], self.tfs[lo:hi]
+            lo, hi = arrays.offsets[t], arrays.offsets[t + 1]
+            docs, tf = arrays.docs[lo:hi], arrays.tfs[lo:hi]
             # A document appears once per term's postings, so `+=` on the fancy
             # index is safe; repeated query terms add, as in the loop version.
             out[docs] += self.idf[t] * (tf * (self.k1 + 1)) / (tf + norm[docs])
@@ -169,7 +186,7 @@ class BM25:
         a document sharing no term with the query is not a weak match, it is none."""
         scores = self._scores(query)
         hit = np.flatnonzero(scores > 0)
-        if not len(hit):
+        if len(hit) == 0:
             return []
         # Only the documents that share a term are sorted, by (score desc, row
         # asc) -- the same tie order the old stable sort over all rows gave.
@@ -182,9 +199,10 @@ class BM25:
         be written -- the statistics are a cache, rebuildable from the chunks."""
         try:
             tmp = path.with_suffix(".tmp.npz")
+            arrays = self.postings
             np.savez(tmp, format=np.int64(FORMAT), fingerprint=np.str_(fingerprint),
-                     terms=np.array(self.terms, dtype=np.str_), offsets=self.offsets,
-                     docs=self.docs, tfs=self.tfs, lengths=self.lengths,
+                     terms=np.array(arrays.terms, dtype=np.str_), offsets=arrays.offsets,
+                     docs=arrays.docs, tfs=arrays.tfs, lengths=arrays.lengths,
                      params=np.array([self.k1, self.b], dtype=np.float64))
             tmp.replace(path)
             return True
@@ -200,9 +218,8 @@ class BM25:
                 if int(z["format"]) != FORMAT or str(z["fingerprint"]) != fingerprint:
                     return None
                 self = cls.__new__(cls)
-                k1, b = (float(x) for x in z["params"])
-                self._init(_Postings(z["terms"].tolist(), z["offsets"], z["docs"], z["tfs"],
-                                     z["lengths"]), k1, b)
+                k1, b = (float(x) for x in np.asarray(z["params"]))
+                self._init(_Postings.from_saved(z), k1, b)
                 return self
         except (OSError, ValueError, KeyError):
             return None

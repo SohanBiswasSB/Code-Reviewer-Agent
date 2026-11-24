@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from app.activity import ERROR, log_event
 from datadir import data_dir
 from errors import ProviderError
+from ports.interfaces import ActionSink
 from registry import adapter
 from tools import github_client
 
@@ -42,7 +43,7 @@ def _label_source(exc: BaseException) -> str:
 
 
 @adapter("sink", "pr_comment")
-class PRCommentSink:
+class PRCommentSink(ActionSink):
     """Post the approved review as a PR/issue comment, as the approver.
 
     The partial-success handling lives here rather than in `execute` because it
@@ -53,11 +54,11 @@ class PRCommentSink:
     """
 
     def emit(self, action: dict, *, target: str, identity: str | None = None,
-             **kwargs) -> dict:
+             context: dict | None = None) -> dict:
         """Post the comment, then try the label; a label failure is partial success.
 
-        `context` (run metadata: tenant, run_id) arrives in `kwargs` and is not
-        read: a comment goes to a URL, so this sink has no use for it.
+        `context` (run metadata: tenant, run_id) is the port's and is not read:
+        a comment goes to a URL, so this sink has no use for it.
         """
         result = {"comment": None, "label": None}
         result["comment"] = github_client.post_comment(target, action["comment"], identity)
@@ -81,7 +82,7 @@ class PRCommentSink:
 
 
 @adapter("sink", "report")
-class ReportSink:
+class ReportSink(ActionSink):
     """Log review: the 'action' is a rendered daily report. Non-mutating.
 
     Deliberately has no write path to infrastructure or a database. The log
@@ -134,11 +135,11 @@ class ReportSink:
                   "Advisory only. Nothing here mutated infrastructure or a database."]
         return "\n".join(lines) + "\n"
 
-    def emit(self, action: dict, *, target: str, context: dict | None = None,
-             **kwargs) -> dict:
+    def emit(self, action: dict, *, target: str, identity: str | None = None,
+             context: dict | None = None) -> dict:
         """Write the report as .json and .md.
 
-        `identity` arrives in `kwargs` and is not read: nothing is posted, so no
+        `identity` is the port's and is not read: nothing is posted, so no
         approver credential is needed.
         """
         ctx = context or {}
@@ -172,7 +173,7 @@ class ReportSink:
 
 
 @adapter("sink", "review_file")
-class ReviewFileSink:
+class ReviewFileSink(ActionSink):
     """Write the approved code review to a Markdown file instead of a PR comment.
 
         CRA_SINK_CODE_REVIEW=review_file     (app/review.py sets this for you)
@@ -199,11 +200,11 @@ class ReviewFileSink:
         name = f"{safe(target, 'change')}-{safe(run_id or stamp, stamp)}.md"
         return os.path.join(self.root, self.SUBDIR, safe(tenant, "_unknown"), name)
 
-    def emit(self, action: dict, *, target: str, context: dict | None = None,
-             **kwargs) -> dict:
+    def emit(self, action: dict, *, target: str, identity: str | None = None,
+             context: dict | None = None) -> dict:
         """Write the review; return where it went.
 
-        `identity` arrives in `kwargs` and is not read: a local file needs no
+        `identity` is the port's and is not read: a local file needs no
         approver credential.
         """
         ctx = context or {}

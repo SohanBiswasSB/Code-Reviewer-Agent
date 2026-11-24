@@ -38,9 +38,10 @@ from dataclasses import dataclass
 import openai
 from openai import OpenAI
 
+import registry
 from adapters.tracer_jsonl import hash_text, prompts_enabled
 from app.activity import WARNING, ActivityLogger, log_event
-from errors import ProviderAuthError
+from errors import ProviderAuthError, ProviderError
 from registry import adapter
 
 DEFAULT_BASE_URL = "http://localhost:1234/v1"
@@ -160,11 +161,9 @@ def announce_retry(attempt: RetryAttempt, error: BaseException, wait: float, sle
               metadata={"role": role, "model": model, "attempt": attempt.next_attempt,
                         "of": attempt.total, "wait_s": wait})
     try:
-        # Function-level: `config` imports `adapters`, so this is circular at
-        # module level.
-        import config
-        tracer = config.get_tracer()
-    except (LookupError, ValueError, ImportError):
+        # Through the registry, not `import config`: config imports `adapters`.
+        tracer = registry.provider("tracer")
+    except (LookupError, ValueError):
         # No tracer configured (registry miss) or config unresolvable: the retry
         # still happens and is still announced on stderr.
         tracer = None
@@ -181,9 +180,16 @@ def with_retry(call, *, what: str, role: str | None = None, model: str | None = 
                sleep=None):
     """Run `call()`; on a TRANSIENT failure wait and try again, up to the policy.
 
-    Anything not in `transient_reason` propagates on the first attempt, and the
-    last transient one propagates unchanged once attempts run out -- the caller
-    sees the real error, never a wrapper that hides its type.
+    Anything not in `transient_reason` propagates unchanged on the first attempt:
+    a genuine bad request is a bug or a config error, and its own type says so.
+
+    A transient failure that outlasts every attempt is raised as `ProviderError`
+    (chained `from` the real error, whose type and text the message repeats so
+    the monitor's crash hints still match). It used to propagate as the raw
+    `openai` exception, which is not a ConnectionError: on 2026-11-24 a gateway
+    502 was labelled an "internal" failure, and nothing above the adapter could
+    catch "the model server is down" without importing openai -- so a precheck
+    lost its finished pre-push checks to a traceback.
     """
     sleep = sleep or time.sleep           # resolved per call, so it can be patched
     retries, waits = retry_policy()
@@ -192,8 +198,11 @@ def with_retry(call, *, what: str, role: str | None = None, model: str | None = 
             return call()
         except (openai.OpenAIError, ConnectionError) as e:
             why = transient_reason(e)
-            if why is None or attempt == retries:
+            if why is None or isinstance(e, ProviderError):
                 raise
+            if attempt == retries:
+                raise ProviderError(f"{what}: model server unavailable after {retries + 1} "
+                                    f"attempt(s) ({why}): {type(e).__name__}: {e}") from e
             announce_retry(RetryAttempt(what, role, model, attempt + 2, retries + 1, why), e,
                            waits[min(attempt, len(waits) - 1)], sleep)
     raise AssertionError("unreachable")   # the loop always returns or raises
@@ -340,13 +349,11 @@ def _trace_call(role, model, prompt_sha: str, system: str, user: str):
     (T12) but stays opt-in: a durable verbatim copy of every prompt is a larger
     surface than a hash.
     """
-    # Function-level: `config` imports the adapters, so this is circular at
-    # module level (same as `announce_retry`).
-    import config
     attrs = {"role": role, "model": model, "prompt_sha": prompt_sha}
     if prompts_enabled():
         attrs.update(system_prompt=system, user_prompt=user)
-    return config.get_tracer().span("llm.call", **attrs)
+    # Through the registry, not `import config`: config imports the adapters.
+    return registry.provider("tracer").span("llm.call", **attrs)
 
 
 @adapter("llm", "lmstudio")
@@ -376,7 +383,7 @@ class LMStudioLLM:
         self._client = None
         self._resolved: str | None = None
 
-    def _get_client(self):
+    def client(self):
         """The OpenAI-compatible client, built on first use with its retries OFF."""
         if self._client is None:
             # max_retries=0: the retry policy is `with_retry`, in one visible place.
@@ -454,7 +461,7 @@ class LMStudioLLM:
                                       "prompt_sha": prompt_sha}) as alog, \
                 _trace_call(self.role, self.model, prompt_sha, system, user):
             resp = with_retry(
-                lambda: self._get_client().chat.completions.create(
+                lambda: self.client().chat.completions.create(
                     model=self.resolved_model(), **kwargs),
                 what="completion", role=self.role, model=self.model)
             alog.add_metadata("resolved_model", self._resolved)

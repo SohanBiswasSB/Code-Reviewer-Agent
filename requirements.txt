@@ -27,6 +27,7 @@
 langgraph==1.2.11
 langgraph-checkpoint==4.2.0        # the serialiser lives here; see the note above
 langgraph-checkpoint-postgres==3.1.2   # AsyncPostgresSaver: durable paused runs (never SQLite/file)
+psycopg-binary==3.3.5                  # bundles libpq: app/deps.py imports the Postgres saver at top level
 fastapi==0.141.1
 uvicorn[standard]==0.52.4
 pydantic==2.13.5                  # schemas/ are Pydantic v2 models (T11)

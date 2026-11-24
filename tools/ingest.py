@@ -134,7 +134,7 @@ class IngestJob:
 
 
 @dataclass(frozen=True)
-class _Target:
+class IngestTarget:
     """Where a job reads from and writes to, resolved from the tenant's policy."""
 
     namespace: str
@@ -142,7 +142,7 @@ class _Target:
     exclude: list[str]
 
 
-def _resolve_target(job: IngestJob) -> _Target:
+def _resolve_target(job: IngestJob) -> IngestTarget:
     """The tenant's namespace, this machine's checkout of its repo, and its excludes.
 
     Refuses (SystemExit) a tenant with no `codebase.repo` -- retrieval must never
@@ -169,7 +169,7 @@ def _resolve_target(job: IngestJob) -> _Target:
             f"not exist on this machine. Pass --root <path>, or set "
             f"CRA_CODEBASE_ROOT. The namespace still comes from the tenant."
         )
-    return _Target(namespace, root, list(codebase.get("index_exclude") or []))
+    return IngestTarget(namespace, root, list(codebase.get("index_exclude") or []))
 
 
 def build(tenant: str, include: list[str] | None, dry_run: bool,
@@ -221,7 +221,7 @@ def _record_failure(live: IngestProgress, failure: BaseException | None) -> None
         live.end("error", error=f"{type(failure).__name__}: {failure}"[:300])
 
 
-def _logged_build(live: IngestProgress, job: IngestJob, target: _Target) -> int:
+def _logged_build(live: IngestProgress, job: IngestJob, target: IngestTarget) -> int:
     """`_build` inside one activity record for the whole job.
 
     Its ~550 embedding batches roll up here (adapters/embed_lmstudio.py logs
@@ -247,7 +247,7 @@ def _save_bm25(index, namespace: str) -> None:
             sidecar(namespace, BM25_FILE), index.stats(namespace).get("fingerprint", ""))
 
 
-def _collect_chunks(live: IngestProgress, job: IngestJob, target: _Target) -> list[dict]:
+def _collect_chunks(live: IngestProgress, job: IngestJob, target: IngestTarget) -> list[dict]:
     """Scan the target for indexable files and chunk them; SystemExit if none chunk."""
     if target.exclude:
         print(f"exclude   : {target.exclude}")
@@ -307,7 +307,7 @@ def _embed_all(live: IngestProgress, embedder, chunks: list[dict]) -> None:
     print()
 
 
-def _build(live: IngestProgress, job: IngestJob, target: _Target) -> int:
+def _build(live: IngestProgress, job: IngestJob, target: IngestTarget) -> int:
     """The body of `build`, run under a live-progress record that marks failures."""
     chunks = _collect_chunks(live, job, target)
     redacted_total = _redact(live, chunks, job.tenant)
@@ -341,7 +341,7 @@ def _build(live: IngestProgress, job: IngestJob, target: _Target) -> int:
 
 def main() -> None:
     """CLI entry point; see the module docstring for usage."""
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", maxsplit=1)[0])
     ap.add_argument("--tenant", required=True)
     ap.add_argument("--surface", default="code_review")
     ap.add_argument("--include", nargs="*",

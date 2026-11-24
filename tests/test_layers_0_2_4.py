@@ -5,7 +5,10 @@ here writes into the working tree.
 """
 import json
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from langgraph.checkpoint.memory import MemorySaver
@@ -29,6 +32,7 @@ from tools import github_client
 
 
 def _reader(lines):
+    """A `reader=` for S3LogSource: (service, ref, line) triples, 100 lines per object."""
     def read():
         for i, line in enumerate(lines):
             yield ("backend", f"s3://bucket/daily/2026-09-10/backend-{i // 100}.log", line)
@@ -37,6 +41,7 @@ def _reader(lines):
 
 # ══ Layer 0 ═══════════════════════════════════════════════════════════════════
 def test_detectors_find_signals_and_first_match_wins():
+    """Each line counts once, under the first signal in table order, at its absolute offset."""
     hits = SignalDetector().detect({"service": "backend", "ref": "k", "start": 10, "lines": [
         "2026-09-10 INFO all good",
         "2026-09-10 ERROR Traceback (most recent call last)",
@@ -81,6 +86,7 @@ def test_the_sample_cites_where_each_line_came_from():
 
 
 def test_one_pathological_line_cannot_bloat_the_window():
+    """A 100 kB line is clipped to MAX_LINE_CHARS before it can reach a sample."""
     huge = "2026-09-10 ERROR " + ("x" * 100_000)
     raw = S3LogSource().gather("2026-09-10", reader=_reader([huge]), detector=SignalDetector())
     assert len(raw["candidates"][0]["samples"][0]["text"]) <= MAX_LINE_CHARS
@@ -93,13 +99,13 @@ def test_many_short_objects_never_buffer_the_whole_day():
     state = {"yielded": 0, "detected": 0, "worst": 0}
     seen: dict[str, list[int]] = {}
 
-    class Spy:
-        def detect(self, window):
-            state["detected"] += len(window["lines"])
-            state["worst"] = max(state["worst"], state["yielded"] - state["detected"]
-                                 + len(window["lines"]))
-            seen.setdefault(window["ref"], []).append(window["start"])
-            return []
+    def detect(window):
+        """Count what reached the detector, and how far it lagged what was read."""
+        state["detected"] += len(window["lines"])
+        state["worst"] = max(state["worst"], state["yielded"] - state["detected"]
+                             + len(window["lines"]))
+        seen.setdefault(window["ref"], []).append(window["start"])
+        return []
 
     def reader():
         for obj in range(40):
@@ -107,7 +113,7 @@ def test_many_short_objects_never_buffer_the_whole_day():
                 state["yielded"] += 1
                 yield "api", f"obj-{obj}", "line"
 
-    S3LogSource().gather("2026-09-10", reader=reader, detector=Spy())
+    S3LogSource().gather("2026-09-10", reader=reader, detector=SimpleNamespace(detect=detect))
     assert state["detected"] == state["yielded"] == 40 * (s3.WINDOW_LINES - 1)
     assert state["worst"] <= s3.MAX_BUFFERED_LINES, state["worst"]
     assert all(starts == sorted(starts) for starts in seen.values()), "offsets stay ordered"
@@ -156,21 +162,45 @@ def test_the_log_surface_survives_the_full_normalize_classify_query_chain():
     assert "traceback" in query, "nested candidates must arrive as dicts, not models"
 
 
+@contextmanager
+def _surface_registered(name: str, cls: type) -> Iterator[type]:
+    """Register `cls` as surface `name` for the block, then put the real one back.
+
+    Through the registry's own decorator rather than its private dict; the restore
+    is in `finally`, because a leaked stub would make every later test exercise
+    the fake while appearing to use the real surface.
+    """
+    original = registry.get_surface(name)
+    registry.surface(name)(cls)
+    try:
+        yield cls
+    finally:
+        registry.surface(name)(original)
+
+
 # ══ Layer 2 ═══════════════════════════════════════════════════════════════════
+def _first_row(tracer):
+    """The first span row the tracer wrote today."""
+    with open(tracer.path_for(), encoding="utf-8") as f:
+        return json.loads(f.readline())
+
+
 def test_spans_are_written_with_timing_and_identity(tmp_path):
+    """A span row carries its name, status, run identity and a measured duration."""
     tracer = JsonlTracer(root=str(tmp_path))
     with tracer.span("node.classify", run_id="r-1", tenant="t"):
         pass
-    row = json.loads(open(tracer.path_for(), encoding="utf-8").readline())
+    row = _first_row(tracer)
     assert row["span"] == "node.classify" and row["status"] == "ok"
     assert row["run_id"] == "r-1" and isinstance(row["duration_ms"], float)
 
 
 def test_a_failing_block_is_recorded_and_still_raises(tmp_path):
+    """The span records the error and re-raises it: tracing never swallows a failure."""
     tracer = JsonlTracer(root=str(tmp_path))
     with pytest.raises(PermissionError), tracer.span("node.execute", run_id="r-2"):
         raise PermissionError("refused")
-    row = json.loads(open(tracer.path_for(), encoding="utf-8").readline())
+    row = _first_row(tracer)
     assert row["status"] == "error" and "refused" in row["error"]
 
 
@@ -178,12 +208,12 @@ def test_the_approval_gate_is_suspended_not_failed(tmp_path):
     """`interrupt()` suspends by RAISING, so a naive tracer would mark every run
     that reached the approval gate — the normal path — as a failure."""
     class GraphInterrupt(Exception):
-        pass
+        """Named like langgraph's, which is all the tracer can go on."""
 
     tracer = JsonlTracer(root=str(tmp_path))
     with pytest.raises(GraphInterrupt), tracer.span("node.await_approval"):
         raise GraphInterrupt()
-    assert json.loads(open(tracer.path_for(), encoding="utf-8").readline())["status"] == "suspended"
+    assert _first_row(tracer)["status"] == "suspended"
 
 
 def test_tracing_never_breaks_the_thing_it_traces(tmp_path, monkeypatch):
@@ -213,7 +243,10 @@ def test_every_node_is_traced_without_any_node_knowing(monkeypatch):
     spans = []
 
     class Recorder(NullTracer):
+        """A tracer that only remembers which spans were opened."""
+
         def span(self, name, **attrs):
+            """Note the span name, then behave exactly like NullTracer."""
             spans.append(name)
             return super().span(name, **attrs)
 
@@ -222,20 +255,24 @@ def test_every_node_is_traced_without_any_node_knowing(monkeypatch):
     monkeypatch.setattr(github_client, "get_check_runs", lambda url, token=None: [])
 
     class Surf:
+        """A code_review surface that routes everything to human_review."""
+
         name = "code_review"
         source_name, sink_name = "github", "pr_comment"
         diagnosis_prompt = judge_prompt = "diagnosis"
 
-        def build_query(self, ev):
+        def build_query(self, _ev):
+            """Never reached on the human_review path; present to satisfy the port."""
             return "q"
 
-        def classify(self, ev):
+        def classify(self, _ev):
+            """The shortest path through the graph that still reaches audit."""
             return "human_review"
 
-    monkeypatch.setitem(registry._SURFACES, "code_review", Surf)
-    g = build_graph(checkpointer=MemorySaver(), tracer=Recorder())
-    g.invoke({"tenant": "_default", "surface": "code_review", "target": "u"},
-             config={"configurable": {"thread_id": "trace-1"}})
+    with _surface_registered("code_review", Surf):
+        g = build_graph(checkpointer=MemorySaver(), tracer=Recorder())
+        g.invoke({"tenant": "_default", "surface": "code_review", "target": "u"},
+                 config={"configurable": {"thread_id": "trace-1"}})
     assert "node.resolve_tenant" in spans and "node.classify" in spans
     assert "node.audit" in spans, "the audit node must be traced like any other"
 
@@ -248,6 +285,7 @@ def _rec(thread_id, outcome, age_days, **extra):
 
 
 def test_old_finished_threads_expire():
+    """A thread whose terminal record is past the window is a candidate; a recent one is not."""
     rows = expired_threads([_rec("old", "executed", 40), _rec("new", "executed", 2)], 30)
     assert [r["thread_id"] for r in rows] == ["old"]
 
@@ -278,6 +316,7 @@ def test_every_terminal_outcome_is_prunable(outcome):
 
 
 def test_the_registry_reports_the_new_plugs():
+    """The detector and tracer are plugs like any other, visible in config.registered()."""
     plugged = config.registered()
     assert "signals" in plugged["adapters"]["detector"]
     assert "jsonl" in plugged["adapters"]["tracer"]

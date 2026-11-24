@@ -227,7 +227,7 @@ def _head(change: Change) -> str | None:
     return change.revision.get("head") or change.revision.get("commit")
 
 
-def _author(change: Change) -> str:
+def commit_author(change: Change) -> str:
     """The change's git author: the head commit's, or for staged work (no commit
     yet) whoever `git config user.name` says is committing."""
     head =_head(change)
@@ -241,7 +241,7 @@ def check_tracker(change: Change, config: dict) -> list[dict]:
     tr = _cfg(config, "tracker")
     if not tr:
         return []
-    who = _author(change)
+    who = commit_author(change)
     owner = (tr.get("owners") or {}).get(who)
     if not owner:
         return [result("tracker", 4, FLAG, f"git author {who!r} has no tracker in the policy "
@@ -362,4 +362,3 @@ def check_commit_message(change: Change, config: dict) -> list[dict]:
 def check_not_checkable(_change: Change, config: dict) -> list[dict]:
     """What the ritual runs that a reviewer cannot: said out loud, never implied."""
     return [result(name, step, SKIP, why) for name, step, why in config.get("not_checkable", [])]
-

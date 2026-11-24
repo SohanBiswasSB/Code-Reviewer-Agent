@@ -42,6 +42,7 @@ def test_off_topic_queries_have_a_noise_floor(query):
 
 @pytest.mark.parametrize("query", ON_TOPIC)
 def test_on_topic_queries_score_well_above_the_floor(query):
+    """The other half of a usable threshold: real matches sit clearly above the noise."""
     assert _best_relevance(query) > 0.3
 
 

@@ -65,7 +65,7 @@ def read_json(path: pathlib.Path) -> dict:
 
 
 # ── graph runs ───────────────────────────────────────────────────────────────
-def summarize(stage: str, out) -> dict:
+def summarize(out) -> dict:
     """A few safe facts from a node's output: ids, scores, counts, booleans only."""
     if not isinstance(out, dict):
         return {}

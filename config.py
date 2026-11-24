@@ -25,7 +25,7 @@ import registry
 import surfaces
 from adapters.llm_lmstudio import base_url as lmstudio_base_url
 from adapters.platforms import base as _profiles
-from nodes._render import FENCE_MARKERS
+from ports.interfaces import FENCE_MARKERS
 
 # Imported for their side effect: importing each package runs every
 # @adapter/@surface decorator in it, which is what fills the registry this module
@@ -135,6 +135,7 @@ def get_retriever():
                    "VECTOR_INDEX")
 
 
+@registry.provides("reranker")
 def get_reranker():
     """The Reranker (T13), or None when RERANKER=none -- the DEFAULT.
 
@@ -211,6 +212,7 @@ def get_entailer():
                    "ENTAILER_MODEL")
 
 
+@registry.provides("detector")
 def get_detector():
     """The log-review Detector (G4). Rule-based, and that is the point.
 
@@ -221,6 +223,7 @@ def get_detector():
     return registry.get_adapter("detector", os.getenv("DETECTOR", "signals"))()
 
 
+@registry.provides("input_guard")
 def get_input_guard():
     """The InputGuard every prompt's untrusted blocks pass through (G5/T12).
 
@@ -231,8 +234,9 @@ def get_input_guard():
     that keeps the lexical Entailer the default.
 
     The guard is wired with the fence markers so it can neutralise evidence that
-    tries to close its own fence. `nodes/_render.py` owns those markers; passing
-    them in keeps the adapter from importing the module it protects.
+    tries to close its own fence. `ports/interfaces.py` owns those markers (the
+    contract between `nodes/_render.py` and the guard); passing them in keeps the
+    adapter from importing the module it protects.
     """
     # Every guard accepts the markers (the null one ignores them). No `except
     # TypeError` fallback: that used to swallow a TypeError raised inside a
@@ -242,6 +246,7 @@ def get_input_guard():
     return cls(fence_markers=FENCE_MARKERS)
 
 
+@registry.provides("embedder")
 def get_embedder():
     """The Embedder (T10). Defaults to the same LM Studio server the LLMs use.
 
@@ -255,6 +260,7 @@ def get_embedder():
     return cls()
 
 
+@registry.provides("index")
 def get_index():
     """The VectorIndex (T10). Local on-disk by default; no service required."""
     cls = registry.get_adapter("index", os.getenv("VECTOR_INDEX", "local"))
@@ -276,6 +282,7 @@ def get_audit_sink():
     return registry.get_adapter("audit", os.getenv("CRA_AUDIT", "jsonl"))()
 
 
+@registry.provides("tracer")
 def get_tracer():
     """Spans per graph node and per LLM call, plus retries (T23). Append-only JSONL.
 
@@ -326,6 +333,17 @@ def get_platform():
 def get_profile() -> str:
     """WHICH models (CRA_PROFILE) -- orthogonal to CRA_PLATFORM, which is HOW they run."""
     return os.getenv("CRA_PROFILE", _profiles.DEFAULT_PROFILE)
+
+
+@registry.provides("runtime")
+def runtime() -> dict:
+    """HOW the active platform runs the active profile: context, KV dtype, devices.
+
+    One place for `get_platform().runtime(get_profile())`, so an adapter that
+    needs a device (the in-process reranker) asks the registry for it instead of
+    importing this module.
+    """
+    return get_platform().runtime(get_profile())
 
 
 def get_models() -> dict:

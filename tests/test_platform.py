@@ -9,7 +9,7 @@ suite and cost it its meaning.
 import pytest
 
 import config
-from adapters.platforms import base
+from adapters.platforms import base, mac
 
 
 @pytest.fixture(autouse=True)
@@ -71,6 +71,7 @@ def test_embedding_and_reranker_are_identical_across_profiles():
     ],
 )
 def test_residency_is_computed_from_the_numbers(monkeypatch, platform, profile, expected):
+    """Residency is derived from weights + KV reserve vs. the budget, never declared per profile."""
     monkeypatch.setenv("CRA_PLATFORM", platform)
     rt = config.get_platform().runtime(profile)
     assert rt["residency"] == expected
@@ -102,6 +103,7 @@ def test_oversized_profile_raises_rather_than_downgrading(monkeypatch, platform,
 
 
 def test_unknown_profile_raises(monkeypatch):
+    """A typo in CRA_PROFILE must fail loudly, not fall back to some default profile."""
     monkeypatch.setenv("CRA_PLATFORM", "cuda")
     monkeypatch.setenv("CRA_PROFILE", "does_not_exist")
     with pytest.raises(KeyError, match="no model profile"):
@@ -123,8 +125,6 @@ def test_context_is_computed_from_weights_not_from_the_profile_name(monkeypatch)
     anyone remembering to add it here.
     """
     monkeypatch.setenv("CRA_PLATFORM", "mac")
-    from adapters.platforms import base, mac
-
     plat = config.get_platform()
     for profile in plat.profiles:
         models = base.resolve(profile, plat.profiles)
@@ -135,6 +135,7 @@ def test_context_is_computed_from_weights_not_from_the_profile_name(monkeypatch)
 
 
 def test_detect_platform_returns_a_registered_name():
+    """Auto-detection may only ever pick a host platform (never `studio`, a remote host)."""
     assert config.detect_platform() in ("cuda", "mac", "cpu")
 
 

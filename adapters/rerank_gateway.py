@@ -37,7 +37,7 @@ import urllib.request
 
 from adapters.llm_lmstudio import auth_headers, base_url, with_retry
 from adapters.platforms.base import RERANKER_MODEL
-from adapters.rerank_cross_encoder import passage_text
+from adapters.rerank_cross_encoder import rank_by
 from errors import ConfigError, ProviderAuthError, ProviderError
 from registry import adapter
 
@@ -115,10 +115,4 @@ class GatewayReranker:
 
     def rerank(self, query: str, candidates: list[dict], top_n: int = 8) -> list[dict]:
         """The candidates, best first, each a COPY carrying its `rerank` score."""
-        if not candidates:
-            return []
-        scored = [{**c, "rerank": s} for c, s in
-                  zip(candidates, self.scores(query, [passage_text(c) for c in candidates]),
-                      strict=True)]
-        scored.sort(key=lambda c: c["rerank"], reverse=True)
-        return scored[:top_n]
+        return rank_by(self.scores, query, candidates, top_n)

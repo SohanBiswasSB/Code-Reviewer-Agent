@@ -249,7 +249,7 @@ class LocalVectorIndex:
         `doctor` reports unbuilt namespaces, so that state is not silent.
         """
         vectors, metas, _ = self._load(namespace)
-        if vectors is None or not len(vectors):
+        if vectors is None or len(vectors) == 0:
             return []
         if vectors.shape[1] != len(vector):
             raise ValueError(

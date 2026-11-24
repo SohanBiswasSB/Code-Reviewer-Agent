@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import ast
 
-from tools.prepush.standards.engine import Concern, Finding, Pack, dotted, own_nodes, scoped
+from tools.prepush.standards.engine import Concern, Finding, Pack, defs, dotted, own_nodes
 
 BLOCKING_ROOTS = {"requests"}
 BLOCKING_CALLS = {"time.sleep", "urllib.request.urlopen", "subprocess.run",
@@ -35,10 +35,7 @@ def _blocking(call: ast.Call) -> str | None:
 def async_blocking(tree: ast.Module, _path: str, _cfg: dict) -> list[Finding]:
     """Blocking calls made directly inside an async def (not in a nested sync def)."""
     out = []
-    for node, scope in scoped(tree):
-        if not isinstance(node, ast.AsyncFunctionDef):
-            continue
-        name = f"{scope}.{node.name}".lstrip(".")
+    for node, name in defs(tree, (ast.AsyncFunctionDef,)):
         for call in (n for n in own_nodes(node) if isinstance(n, ast.Call)):
             what = _blocking(call)
             if what:
@@ -68,10 +65,9 @@ def _reads_auth_header(node: ast.AST) -> bool:
 def auth_by_hand(tree: ast.Module, _path: str, _cfg: dict) -> list[Finding]:
     """Routes reading the Authorization header themselves instead of via Depends()."""
     out = []
-    for node, scope in scoped(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or not _is_route(node):
+    for node, name in defs(tree):
+        if not _is_route(node):
             continue
-        name = f"{scope}.{node.name}".lstrip(".")
         out += [Finding(f"{name}:authorization", n.lineno,
                         f"route {name} reads the Authorization header by hand: make "
                         "authentication a dependency, Depends(...)")

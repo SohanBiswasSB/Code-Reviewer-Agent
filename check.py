@@ -72,6 +72,13 @@ STEPS: tuple[tuple[str, list[str], dict[str, str], bool], ...] = (
      [sys.executable, "-m", "eval.harness"], OFFLINE, True),
     ("lint (ruff)",
      [sys.executable, "-m", "ruff", "check", "."], {}, True),
+    # pylint at its defaults over the whole repo (2026-11-24, the user's call):
+    # the same checker VS Code shows, so the Problems panel and the gate agree.
+    # `.pylintrc` changes one value (min-public-methods, with the reason) and
+    # disables nothing; its `source-roots` puts the repo root on pylint's path,
+    # which pytest gets from pytest.ini.
+    ("lint (pylint)",
+     [sys.executable, "-m", "pylint", "--jobs=0", "--score=n", "."], {}, True),
     # The reviewer's own standards over this whole repo (tools/standards_audit.py):
     # no suppressions, no broad except, function size limits, the API contract.
     # Blocking, so the reviewer can never enforce a rule it does not meet itself.

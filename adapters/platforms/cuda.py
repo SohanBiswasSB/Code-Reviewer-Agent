@@ -65,4 +65,3 @@ class CudaPlatform(base.PlatformBase):
             "flash_attention": True,
             "memory": accounting,
         }
-

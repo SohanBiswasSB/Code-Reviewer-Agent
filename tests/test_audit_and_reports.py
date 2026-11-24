@@ -10,61 +10,40 @@ so nothing here can write into the working tree.
 """
 import json
 import os
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from langgraph.types import Command
 
 import config
-import registry
 from adapters.action_sinks import ReportSink
 from adapters.audit_jsonl import JsonlAuditSink
 from nodes._audit import build_record, write
-from tools import github_client
+from nodes.independent_review import independent_review
+from schemas.diagnosis import Citation, Diagnosis
+from surfaces.log_review import LogReviewSurface
+from tests._graph_fakes import fresh_graph, issue_surface_registered, stub_github
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
-@pytest.fixture
-def posted(monkeypatch):
-    sent = []
-    monkeypatch.setattr(github_client, "fetch_issue", lambda url, token=None: {
-        "html_url": url,
-        "title": "OAuth callback returns 500 when state param missing",
-        "body": "help",                       # sparse -> ai_investigation
-        "labels": [{"name": "bug"}],
-    })
-    monkeypatch.setattr(github_client, "get_check_runs", lambda url, token=None: [])
-    monkeypatch.setattr(github_client, "post_comment",
-                        lambda url, body, token=None: (sent.append(body), {"posted": body})[1])
-    monkeypatch.setattr(github_client, "add_label",
-                        lambda url, label, token=None: {"labelled": label})
-    return sent
+@pytest.fixture(name="posted")
+def fixture_posted(monkeypatch):
+    """GitHub's network calls recorded instead of made; the list of posted bodies."""
+    return stub_github(monkeypatch)
 
 
-@pytest.fixture
-def issue_surface(monkeypatch):
-    """Issue-shaped surface, as in test_graph_resume.py — the real code_review
+@pytest.fixture(name="issue_surface")
+def fixture_issue_surface():
+    """Issue-shaped surface, as in test_graph_resume.py -- the real code_review
     surface routes on `touched_areas` and never reaches the gate (T5)."""
-    class IssueShaped:
-        name = "code_review"
-        source_name, sink_name = "github", "pr_comment"
-        diagnosis_prompt = judge_prompt = "diagnosis"
-
-        def build_query(self, ev):
-            return ev.get("title", "")
-
-        def classify(self, ev):
-            if ev.get("has_failing_ci"):
-                return "deterministic"
-            return "ai_investigation" if ev.get("is_information_sparse") else "human_review"
-
-    monkeypatch.setitem(registry._SURFACES, "code_review", IssueShaped)
-    return IssueShaped
+    with issue_surface_registered() as surface:
+        yield surface
 
 
-def _graph():
-    from langgraph.checkpoint.memory import MemorySaver
-
-    from app.graph import build_graph
-    return build_graph(checkpointer=MemorySaver())
+def _json(path):
+    """A report file's parsed body (read whole, so no handle outlives the read)."""
+    return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
 def _records(tenant="_default"):
@@ -77,10 +56,10 @@ def _records(tenant="_default"):
 
 
 # ── the record is written on every terminal path ─────────────────────────────
-def test_an_executed_run_is_recorded(posted, issue_surface):
-    from langgraph.types import Command
-
-    g = _graph()
+@pytest.mark.usefixtures("issue_surface")
+def test_an_executed_run_is_recorded(posted):
+    """An approved, executed run leaves one record that matches what was posted."""
+    g = fresh_graph()
     cfg = {"configurable": {"thread_id": "a-exec"}}
     g.invoke({"tenant": "_default", "surface": "code_review",
               "target": "https://x/issues/1"}, config=cfg)
@@ -96,18 +75,18 @@ def test_an_executed_run_is_recorded(posted, issue_surface):
     assert r["schema_version"] == 1 and r["recorded_at"]
 
 
-def test_the_record_carries_the_retrievers_own_scores(posted, issue_surface):
+@pytest.mark.usefixtures("posted", "issue_surface")
+def test_the_record_carries_the_retrievers_own_scores():
     """The field that earns the layer.
 
     T21 -- the grounding gate inert against real retrieval -- was invisible for
     weeks and would have been ONE LINE of this, showing every score as 1.0 on
     every query. Asserting the scores are real and varied is the point.
     """
-    g = _graph()
+    g = fresh_graph()
     cfg = {"configurable": {"thread_id": "a-scores"}}
     g.invoke({"tenant": "_default", "surface": "code_review",
               "target": "https://x/issues/1"}, config=cfg)
-    from langgraph.types import Command
     g.invoke(Command(resume=True), config=cfg)
 
     retrieved = _records()[0]["retrieved"]
@@ -118,7 +97,8 @@ def test_the_record_carries_the_retrievers_own_scores(posted, issue_surface):
     )
 
 
-def test_a_denial_is_recorded_even_though_execute_raises(posted, issue_surface):
+@pytest.mark.usefixtures("issue_surface")
+def test_a_denial_is_recorded_even_though_execute_raises(posted):
     """The asymmetry documented in docs/DATA_STORAGE.md.
 
     A denial resumes into `execute`, whose PermissionError is what stops the run
@@ -126,9 +106,7 @@ def test_a_denial_is_recorded_even_though_execute_raises(posted, issue_surface):
     Without this, the one outcome where a human actively said no would be the one
     outcome left unrecorded.
     """
-    from langgraph.types import Command
-
-    g = _graph()
+    g = fresh_graph()
     cfg = {"configurable": {"thread_id": "a-deny"}}
     g.invoke({"tenant": "_default", "surface": "code_review",
               "target": "https://x/issues/1"}, config=cfg)
@@ -141,14 +119,15 @@ def test_a_denial_is_recorded_even_though_execute_raises(posted, issue_surface):
     assert posted == [], "nothing may be written on a denial"
 
 
-def test_a_run_that_never_reaches_the_gate_is_still_recorded(posted, monkeypatch):
+@pytest.mark.usefixtures("posted")
+def test_a_run_that_never_reaches_the_gate_is_still_recorded():
     """`human_review` is an OUTCOME, not the absence of one.
 
     The real code_review surface returns human_review for issue-shaped evidence
     (T5). That run does real work and reaches a real decision, so it belongs in
     the record just as much as one that posted.
     """
-    g = _graph()
+    g = fresh_graph()
     cfg = {"configurable": {"thread_id": "a-human"}}
     g.invoke({"tenant": "_default", "surface": "code_review",
               "target": "https://x/issues/1"}, config=cfg)
@@ -159,11 +138,10 @@ def test_a_run_that_never_reaches_the_gate_is_still_recorded(posted, monkeypatch
     assert rows[0]["route"] == "human_review"
 
 
-def test_every_record_shares_one_run_id(posted, issue_surface):
+@pytest.mark.usefixtures("posted", "issue_surface")
+def test_every_record_shares_one_run_id():
     """`_run_id` is minted once by resolve_tenant, so a resumed run correlates."""
-    from langgraph.types import Command
-
-    g = _graph()
+    g = fresh_graph()
     cfg = {"configurable": {"thread_id": "a-runid"}}
     first = g.invoke({"tenant": "_default", "surface": "code_review",
                       "target": "https://x/issues/1"}, config=cfg)
@@ -184,11 +162,10 @@ def test_an_audit_failure_does_not_destroy_the_run_it_describes():
     """On the executed path the comment has ALREADY been posted. Raising here
     would discard the fact that it happened -- strictly worse than a missing
     record. Same reasoning as PRCommentSink's partial-success handling."""
-    class Broken:
-        def record(self, run):
-            raise OSError("disk full")
+    def record(_run):
+        raise OSError("disk full")
 
-    out = write({"tenant": "t"}, "executed", sink=Broken())
+    out = write({"tenant": "t"}, "executed", sink=SimpleNamespace(record=record))
     assert out["_audit"]["written"] is False
     assert "disk full" in out["_audit"]["error"], "the failure must be visible, not swallowed"
 
@@ -210,10 +187,6 @@ def test_log_review_can_finally_be_approved():
     every log-review run: the surface escalated 100% of the time and its
     ReportSink was unreachable. The action type now comes from the Surface.
     """
-    from nodes.independent_review import independent_review
-    from schemas.diagnosis import Citation, Diagnosis
-    from surfaces.log_review import LogReviewSurface
-
     passage = "OAuth callback returns 500 when state param missing; fix in auth middleware"
     diag = Diagnosis(summary="s", severity="low", proposed_comment=passage,
                      citations=[Citation(snippet_id="iss-101", score=0.9)])
@@ -234,6 +207,7 @@ def test_log_review_can_finally_be_approved():
 
 
 def test_the_report_is_written_as_json_and_markdown(tmp_path):
+    """Layer 3's artefact: the analysis and its citations, as JSON and readable markdown."""
     sink = ReportSink(root=str(tmp_path))
     result = sink.emit(
         {"type": "report", "comment": "3 timeout spikes on the celery worker."},
@@ -242,12 +216,12 @@ def test_the_report_is_written_as_json_and_markdown(tmp_path):
                  "severity": "medium",
                  "citations": [{"snippet_id": "iss-101", "score": 0.61}]},
     )
-    body = json.load(open(result["report"]["json"], encoding="utf-8"))
+    body = _json(result["report"]["json"])
     assert body["analysis"] == "3 timeout spikes on the celery worker."
     assert body["tenant"] == "milesone" and body["target"] == "2026-09-10"
     assert body["citations"][0]["snippet_id"] == "iss-101"
 
-    md = open(result["report"]["markdown"], encoding="utf-8").read()
+    md = Path(result["report"]["markdown"]).read_text(encoding="utf-8")
     assert "3 timeout spikes" in md and "iss-101" in md
 
 
@@ -257,7 +231,7 @@ def test_the_report_stores_the_analysis_not_the_logs(tmp_path):
     sink = ReportSink(root=str(tmp_path))
     result = sink.emit({"type": "report", "comment": "summary only"},
                        target="2026-09-10", context={"tenant": "t"})
-    body = json.load(open(result["report"]["json"], encoding="utf-8"))
+    body = _json(result["report"]["json"])
     assert "lines" not in body and "raw" not in body
     assert body["candidates"] == [] and body["counts"] == {}, "awaiting G4"
 
@@ -268,7 +242,7 @@ def test_reports_are_separated_per_tenant(tmp_path):
     a = sink.emit({"comment": "A"}, target="2026-09-10", context={"tenant": "project_a"})
     b = sink.emit({"comment": "B"}, target="2026-09-10", context={"tenant": "project_b"})
     assert a["report"]["json"] != b["report"]["json"]
-    assert json.load(open(a["report"]["json"], encoding="utf-8"))["analysis"] == "A"
+    assert _json(a["report"]["json"])["analysis"] == "A"
 
 
 def test_the_decision_survives_a_review_that_came_back_as_a_dict():

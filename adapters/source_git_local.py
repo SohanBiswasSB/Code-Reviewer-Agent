@@ -129,37 +129,48 @@ def _verify(root, rev: str) -> str:
 
 
 @dataclass(frozen=True)
-class _Change:
-    """A target resolved against the checkout: how git prints it, which files it
-    touches, where its old and new blobs live, and how to describe it.
+class _Revision:
+    """Where to read a change in FULL: how git prints it and where its blobs live.
 
     `diff_args` reproduce the diff (`git diff --cached`, `git diff a...b`, `git
     show sha`); `new_ref` / `base_ref` prefix a path to read a blob (`:` is the
     index); `head` is the commit the change ends at, None for staged work, which
-    has no commit yet. `files` is git's raw name list, blanks included.
+    has no commit yet. Grouped apart from the description because exactly these
+    four travel in the evidence's `revision`, for the pre-push checks.
     """
 
     diff_args: tuple[str, ...]
-    files: list[str]
     new_ref: str
     base_ref: str
+    head: str | None
+
+
+@dataclass(frozen=True)
+class _Change:
+    """A target resolved against the checkout: its `revision` (how to read it),
+    which files it touches, and how to describe it (`title`, `body`, `ref`).
+
+    `files` is git's raw name list, blanks included.
+    """
+
+    revision: _Revision
+    files: list[str]
     title: str
     body: str
     ref: str
-    head: str | None
 
 
 def _staged(root, codebase: dict) -> _Change:
     """`staged`: what the next commit would contain (`git diff --cached`)."""
     return _Change(
-        diff_args=("diff", "--cached"),
+        revision=_Revision(diff_args=("diff", "--cached"),
+                           new_ref=":",                 # the index: `git show :path`
+                           base_ref="HEAD:",
+                           head=None),                  # no commit yet: author is you
         files=_git(root, "diff", "--cached", "--name-only").split("\n"),
-        new_ref=":",                       # the index: `git show :path`
-        base_ref="HEAD:",
         title=f"Staged changes in {codebase.get('name') or root.name}",
         body=_git(root, "diff", "--cached", "--stat"),
         ref="staged",
-        head=None,                         # no commit yet: author is you
     )
 
 
@@ -175,10 +186,10 @@ def _span(root, target: str) -> _Change:
     base = _git(root, "merge-base", a, b).strip() if sep == "..." else a
     files = _git(root, "diff", "--name-only", span).split("\n")
     log = _git(root, "log", "--format=%h %s", f"{a}..{b}")
-    return _Change(diff_args=("diff", span), files=files, new_ref=f"{b}:",
-                   base_ref=f"{base}:",
-                   title=f"{target} ({len(log.splitlines())} commit(s))", body=log,
-                   ref=f"{a[:12]}..{b[:12]}", head=b)
+    return _Change(_Revision(diff_args=("diff", span), new_ref=f"{b}:", base_ref=f"{base}:",
+                             head=b),
+                   files=files, title=f"{target} ({len(log.splitlines())} commit(s))",
+                   body=log, ref=f"{a[:12]}..{b[:12]}")
 
 
 def _commit(root, target: str) -> _Change:
@@ -187,8 +198,9 @@ def _commit(root, target: str) -> _Change:
     files = _git(root, "show", "--format=", "--name-only", sha).split("\n")
     title = _git(root, "log", "-1", "--format=%s", sha).strip()
     body = _git(root, "log", "-1", "--format=%b", sha).strip()
-    return _Change(diff_args=("show", "--format=", sha), files=files, new_ref=f"{sha}:",
-                   base_ref=f"{sha}^:", title=title, body=body, ref=sha[:12], head=sha)
+    return _Change(_Revision(diff_args=("show", "--format=", sha), new_ref=f"{sha}:",
+                             base_ref=f"{sha}^:", head=sha),
+                   files=files, title=title, body=body, ref=sha[:12])
 
 
 def _resolve(root, codebase: dict, target: str) -> _Change:
@@ -208,7 +220,7 @@ def _packed_diff(root, change: _Change, files: list[str]) -> tuple[str, str]:
     identical to what a per-path diff prints; `--` ends option parsing, so a
     path is a path even if it starts with a dash.
     """
-    args = change.diff_args
+    args = change.revision.diff_args
     whole = split_diff(_git(root, *args, "--no-renames", "--", *files))
     return pack_diff(files, lambda p: whole[p] if p in whole else _git(root, *args, "--", p))
 
@@ -258,7 +270,8 @@ class GitLocalSource:
             # Where checks read the FULL change from (nodes/prepush_checks.py):
             # the packed `diff` above is cut to a budget, and a check must not
             # pass a file merely because it fell past the cut.
-            "revision": {"diff_args": list(change.diff_args), "new_ref": change.new_ref,
-                         "base_ref": change.base_ref, "head": change.head,
+            "revision": {"diff_args": list(change.revision.diff_args),
+                         "new_ref": change.revision.new_ref,
+                         "base_ref": change.revision.base_ref, "head": change.revision.head,
                          "commit": ref if ref != "staged" and ".." not in ref else None},
         }

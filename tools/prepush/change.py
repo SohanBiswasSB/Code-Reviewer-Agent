@@ -271,4 +271,3 @@ RE_AI_ATTRIBUTION = re.compile(r"claude|co-authored", re.I)
 def non_ascii(text: str) -> bool:
     """A character outside printable ASCII. Tab and line breaks are allowed."""
     return any(ord(ch) > 126 or (ord(ch) < 32 and ch not in "\t\n\r") for ch in text)
-

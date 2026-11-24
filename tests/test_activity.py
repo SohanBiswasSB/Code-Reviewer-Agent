@@ -6,12 +6,15 @@ failed write never breaks the operation, and one run's records share one id.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import pathlib
 import subprocess
 import sys
+from datetime import date
+from types import SimpleNamespace
 
 import pytest
 from langgraph.errors import GraphInterrupt
@@ -21,16 +24,20 @@ from adapters.tracer_jsonl import NullTracer
 from app import activity, deps, monitor
 from app.activity import ERROR, INFO, WARNING, ActivityLogger, log_event
 from app.graph import _traced
+from jobs import prune_activity
+from tests._llm_fakes import chat_client, chat_reply
 from tools.ingest import iter_files
 
 
 def rows(tmp_path):
+    """Every activity record written under this test's data dir, oldest day first."""
     return [json.loads(line) for p in sorted((tmp_path / "var" / "activity").glob("*.jsonl"))
             for line in p.read_text().splitlines()]
 
 
 # ── masking, on the way in ───────────────────────────────────────────────────
 def test_secrets_are_redacted_by_key_substring():
+    """A key containing a sensitive substring is redacted at any depth (`-` read as `_`)."""
     out = activity.sanitize({"github_token": "ghp_x", "X-Api-Key": "k",
                              "nested": [{"password": "p"}]})
     assert out == {"github_token": "[REDACTED]", "X-Api-Key": "[REDACTED]",
@@ -38,6 +45,7 @@ def test_secrets_are_redacted_by_key_substring():
 
 
 def test_counts_under_secret_looking_keys_are_kept():
+    """`*_tokens` counts are numbers, not secrets; redacting them would blind the log."""
     assert activity.sanitize({"completion_tokens": 30, "max_tokens": 2048,
                               "refresh_token": "abc"}) == {
         "completion_tokens": 30, "max_tokens": 2048, "refresh_token": "[REDACTED]"}
@@ -49,10 +57,12 @@ def test_counts_under_secret_looking_keys_are_kept():
     ("first_name", "Sohan", "S***"), ("to", "a@b.com", "a@b.com"),    # `to` is not PII
 ])
 def test_pii_is_masked_by_exact_key(key, value, masked):
+    """PII keys match exactly (so `to` is untouched), keeping just enough to correlate."""
     assert activity.mask_pii(key, value) == masked
 
 
 def test_nothing_unmasked_reaches_the_file(tmp_path):
+    """Masking happens on the way in: metadata added mid-span is masked too."""
     with ActivityLogger("job", "x", metadata={"author_email": "dev@corp.com",
                                               "api_key": "sk-123"}) as alog:
         alog.add_metadata("phone", "9876543210")
@@ -62,6 +72,7 @@ def test_nothing_unmasked_reaches_the_file(tmp_path):
 
 
 def test_error_text_and_traceback_pass_through_the_guard(tmp_path):
+    """An exception message can carry a secret; neither it nor the traceback is stored raw."""
     with pytest.raises(ValueError):
         with ActivityLogger("job", "x"):
             raise ValueError("leaked AKIAABCDEFGHIJKLMNOP in a message")
@@ -72,6 +83,7 @@ def test_error_text_and_traceback_pass_through_the_guard(tmp_path):
 
 # ── the contract ─────────────────────────────────────────────────────────────
 def test_an_exception_is_recorded_and_never_swallowed(tmp_path):
+    """The span records the failure with its traceback and still re-raises it."""
     with pytest.raises(KeyError):
         with ActivityLogger("node", "classify"):
             raise KeyError("route")
@@ -82,14 +94,16 @@ def test_an_exception_is_recorded_and_never_swallowed(tmp_path):
 
 @pytest.mark.parametrize("status,duration,expected", [("success", 10, INFO),
                                                       ("warning", 10, WARNING)])
-def test_severity_is_derived(tmp_path, status, duration, expected):
+def test_severity_is_derived(status, duration, expected):
+    """Severity follows from status (an unfinished span is a WARNING), never set by hand."""
     span = ActivityLogger("node", "x").start()
     assert span.severity(duration) == WARNING        # still `started`: not yet a success
     span.status = status
     assert span.severity(duration) == expected
 
 
-def test_a_slow_operation_is_a_warning(tmp_path):
+def test_a_slow_operation_is_a_warning():
+    """A success past its type's SLOW_MS budget is a WARNING, flagged as slow."""
     span = ActivityLogger("external_api", "chat.diagnosis").start()
     span.status = "success"
     assert span.severity(activity.SLOW_MS["external_api"] + 1) == WARNING
@@ -97,6 +111,7 @@ def test_a_slow_operation_is_a_warning(tmp_path):
 
 
 def test_a_failed_write_never_breaks_the_operation(tmp_path, monkeypatch, capsys):
+    """An unwritable log dir costs a stderr line, never the operation being logged."""
     monkeypatch.setattr(activity, "log_dir", lambda: tmp_path / "file-not-dir" / "x")
     (tmp_path / "file-not-dir").write_text("a file where a directory should be")
     with ActivityLogger("job", "still-runs"):
@@ -105,6 +120,7 @@ def test_a_failed_write_never_breaks_the_operation(tmp_path, monkeypatch, capsys
 
 
 def test_the_level_gate_drops_info(tmp_path, monkeypatch):
+    """CRA_ACTIVITY_LEVEL drops records below it at write time."""
     monkeypatch.setenv("CRA_ACTIVITY_LEVEL", "WARNING")
     log_event("job", "quiet")
     log_event("job", "loud", severity=WARNING)
@@ -112,20 +128,29 @@ def test_the_level_gate_drops_info(tmp_path, monkeypatch):
 
 
 def test_the_null_switch_records_nothing(tmp_path, monkeypatch):
+    """CRA_ACTIVITY=null silences even an ERROR (tests and the gate suite only)."""
     monkeypatch.setenv("CRA_ACTIVITY", "null")
     log_event("job", "x", severity=ERROR)
     assert rows(tmp_path) == []
 
 
-def test_the_gate_suite_never_writes_to_the_real_activity_log(monkeypatch):
+def test_the_gate_suite_never_writes_to_the_real_activity_log():
+    """Running the gate suite declares CRA_ACTIVITY=null; merely importing it does not.
+
+    Both halves matter. The suite injects faults on purpose, so its records must
+    never reach the real log. And the defaults used to be set at IMPORT, which
+    leaked into every importer -- app.doctor, and so the API server, included.
+    """
     env = {k: v for k, v in os.environ.items() if k != "CRA_ACTIVITY"}
-    out = subprocess.run([sys.executable, "-c", "import eval.harness, os; "
+    out = subprocess.run([sys.executable, "-c", "import os, eval.harness as h; "
+                          "print(os.environ.get('CRA_ACTIVITY')); h.offline_defaults(); "
                           "print(os.environ['CRA_ACTIVITY'])"], capture_output=True,
                          text=True, env=env, check=True)
-    assert out.stdout.strip() == "null"
+    assert out.stdout.split() == ["None", "null"]
 
 
 def test_none_values_are_dropped(tmp_path):
+    """Unset fields are omitted rather than written as null, keeping records small."""
     log_event("job", "x")
     (r,) = rows(tmp_path)
     assert "traceback" not in r and "tenant" not in r
@@ -133,6 +158,7 @@ def test_none_values_are_dropped(tmp_path):
 
 # ── correlation ──────────────────────────────────────────────────────────────
 def test_everything_inside_a_correlation_shares_its_id(tmp_path):
+    """Events and spans inside `correlation()` share its id; nothing after it does."""
     with activity.correlation("run-42"):
         log_event("job", "a")
         with ActivityLogger("node", "b"):
@@ -143,7 +169,8 @@ def test_everything_inside_a_correlation_shares_its_id(tmp_path):
 
 
 # ── reading, for the admin page ──────────────────────────────────────────────
-def test_query_filters_and_facets(tmp_path):
+def test_query_filters_and_facets():
+    """The admin page's filters (severity, correlation, text, type) and facet counts."""
     with activity.correlation("c1"):
         log_event("node", "classify")
         log_event("external_api", "chat.judge", severity=ERROR, message="model went away")
@@ -157,7 +184,7 @@ def test_query_filters_and_facets(tmp_path):
 
 
 # ── the hooks, end to end ────────────────────────────────────────────────────
-def test_a_graph_node_failure_is_logged_with_its_traceback(tmp_path, monkeypatch):
+def test_a_graph_node_failure_is_logged_with_its_traceback(tmp_path):
     """No failure edges (G9): before this, a crashed run left no record at all."""
 
     def boom(state):
@@ -172,6 +199,7 @@ def test_a_graph_node_failure_is_logged_with_its_traceback(tmp_path, monkeypatch
 
 
 def test_the_approval_pause_is_waiting_not_an_error(tmp_path):
+    """interrupt() raises GraphInterrupt; a pending approval must not read as a crash."""
 
     def pause(state):
         raise GraphInterrupt(())
@@ -182,16 +210,14 @@ def test_the_approval_pause_is_waiting_not_an_error(tmp_path):
 
 
 def test_an_llm_call_is_one_external_api_record_with_no_prompt_text(tmp_path, monkeypatch):
+    """One record per call with model, tokens and resolved id -- and never the prompt."""
     monkeypatch.setattr(llm_lmstudio, "available_models",
                         lambda url=None, timeout=2.0: ["qwen/qwen3-4b"])
-    usage = type("U", (), {"prompt_tokens": 120, "completion_tokens": 30})
-    choice = type("C", (), {"message": type("M", (), {"content": "ok"}), "finish_reason": "stop"})
-
-    class Completions:
-        def create(self, **kw):
-            return type("R", (), {"choices": [choice], "usage": usage})
+    usage = SimpleNamespace(prompt_tokens=120, completion_tokens=30)
+    client = chat_client(lambda **_kw: chat_reply("ok", finish_reason="stop", usage=usage))
+    # The adapter builds its client from the module's OpenAI with keywords only.
+    monkeypatch.setattr(llm_lmstudio, "OpenAI", lambda **_kw: client)
     llm = llm_lmstudio.LMStudioLLM("qwen3-4b", role="judge")
-    llm._client = type("Cl", (), {"chat": type("Ch", (), {"completions": Completions()})})
     llm.complete("SYSTEM SECRET PROMPT", "user evidence text")
     (r,) = rows(tmp_path)
     assert r["operation_type"] == "external_api" and r["operation_name"] == "chat.judge"
@@ -200,7 +226,8 @@ def test_an_llm_call_is_one_external_api_record_with_no_prompt_text(tmp_path, mo
     assert "SYSTEM SECRET PROMPT" not in json.dumps(r) and "user evidence" not in json.dumps(r)
 
 
-def test_the_monitor_serves_the_activity_log_and_clamps_its_inputs(tmp_path):
+def test_the_monitor_serves_the_activity_log_and_clamps_its_inputs():
+    """Query-string input is clamped or ignored, never trusted or echoed back."""
     log_event("job", "ingest", severity=ERROR, message="x")
     d = monitor.activity_view("severity=ERROR&hours=99999&type=job")
     assert d["matched"] == 1 and d["hours"] == 24 * 31
@@ -209,14 +236,16 @@ def test_the_monitor_serves_the_activity_log_and_clamps_its_inputs(tmp_path):
 
 
 def test_the_page_never_injects_log_text_as_html():
+    """Log text is evidence-derived; rendering it as HTML would be an XSS sink."""
     page = monitor.page()
     assert "innerHTML" not in page and "insertAdjacentHTML" not in page
     assert 'id="sec-activity"' in page
 
 
 # ── nothing logs around the activity log ─────────────────────────────────────
-@pytest.fixture
-def bridge():
+@pytest.fixture(name="bridge")
+def fixture_bridge():
+    """Install the library-log bridge, and remove every handler it added afterwards."""
     activity.capture_library_logs()
     yield
     root = logging.getLogger()
@@ -229,7 +258,9 @@ def bridge():
     logging.getLogger("uvicorn.access").disabled = False
 
 
-def test_library_warnings_land_in_the_activity_log(tmp_path, bridge):
+@pytest.mark.usefixtures("bridge")
+def test_library_warnings_land_in_the_activity_log(tmp_path):
+    """A library's WARNING becomes a `library` record; its INFO chatter does not."""
     logging.getLogger("httpx").warning("connection pool full for %s", "lmstudio")
     logging.getLogger("httpx").info("chatter below the threshold")
     (r,) = rows(tmp_path)
@@ -238,7 +269,9 @@ def test_library_warnings_land_in_the_activity_log(tmp_path, bridge):
     assert r["metadata"]["message"] == "connection pool full for lmstudio"
 
 
-def test_a_library_exception_keeps_its_traceback(tmp_path, bridge):
+@pytest.mark.usefixtures("bridge")
+def test_a_library_exception_keeps_its_traceback(tmp_path):
+    """logger.exception() in a library keeps the traceback on the record."""
     try:
         raise ConnectionResetError("peer went away")
     except ConnectionResetError:
@@ -247,30 +280,43 @@ def test_a_library_exception_keeps_its_traceback(tmp_path, bridge):
     assert r["severity"] == ERROR and "peer went away" in r["traceback"]
 
 
-def test_uvicorn_access_log_is_replaced_by_the_request_records(tmp_path, bridge):
+@pytest.mark.usefixtures("bridge")
+def test_uvicorn_access_log_is_replaced_by_the_request_records(tmp_path):
+    """The request middleware already records each request; access lines would double it."""
     logging.getLogger("uvicorn.access").warning("GET / 200")
     assert rows(tmp_path) == []
 
 
-def test_the_bridge_installs_once(bridge):
+@pytest.mark.usefixtures("bridge")
+def test_the_bridge_installs_once():
+    """Calling capture_library_logs() again must not stack a second handler."""
     activity.capture_library_logs()
     assert sum(isinstance(h, activity.ActivityHandler) for h in logging.getLogger().handlers) == 1
 
 
 def test_a_model_retry_is_on_record(tmp_path):
+    """A retried model call leaves a WARNING with its attempt number."""
     attempt = llm_lmstudio.RetryAttempt("completion", "judge", "qwen3-4b", 2, 3, "server busy")
     llm_lmstudio.announce_retry(attempt, ConnectionError("busy"), 0.0, lambda s: None)
     (r,) = [x for x in rows(tmp_path) if x["operation_name"] == "retry.completion"]
     assert r["severity"] == WARNING and r["metadata"]["attempt"] == 2
 
 
-def test_the_non_durable_checkpointer_is_on_record(tmp_path):
+def test_the_non_durable_checkpointer_is_on_record(tmp_path, monkeypatch):
+    """No DATABASE_URL means MemorySaver: warned AND recorded, since approvals won't survive."""
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    async def open_and_close():
+        async with deps.open_checkpointer():
+            pass
+
     with pytest.warns(RuntimeWarning):
-        deps._memory_saver()
+        asyncio.run(open_and_close())
     assert [r["operation_name"] for r in rows(tmp_path)] == ["checkpointer.memory"]
 
 
 def test_a_missing_include_path_is_on_record(tmp_path):
+    """An ingest include path that does not exist is a WARNING, not a silent skip."""
     iter_files(tmp_path, ["no/such/dir"])
     (r,) = rows(tmp_path)
     assert r["operation_name"] == "ingest.include_missing" and r["severity"] == WARNING
@@ -287,14 +333,12 @@ def test_the_service_itself_never_uses_stdlib_logging():
         text = p.read_text(encoding="utf-8", errors="replace")
         if "import logging" in text or "getLogger(" in text:
             offenders.append(str(p.relative_to(root)))
-    assert offenders == []
+    assert not offenders, offenders
 
 
 # ── retention ────────────────────────────────────────────────────────────────
 def test_retention_deletes_only_expired_day_files_and_only_when_asked(tmp_path, monkeypatch):
-    from datetime import date
-
-    from jobs import prune_activity
+    """Dry run by default; only YYYY-MM-DD files past the window go; keep-days 0 refused."""
     monkeypatch.setenv("CRA_DATA_DIR", str(tmp_path / "var"))
     monkeypatch.setenv("CRA_ACTIVITY", "null")
     d = tmp_path / "var" / "activity"

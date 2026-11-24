@@ -9,16 +9,23 @@ from __future__ import annotations
 import json
 import subprocess
 import threading
+import urllib.error
 import urllib.request
+from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
 
+import config
 from adapters.action_sinks import ReviewFileSink
+from adapters.audit_jsonl import iter_records
 from adapters.entail_lexical import LexicalEntailer
+from adapters.llm_stub import StubLLM
 from adapters.source_git_local import MAX_DIFF_CHARS, GitLocalSource, GitTargetError, pack_diff
 from app import live, monitor, review
 from nodes._render import render_checklist, render_review
 from nodes.independent_review import _entailment, entailment_claims, independent_review
+from nodes.prepush_checks import prepush_checks
 from registry import adapter
 from schemas.diagnosis import Citation, Diagnosis, Finding
 from schemas.evidence import CodeChange
@@ -29,8 +36,9 @@ def _git(root, *args):
     subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
 
 
-@pytest.fixture
-def repo(tmp_path):
+@pytest.fixture(name="repo")
+def fixture_repo(tmp_path):
+    """A real repository: one commit, then a staged change that includes a path with a space."""
     root = tmp_path / "repo"
     (root / "app" / "auth").mkdir(parents=True)
     _git(root.parent, "init", "-q", str(root))
@@ -49,10 +57,12 @@ def repo(tmp_path):
 
 
 def gather(repo, target):
+    """The git_local source's raw evidence for `target` in `repo`."""
     return GitLocalSource().gather(target, codebase={"root": str(repo), "name": "Demo"})
 
 
 def test_staged_target_reads_the_index_not_the_worktree(repo):
+    """`staged` reviews the index: an untracked worktree file never appears."""
     (repo / "unstaged.py").write_text("x = 1\n")          # untracked, must not appear
     raw = gather(repo, "staged")
     names = [f["filename"] for f in raw["files"]]
@@ -69,12 +79,14 @@ def test_paths_with_spaces_survive(repo):
 
 
 def test_a_commit_target_uses_its_message(repo):
+    """A commit target takes its title and body from the commit message, and only its files."""
     raw = gather(repo, "HEAD")
     assert raw["title"] == "first" and raw["body"] == "the body"
     assert [f["filename"] for f in raw["files"]] == ["app/auth/oauth.py"]
 
 
 def test_range_targets(repo):
+    """Both `a..b` and `a...b` ranges are read and titled with their commit count."""
     _git(repo, "commit", "-q", "-m", "second")
     for target in ("HEAD~1..HEAD", "HEAD~1...HEAD"):
         raw = gather(repo, target)
@@ -92,22 +104,26 @@ def test_option_shaped_targets_are_refused_before_git_sees_them(repo, target):
 
 
 def test_unknown_revisions_are_refused(repo):
+    """An unknown revision fails at rev-parse, before any diff is attempted."""
     with pytest.raises(GitTargetError, match="rev-parse"):
         gather(repo, "no-such-branch")
 
 
 def test_an_empty_change_is_refused_rather_than_reviewed(repo):
+    """Nothing staged is an error: an empty diff must not be reviewed as if it were a change."""
     _git(repo, "commit", "-q", "-m", "second")
     with pytest.raises(GitTargetError, match="no changes"):
         gather(repo, "staged")
 
 
 def test_no_checkout_is_a_clear_error(tmp_path):
+    """A root that is not a git checkout names the setting to fix, CRA_CODEBASE_ROOT."""
     with pytest.raises(GitTargetError, match="CRA_CODEBASE_ROOT"):
         GitLocalSource().gather("staged", codebase={"root": str(tmp_path)})
 
 
 def test_a_huge_diff_is_truncated_visibly(repo):
+    """A diff over the budget is cut with a visible marker in diff and body, never silently."""
     (repo / "big.py").write_text("x = 'y'\n" * 20_000)
     _git(repo, "add", ".")
     raw = gather(repo, "staged")
@@ -136,15 +152,17 @@ def test_the_typed_code_change_accepts_what_the_surface_really_produces(repo):
 
 # ── the sink ─────────────────────────────────────────────────────────────────
 def test_review_file_writes_the_action_verbatim(tmp_path):
+    """The review file holds the approved comment and label verbatim, with each citation's score."""
     sink = ReviewFileSink(root=str(tmp_path))
     out = sink.emit({"comment": "LGTM, one nit.", "label": "needs-nit"}, target="staged",
                     context={"tenant": "demo", "run_id": "r1", "severity": "low",
                              "citations": [{"snippet_id": "x", "score": 0.5}]})
-    text = open(out["review"]["markdown"], encoding="utf-8").read()
+    text = Path(out["review"]["markdown"]).read_text(encoding="utf-8")
     assert "LGTM, one nit." in text and "needs-nit" in text and "`x` (relevance 0.5)" in text
 
 
 def test_review_file_cannot_be_steered_out_of_its_directory(tmp_path):
+    """Path-shaped target and tenant values cannot move the review file out of var/reviews."""
     out = ReviewFileSink(root=str(tmp_path)).emit(
         {"comment": "c"}, target="../../etc/passwd", context={"tenant": "../../x"})
     assert out["review"]["markdown"].startswith(str(tmp_path / "reviews"))
@@ -152,7 +170,7 @@ def test_review_file_cannot_be_steered_out_of_its_directory(tmp_path):
 
 # ── overrides ────────────────────────────────────────────────────────────────
 def test_source_and_sink_overrides_are_per_surface(monkeypatch):
-    import config
+    """code_review defaults to GitHub in and a PR comment out; CRA_SOURCE_/CRA_SINK_ switch it."""
     s = CodeReviewSurface()
     assert (config.source_name_for(s), config.sink_name_for(s)) == ("github", "pr_comment")
     monkeypatch.setenv("CRA_SOURCE_CODE_REVIEW", "git_local")
@@ -171,25 +189,26 @@ class GroundedRetriever:
     retriever's own, exactly as the gate reads it in production.
     """
 
-    def retrieve(self, query, k=5, namespace=None):
+    def retrieve(self, _query, **_scope):
+        """The one hit, whatever the query and namespace."""
         return [{"id": "iss-101", "score": 0.9, "text":
                  "OAuth callback returns 500 when state param missing; fix in auth middleware"}]
 
 
-@pytest.fixture
-def cli(repo, monkeypatch):
+@pytest.fixture(name="cli")
+def fixture_cli(repo, monkeypatch):
     """The real graph on `_default`, with the grounded retriever above."""
     monkeypatch.setenv("RETRIEVER", "test_grounded")
-    # `_defaults` writes os.environ directly, so monkeypatch must own each key
+    # `apply_defaults` writes os.environ directly, so monkeypatch must own each key
     # BEFORE it runs. `setenv` records the prior state even when that state is
     # "absent"; `delenv(raising=False)` on an absent key records nothing, and so
     # restores nothing -- which leaked CRA_CODEBASE_ROOT into every later test,
-    # whose git source then read THIS test's repo. `_defaults` uses setdefault for
+    # whose git source then read THIS test's repo. `apply_defaults` uses setdefault for
     # the source and sink, so they are set to their real values here.
     monkeypatch.setenv("CRA_SOURCE_CODE_REVIEW", "git_local")
     monkeypatch.setenv("CRA_SINK_CODE_REVIEW", "review_file")
     monkeypatch.setenv("CRA_CODEBASE_ROOT", "")
-    review._defaults(str(repo))
+    review.apply_defaults(str(repo))
     return repo
 
 
@@ -197,7 +216,9 @@ def _reviews(tmp_path_factory_root):
     return list(tmp_path_factory_root.glob("var/reviews/**/*.md"))
 
 
-def test_cli_approval_writes_exactly_the_proposed_review(cli, tmp_path, capsys):
+@pytest.mark.usefixtures("cli")
+def test_cli_approval_writes_exactly_the_proposed_review(tmp_path, capsys):
+    """Approving writes the very text shown as the proposed action, once (invariant 4)."""
     code = review.run("_default", "staged", ask=lambda _: "y", interactive=True)
     out = capsys.readouterr().out
     assert "DECISION : approve" in out, "the fixture must reach the approval gate"
@@ -210,28 +231,32 @@ def test_cli_approval_writes_exactly_the_proposed_review(cli, tmp_path, capsys):
 
 
 @pytest.mark.parametrize("answer", ["n", "", "yes please", "Y "])
-def test_cli_anything_but_y_denies_and_writes_nothing(cli, tmp_path, capsys, answer):
+@pytest.mark.usefixtures("cli")
+def test_cli_anything_but_y_denies_and_writes_nothing(tmp_path, capsys, answer):
+    """Only `y` (trimmed, any case) approves; anything else is a recorded denial that writes
+    nothing."""
     code = review.run("_default", "staged", ask=lambda _: answer, interactive=True)
     out = capsys.readouterr().out
     if answer.strip().lower() == "y":
         assert "approved" in out
         return
     assert code == 0 and "denied" in out
-    assert _reviews(tmp_path) == []
+    assert not _reviews(tmp_path)
     audit = list(tmp_path.glob("var/audit/**/*.jsonl"))
     records = [json.loads(line) for p in audit for line in p.read_text().splitlines()]
     assert any(r.get("approved") is False for r in records), "a denial must be recorded"
 
 
-def test_cli_without_a_terminal_refuses_to_decide(cli, tmp_path, capsys):
+@pytest.mark.usefixtures("cli")
+def test_cli_without_a_terminal_refuses_to_decide(tmp_path, capsys):
+    """Without a terminal the CLI never asks, never approves and writes no review."""
     asked = []
     code = review.run("_default", "staged", ask=asked.append, interactive=False)
-    assert code == 2 and asked == []
+    assert code == 2 and not asked
     assert "refusing to decide" in capsys.readouterr().out
-    assert _reviews(tmp_path) == []
+    assert not _reviews(tmp_path)
     # ...but the run is RECORDED as abandoned, findings and booleans included:
     # it is real model output over a real change, and calibration needs it.
-    from adapters.audit_jsonl import iter_records
     abandoned = [r for r in iter_records() if r.get("outcome") == "abandoned"]
     assert len(abandoned) == 1 and abandoned[0].get("decision") == "approve"
     assert abandoned[0].get("approved") is None, "abandoned is not a denial"
@@ -258,16 +283,19 @@ def test_budget_is_spent_on_code_before_docs_and_never_on_data():
 
 
 def test_a_lone_oversized_file_is_cut_not_dropped():
+    """A lone file over the budget is cut to fit and named, not dropped to an empty diff."""
     diff, note = pack_diff(["huge.py"], _diffs({"huge.py": 500}), budget=100)
     assert len(diff) == 100 and "CUT PART-WAY: huge.py" in note
 
 
 def test_everything_fitting_means_no_note():
+    """When everything fits the note is empty: a note means something was left out."""
     diff, note = pack_diff(["a.py", "b.md"], _diffs({"a.py": 5, "b.md": 5}), budget=100)
     assert note == "" and "<a.py>" in diff and "<b.md>" in diff
 
 
 def test_a_real_staged_csv_is_named_but_its_rows_never_reach_the_evidence(repo):
+    """A staged CSV is named and routed on, but its rows (PII here) never reach diff or body."""
     (repo / "export.csv").write_text("email,name\nperson@example.com,Some Person\n")
     _git(repo, "add", ".")
     raw = gather(repo, "staged")
@@ -292,6 +320,7 @@ FINDING = Finding(severity="medium", file="Masterclass/models.py", line=42,
 
 
 def test_findings_are_rendered_into_the_review():
+    """Each finding is rendered under the comment with its file:line, issue and suggestion."""
     text = render_review(_diag([FINDING]))
     assert text.startswith("Some areas need attention:")
     assert "`Masterclass/models.py`:42" in text
@@ -305,15 +334,17 @@ def test_no_findings_leaves_the_comment_byte_identical():
 
 
 def test_an_ungrounded_finding_is_labelled_not_hidden():
+    """An ungrounded finding is posted with a label saying so, not silently dropped."""
     ungrounded = FINDING.model_copy(update={"grounded": False})
     assert "not grounded in retrieved code" in render_review(_diag([ungrounded]))
 
 
+@dataclass
 class _RecordingEntailer:
-    def __init__(self):
-        self.claims = []
+    claims: list[str] = field(default_factory=list)
 
-    def score(self, claim, passage):
+    def score(self, claim, _passage):
+        """Record the claim and fully entail it, so the test sees every claim the gate judges."""
         self.claims.append(claim)
         return 1.0
 
@@ -361,15 +392,19 @@ def _finding(file, issue, cites):
 
 
 def test_a_finding_is_judged_against_its_own_file_and_citations_only():
+    """A finding's premise is its own file's hunk and its own citations, never another file's."""
     diag = Diagnosis(summary="s", severity="low", proposed_comment="",
                      citations=[Citation(snippet_id="c1", score=0.9)],
                      findings=[_finding("Masterclass/models.py", "x", ["c1"])])
-    (label, _, premise), = entailment_claims(diag, {"diff": DIFF}, RETRIEVED)
+    claims = entailment_claims(diag, {"diff": DIFF}, RETRIEVED)
+    assert len(claims) == 1
+    premise = claims[0][2]
     assert "unique_together" in premise and "QuestionBank" in premise
     assert "refund" not in premise, "another file's diff and passages are never borrowed"
 
 
 def test_one_unsupported_finding_fails_the_whole_review():
+    """One finding its premise does not support fails entailment for the whole review, by name."""
     good = _finding("Masterclass/models.py",
                     "unique_together course slot enforces one question bank per slot", ["c1"])
     bad = _finding("Masterclass/models.py",
@@ -392,6 +427,7 @@ def test_a_finding_about_new_code_is_entailed_by_the_diff():
 
 
 def test_an_empty_review_still_fails_closed():
+    """A review with no comment and no findings scores 0.0 and fails closed (invariant 12)."""
     diag = Diagnosis(summary="s", severity="low", proposed_comment="")
     ok, lowest, _ = _entailment(diag, {"diff": DIFF}, RETRIEVED, LexicalEntailer(), 0.25)
     assert not ok and lowest == 0.0
@@ -405,7 +441,10 @@ def _live_runs(tmp_path):
     return [json.loads(p.read_text()) for p in (tmp_path / "var" / "live").glob("run-*.json")]
 
 
-def test_a_run_records_every_stage_in_order_and_finishes(cli, tmp_path):
+@pytest.mark.usefixtures("cli")
+def test_a_run_records_every_stage_in_order_and_finishes(tmp_path):
+    """The live snapshot lists every node in order, the approval pause included, with the gate's
+    checks."""
     review.run("_default", "staged", ask=lambda _: "y", interactive=True)
     (snap,) = _live_runs(tmp_path)
     names = [s["name"] for s in snap["stages"]]
@@ -418,7 +457,9 @@ def test_a_run_records_every_stage_in_order_and_finishes(cli, tmp_path):
     assert gate["detail"]["decision"] == "approve" and gate["detail"]["checks"]
 
 
-def test_the_snapshot_never_carries_evidence_text(cli, tmp_path):
+@pytest.mark.usefixtures("cli")
+def test_the_snapshot_never_carries_evidence_text(tmp_path):
+    """Live snapshots hold ids and counts only: no diff text and no retrieved passage."""
     review.run("_default", "staged", ask=lambda _: "n", interactive=True)
     raw = (next((tmp_path / "var" / "live").glob("run-*.json"))).read_text()
     assert "'state' not in request.GET" not in raw        # diff text
@@ -427,21 +468,26 @@ def test_the_snapshot_never_carries_evidence_text(cli, tmp_path):
 
 @pytest.mark.parametrize("answer,interactive,status", [("n", True, "denied"),
                                                         ("y", False, "abandoned")])
-def test_a_run_that_ends_at_the_prompt_says_how(cli, tmp_path, answer, interactive, status):
+@pytest.mark.usefixtures("cli")
+def test_a_run_that_ends_at_the_prompt_says_how(tmp_path, answer, interactive, status):
+    """A run that ends at the prompt finishes as `denied` or `abandoned`, saying which."""
     review.run("_default", "staged", ask=lambda _: answer, interactive=interactive)
     assert _live_runs(tmp_path)[0]["status"] == status
 
 
-def test_live_status_can_never_fail_a_run(cli, tmp_path, monkeypatch):
+@pytest.mark.usefixtures("cli")
+def test_live_status_can_never_fail_a_run(monkeypatch):
+    """A live-status write that raises OSError must not fail the review it describes."""
     def broken(*a, **k):
         raise OSError("disk full")              # the failure the contract is about
     monkeypatch.setattr(live, "stage", broken)
     assert review.run("_default", "staged", ask=lambda _: "y", interactive=True) == 0
 
 
-def test_a_failing_stage_is_recorded_and_still_raises(cli, tmp_path, monkeypatch):
-    from adapters import source_git_local
-    monkeypatch.setattr(source_git_local.GitLocalSource, "gather",
+@pytest.mark.usefixtures("cli")
+def test_a_failing_stage_is_recorded_and_still_raises(tmp_path, monkeypatch):
+    """A node that raises marks its stage and the run as error, and still propagates."""
+    monkeypatch.setattr(GitLocalSource, "gather",
                         lambda self, target, **o: (_ for _ in ()).throw(ValueError("boom")))
     with pytest.raises(ValueError, match="boom"):
         review.run("_default", "staged", ask=lambda _: "y", interactive=True)
@@ -450,7 +496,9 @@ def test_a_failing_stage_is_recorded_and_still_raises(cli, tmp_path, monkeypatch
     assert fetch["status"] == "error" and "boom" in fetch["error"] and snap["status"] == "error"
 
 
-def test_monitor_status_combines_live_traces_and_audit(cli, tmp_path, monkeypatch):
+@pytest.mark.usefixtures("cli")
+def test_monitor_status_combines_live_traces_and_audit(monkeypatch):
+    """monitor.status() joins model reachability, live jobs, trace estimates and audit records."""
     monkeypatch.setenv("LMSTUDIO_BASE_URL", "http://127.0.0.1:9/v1")      # unreachable
     review.run("_default", "staged", ask=lambda _: "y", interactive=True)
     s = monitor.status()
@@ -460,17 +508,20 @@ def test_monitor_status_combines_live_traces_and_audit(cli, tmp_path, monkeypatc
     assert s["recent"] and s["recent"][0]["decision"] == "approve"
 
 
-def test_monitor_serves_only_its_two_routes_on_localhost(tmp_path, monkeypatch):
+def test_monitor_serves_only_its_two_routes_on_localhost(monkeypatch):
+    """The monitor binds 127.0.0.1, serves / and /api/status, and refuses a traversal."""
     monkeypatch.setenv("LMSTUDIO_BASE_URL", "http://127.0.0.1:9/v1")
     assert monitor.HOST == "127.0.0.1"
     server = monitor.ThreadingHTTPServer((monitor.HOST, 0), monitor.Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = f"http://{monitor.HOST}:{server.server_address[1]}"
     try:
-        assert b"Code Reviewer Agent" in urllib.request.urlopen(base + "/").read()
-        assert "jobs" in json.loads(urllib.request.urlopen(base + "/api/status").read())
-        with pytest.raises(urllib.error.HTTPError):
-            urllib.request.urlopen(base + "/../var/audit")
+        with urllib.request.urlopen(base + "/") as page:
+            assert b"Code Reviewer Agent" in page.read()
+        with urllib.request.urlopen(base + "/api/status") as api:
+            assert "jobs" in json.loads(api.read())
+        with pytest.raises(urllib.error.HTTPError), urllib.request.urlopen(base + "/../var/audit"):
+            pass
     finally:
         server.shutdown()
         server.server_close()
@@ -484,17 +535,17 @@ def test_the_page_never_injects_data_as_html():
 
 # ── pre-push checks, end to end on the real graph ────────────────────────────
 def test_checks_run_and_reach_the_review_the_prompt_and_the_audit(cli, tmp_path, monkeypatch):
+    """A flagged check reaches the written review, the model's prompt and the audit record."""
     (cli / "app" / "loop.py").write_text(
         "def f(ids):\n    for i in ids:\n        User.objects.get(pk=i)\n")
     _git(cli, "add", "app/loop.py")
     prompts = []
-    from adapters import llm_stub
-    real = llm_stub.StubLLM.complete
+    real = StubLLM.complete
 
     def spy(self, system, user, **kw):
         prompts.append(user)
         return real(self, system, user, **kw)
-    monkeypatch.setattr(llm_stub.StubLLM, "complete", spy)
+    monkeypatch.setattr(StubLLM, "complete", spy)
 
     review.run("_default", "staged", ask=lambda _: "y", interactive=True)
 
@@ -528,11 +579,12 @@ def test_entailment_never_judges_the_code_generated_checklist():
 
 
 def test_a_surface_without_a_diff_gets_no_checks():
-    from nodes.prepush_checks import prepush_checks
+    """A surface whose evidence has no diff (log_review) gets an empty checklist, not a crash."""
     assert prepush_checks({"_surface_name": "log_review", "evidence": {}}) == {"_checks": []}
 
 
-def test_the_judges_guard_report_reaches_the_audit_record(cli, tmp_path):
+@pytest.mark.usefixtures("cli")
+def test_the_judges_guard_report_reaches_the_audit_record(tmp_path):
     """The judge reads the DIAGNOSIS, which is model output built from untrusted
     evidence. Its guard report used to be discarded (`judge_turn, _ = ...`), so
     injection phrasing carried forward by the model was counted and then lost."""

@@ -50,4 +50,3 @@ class CpuPlatform(base.PlatformBase):
             "flash_attention": False,
             "memory": accounting,
         }
-

@@ -22,7 +22,7 @@ P0 (must close):
 - [x] G2 graph dispatches through the active Surface          *(T5: source/query/classify/prompts/sink)*
 - [ ] G3 per-tenant credentials (secret ref) + API authN/Z    *(CredentialProvider port done)*
 - [x] G4 log-review detect→aggregate→sample pipeline  *(adapters/detectors.py + source_s3logs)*
-- [x] G5 PII/secret redaction before any LLM call (InputGuard)  *(T12: adapters/input_guard.py;
+- [x] G5 PII/secret redaction before any LLM call (InputGuard)  *(T12: redaction.py, registered by adapters/input_guard.py;
       12 adversarial gates. Prose injection is COUNTED, not rewritten -- see the module docstring)*
 P1 (before real use):
 - [x] G6 AuditSink: one immutable record per run              *(jsonl adapter; docs/DATA_STORAGE.md)*

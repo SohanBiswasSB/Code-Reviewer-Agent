@@ -1,10 +1,12 @@
 # Everything above plus the test and lint tooling.
 #
 #   pip install -r requirements-dev.txt
-#   pytest ; ruff check .
+#   python check.py      (pytest twice, ruff, pylint, the standards audit, ...)
 
 -r requirements-local.txt
 
 pytest
 pytest-asyncio
 ruff
+# Pinned: a new pylint release adds checks, and check.py blocks on every one.
+pylint==4.0.9

@@ -106,8 +106,12 @@ def suggest(pos: list[float], neg: list[float]) -> dict:
     return out
 
 
-def _no_progress(done: int, total: int) -> None:
-    """Default progress sink: none. `main` passes the live job's instead."""
+def _no_progress(_done: int, _total: int) -> None:
+    """Default progress sink: none. `main` passes the live job's instead.
+
+    Same `(done, total)` shape as `JobProgress.progress`, always called
+    positionally; this one reads neither.
+    """
 
 
 def _tenant_target(tenant: str, root_override: str | None) -> tuple[dict, str, object]:
@@ -320,15 +324,15 @@ def entailment(tenant: str, root_override: str | None = None,
     policy, namespace, root = _tenant_target(tenant, root_override)
     text = {m["id"]: m.get("text", "") for m in config.get_index().documents(namespace)}
     entailer = config.get_entailer()
-    bar = effective_gates(policy)["min_entailment_score"]
+    threshold = effective_gates(policy)["min_entailment_score"]
     records = [r for r in iter_records() if r.get("tenant") == tenant]
     claims, lowest = _score_records(records, text, root, entailer, progress)
     return {"per_claim": suggest(claims, [])["positive"],
             "lowest_claim_per_review": suggest(lowest, [])["positive"],
             "reviews": len(lowest),
-            "reviews_passing_current_bar": sum(s >= bar for s in lowest),
+            "reviews_passing_current_bar": sum(s >= threshold for s in lowest),
             "measure": "entailment (per claim, the gate's own premises)", "tenant": tenant,
-            "entailer": type(entailer).__name__, "current": bar}
+            "entailer": type(entailer).__name__, "current": threshold}
 
 
 def _measure(args, progress) -> dict:

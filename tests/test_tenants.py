@@ -7,15 +7,22 @@ a broken merge would silently apply _default's thresholds to a stricter tenant.
 import pytest
 
 import config
+from errors import ConfigError
+from nodes.classify import classify
+from nodes.normalize_evidence import normalize_evidence
+from nodes.resolve_tenant import resolve_tenant
 from schemas.policy import policy_errors
+from surfaces.code_review import CodeReviewSurface, risky_areas_for
 
 
-@pytest.fixture
-def store():
+@pytest.fixture(name="store")
+def fixture_store():
+    """The configured (filesystem) tenant store over the shipped tenants/ tree."""
     return config.get_tenant_store()
 
 
 def test_tenants_are_discovered(store):
+    """Every tenant directory is found, and `_default` is never listed as a tenant."""
     found = store.tenants()
     assert "milesone" in found and "project_a" in found and "project_b" in found
     assert "_default" not in found, "_default is the baseline, not a tenant"
@@ -64,6 +71,7 @@ def test_prompt_falls_back_to_default_when_tenant_has_no_override(store):
 
 
 def test_missing_prompt_with_no_default_raises(store):
+    """No tenant override and no _default prompt is a loud error, never an empty prompt."""
     with pytest.raises(FileNotFoundError):
         store.prompt("project_a", "code_review", "no_such_node")
 
@@ -79,9 +87,6 @@ def test_every_tenant_resolves_prompts_for_its_enabled_surfaces(store):
 
 # ── T27: a tenant's risky_areas actually route ───────────────────────────────
 def _route_for(tenant, filename):
-    from nodes.classify import classify
-    from nodes.normalize_evidence import normalize_evidence
-    from surfaces.code_review import CodeReviewSurface
     policy = config.get_tenant_store().policy(tenant, "code_review")
     state = {"_surface": CodeReviewSurface(), "_policy": policy,
              "_raw": {"html_url": "u", "title": "t", "files": [{"filename": filename}],
@@ -96,13 +101,13 @@ def test_a_tenant_only_risky_area_reaches_the_investigation():
 
 
 def test_another_tenant_does_not_inherit_it():
+    """One tenant's extra risky area must not leak into another tenant's routing."""
     assert _route_for("_default", "Subscriptions/views.py") == "human_review"
 
 
 def test_a_tenant_cannot_make_a_default_area_routine():
     """A union, not a replacement: _template lists only migrations+auth, and a
     celery change is still investigated."""
-    from surfaces.code_review import risky_areas_for
     assert "celery" in risky_areas_for({"risky_areas": ["migrations"]})
     assert _route_for("project_b", "worker/celery_tasks.py") == "ai_investigation"
 
@@ -110,11 +115,12 @@ def test_a_tenant_cannot_make_a_default_area_routine():
 # ── G11: the gate-relevant policy keys are validated ─────────────────────────
 
 
-def test_every_shipped_policy_is_valid():
-    store = config.get_tenant_store()
+def test_every_shipped_policy_is_valid(store):
+    """Every policy in the repo passes G11 validation, or a run would refuse at start."""
     for t in [*store.tenants(), "_default"]:
         for surface in ("code_review", "log_review"):
-            assert policy_errors(store.policy(t, surface)) == [], (t, surface)
+            errors = policy_errors(store.policy(t, surface))
+            assert isinstance(errors, list) and not errors, (t, surface, errors)
 
 
 @pytest.mark.parametrize("bad, fragment", [
@@ -126,18 +132,22 @@ def test_every_shipped_policy_is_valid():
     ({"risky_areas": ["auth", 3]}, "list of strings"),
 ])
 def test_a_malformed_value_is_named(bad, fragment):
+    """Each bad gate value yields an error naming the problem, not a generic failure."""
     assert any(fragment in e for e in policy_errors(bad))
 
 
 def test_resolve_tenant_refuses_an_invalid_policy():
-    from errors import ConfigError
-    from nodes.resolve_tenant import resolve_tenant
+    """G11 is enforced in the node at run start, not only by the shipped-policy test."""
 
     class Store:
-        def policy(self, tenant, surface):
+        """A tenant store whose policy has a string severity_allowlist (substring bug)."""
+
+        def policy(self, _tenant, _surface):
+            """Any tenant/surface gets the malformed policy."""
             return {"enabled_surfaces": ["code_review"], "severity_allowlist": "low"}
 
-        def prompt(self, *a):
+        def prompt(self, *_args):
+            """Prompts resolve, so only the policy can be the reason for refusal."""
             return "p"
     with pytest.raises(ConfigError, match="severity_allowlist"):
         resolve_tenant({"surface": "code_review", "tenant": "x"}, store=Store())

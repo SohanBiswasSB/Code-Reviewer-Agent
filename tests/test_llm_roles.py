@@ -6,27 +6,38 @@ to accidentally review a diagnosis with the model that produced it.
 import asyncio
 import json
 import os
+import socket
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from importlib.util import find_spec
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import config
 from adapters import llm_lmstudio
 from adapters.embed_lmstudio import LMStudioEmbedder
+from adapters.platforms import base
 from app import doctor
 from app import main as api
 from app.api_models import RunRequestV1
 from errors import ConfigError, ProviderAuthError
+from nodes.generate_diagnosis import generate_diagnosis
+from nodes.independent_review import independent_review
+from schemas.diagnosis import Citation, Diagnosis
+from tests._llm_fakes import chat_client, chat_reply
 
 
 @pytest.fixture(autouse=True)
 def _pin_platform(monkeypatch):
+    """One platform and profile for every test, so model ids never depend on the host."""
     monkeypatch.setenv("CRA_PLATFORM", "cuda")
     monkeypatch.setenv("CRA_PROFILE", "portable")
 
 
 def test_roles_bind_to_distinct_models():
+    """Invariant 2: diagnosis and judge resolve to different models."""
     diagnosis = config.get_llm("diagnosis")
     judge = config.get_llm("judge")
     assert diagnosis.model != judge.model, (
@@ -35,18 +46,18 @@ def test_roles_bind_to_distinct_models():
 
 
 def test_unknown_role_is_refused():
+    """get_llm is role-bound; an unknown role must not fall back to some default model."""
     with pytest.raises(ValueError, match="unknown LLM role"):
         config.get_llm("reviewer")
 
 
 def test_independence_assertion_passes_for_shipped_profiles():
+    """The guard must not fire on the profiles that actually ship."""
     config.assert_judge_is_independent()
 
 
 def test_independence_assertion_catches_a_collapsed_profile(monkeypatch):
     """Guard the guard: if a profile edit points both roles at one model, fail."""
-    from adapters.platforms import base
-
     collapsed = base.ModelSet(
         diagnosis="same-model", judge="same-model", utility="u",
         weights_gb={"diagnosis": 1.0, "judge": 1.0},
@@ -96,6 +107,7 @@ def test_judge_stays_deterministic():
 
 
 def test_temperature_is_overridable_per_role(monkeypatch):
+    """A role-specific override wins; the shared knob covers roles without one."""
     monkeypatch.setenv("CRA_TEMPERATURE_DIAGNOSIS", "0.7")
     assert config.get_llm("diagnosis").temperature == 0.7
     # The shared knob still works for anything without a role-specific override.
@@ -133,6 +145,7 @@ def test_model_id_matching_tolerates_lm_studio_naming(wanted, loaded, expected):
     ("qwen3-4b", ["qwen/qwen3-4b", "lmstudio-community/qwen3-4b"]),
 ])
 def test_model_id_matching_refuses_substrings_and_ambiguity(wanted, loaded):
+    """T26: a contained name or two candidates must resolve to nothing, never a guess."""
     assert llm_lmstudio.resolves_to(wanted, loaded) is None
 
 
@@ -143,6 +156,7 @@ def test_model_id_matching_refuses_substrings_and_ambiguity(wanted, loaded):
      "mistralai/ministral-3-14b-reasoning"),                                  # fully qualified
 ])
 def test_model_id_matching_keeps_the_affixes_that_must_work(wanted, loaded, expected):
+    """The T26 tightening must not break role-prefix, publisher and quant affixes."""
     assert llm_lmstudio.resolves_to(wanted, loaded) == expected
 
 
@@ -154,19 +168,19 @@ def test_the_adapter_sends_the_resolved_id_not_the_configured_one(monkeypatch):
                         lambda url=None, timeout=2.0: ["qwen/qwen3-4b", "qwen/qwen3-1.7b"])
     sent = {}
 
-    class FakeCompletions:
-        def create(self, **kw):
-            sent.update(kw)
-            msg = type("M", (), {"content": "ok"})
-            return type("R", (), {"choices": [type("C", (), {"message": msg})]})
+    def create(**kw):
+        sent.update(kw)
+        return chat_reply("ok")
 
+    # The adapter builds its client from the module's OpenAI with keywords only.
+    monkeypatch.setattr(llm_lmstudio, "OpenAI", lambda **_kw: chat_client(create))
     llm = llm_lmstudio.LMStudioLLM("qwen3-4b", role="judge")
-    llm._client = type("Cl", (), {"chat": type("Ch", (), {"completions": FakeCompletions()})})
     assert llm.complete("sys", "user") == "ok"
     assert sent["model"] == "qwen/qwen3-4b"
 
 
 def test_an_unresolvable_model_fails_with_the_near_misses(monkeypatch):
+    """The error names what IS served, so the fix (load it, or name it exactly) is obvious."""
     monkeypatch.setattr(llm_lmstudio, "available_models",
                         lambda url=None, timeout=2.0: ["deepseek/deepseek-r1-0528-qwen3-8b"])
     with pytest.raises(LookupError, match="deepseek-r1-0528-qwen3-8b"):
@@ -180,7 +194,7 @@ def test_doctor_gate_check_is_model_free_even_in_a_configured_shell(monkeypatch)
     monkeypatch.setattr(llm_lmstudio.LMStudioLLM, "complete",
                         lambda *a, **k: pytest.fail("the gate check reached a real model"))
     r = doctor.Report()
-    doctor._check_gates(r)
+    doctor.check_gates(r)
     assert r.lines[-1][0] == doctor.OK
     assert os.environ["LLM_PROVIDER"] == "lmstudio"
 
@@ -188,8 +202,6 @@ def test_doctor_gate_check_is_model_free_even_in_a_configured_shell(monkeypatch)
 def test_a_server_that_accepts_but_never_answers_is_not_reachable():
     """A read timeout is a bare TimeoutError, not a URLError; it must still come
     back as the actionable ConnectionError rather than crash doctor."""
-    import socket
-    import threading
     srv = socket.socket()
     srv.bind(("127.0.0.1", 0))
     srv.listen(1)
@@ -217,22 +229,19 @@ def test_diagnosis_node_resolves_its_model_from_config(monkeypatch):
     against a stub hardcoded back inside the node, which is precisely the thing
     that was wrong.
     """
-    import config as config_mod
-    from nodes.generate_diagnosis import generate_diagnosis
-
     asked: list[str] = []
-    real = config_mod.get_llm
-    monkeypatch.setattr(config_mod, "get_llm",
+    real = config.get_llm
+    monkeypatch.setattr(config, "get_llm",
                         lambda role="diagnosis": (asked.append(role), real(role))[1])
 
-    class FixedRetriever:
-        def retrieve(self, query, k=5, namespace=None):
-            return [{"id": "iss-1", "score": 0.9, "text": "auth regression"}]
+    def fixed_hits(_query, **_kwargs):
+        """One fixed hit for any query (the node passes `k=` and `namespace=`)."""
+        return [{"id": "iss-1", "score": 0.9, "text": "auth regression"}]
 
     generate_diagnosis(
         {"evidence": {"title": "t", "diff": "d"}, "tenant": "_default",
          "_prompts": {"diagnosis": "sys"}},
-        retriever=FixedRetriever())
+        retriever=SimpleNamespace(retrieve=fixed_hits))
 
     assert asked == ["diagnosis"], "generate_diagnosis must resolve its own model"
 
@@ -245,13 +254,9 @@ def test_judge_node_resolves_its_model_from_config(monkeypatch):
     `independent_review` exists for. Passing the wrong role here would compile,
     run, and silently destroy that guarantee.
     """
-    import config as config_mod
-    from nodes.independent_review import independent_review
-    from schemas.diagnosis import Citation, Diagnosis
-
     asked: list[str] = []
-    real = config_mod.get_llm
-    monkeypatch.setattr(config_mod, "get_llm",
+    real = config.get_llm
+    monkeypatch.setattr(config, "get_llm",
                         lambda role="diagnosis": (asked.append(role), real(role))[1])
 
     passage = "OAuth callback returns 500 when state param missing"
@@ -274,9 +279,8 @@ def test_the_gate_suite_is_offline_by_default():
     model-free -- so assert the declaration, since losing it would be silent until
     someone ran the gates on a machine with no GPU.
     """
-    import eval.harness as harness
-
-    source = __import__("pathlib").Path(harness.__file__).read_text()
+    # Located rather than imported: reading its source needs no module execution.
+    source = Path(find_spec("eval.harness").origin).read_text(encoding="utf-8")
     assert 'os.environ.setdefault("LLM_PROVIDER", "stub")' in source
 
 
@@ -310,8 +314,9 @@ class _Gateway(BaseHTTPRequestHandler):
         pass
 
 
-@pytest.fixture
-def gateway():
+@pytest.fixture(name="gateway")
+def fixture_gateway():
+    """A live _Gateway on a free local port; yields its /v1 base URL."""
     _Gateway.seen = []
     srv = HTTPServer(("127.0.0.1", 0), _Gateway)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -321,15 +326,18 @@ def gateway():
 
 
 def test_the_model_listing_sends_the_key_as_a_bearer_token(monkeypatch, gateway):
+    """With the key set, the stdlib model listing authenticates as a bearer token."""
     monkeypatch.setenv("LMSTUDIO_API_KEY", KEY)
     assert llm_lmstudio.available_models(gateway) == ["qwen3-4b"]
     assert _Gateway.seen == [f"Bearer {KEY}"]
 
 
 def test_without_a_key_nothing_is_sent_and_bare_lm_studio_is_unchanged(monkeypatch, gateway):
+    """No key means no Authorization header: a bare LM Studio sees what it always did."""
     monkeypatch.delenv("LMSTUDIO_API_KEY", raising=False)
     assert llm_lmstudio.api_key() == llm_lmstudio.PLACEHOLDER_KEY
-    assert llm_lmstudio.auth_headers() == {}
+    headers = llm_lmstudio.auth_headers()
+    assert isinstance(headers, dict) and not headers
     # A gateway that wants a key, reached with none: the message must say none
     # was set (the key file was not loaded), not that a key was refused.
     with pytest.raises(ProviderAuthError, match="is not set") as e:
@@ -356,40 +364,44 @@ def test_run_with_a_refused_key_is_not_reported_as_a_tenant_refusal(monkeypatch,
     A refused gateway key raised mid-review must not come back looking like that."""
     monkeypatch.setenv("LMSTUDIO_API_KEY", "wrong")
 
-    class _Graph:
-        async def ainvoke(self, *a, **k):
-            # Where a real run hits the gateway: resolving the model id.
-            llm_lmstudio.available_models(gateway)
+    async def ainvoke(*_args, **_kwargs):
+        """Stands in for the graph run, whatever payload and config /run passes."""
+        # Where a real run hits the gateway: resolving the model id.
+        llm_lmstudio.available_models(gateway)
 
-    monkeypatch.setattr(api, "get_graph", lambda: _Graph())
+    graph = SimpleNamespace(ainvoke=ainvoke)
+    monkeypatch.setattr(api, "get_graph", lambda: graph)
     with pytest.raises(ProviderAuthError):
         asyncio.run(api.run_surface_v1("code_review", RunRequestV1(target="HEAD")))
 
 
 def test_the_chat_client_and_the_embedder_carry_the_key(monkeypatch):
+    """Both OpenAI clients are built with the key, and neither repr exposes it."""
     monkeypatch.setenv("LMSTUDIO_API_KEY", KEY)
     llm = llm_lmstudio.LMStudioLLM(model="qwen3-4b", role="judge")
     emb = LMStudioEmbedder()
-    assert llm._get_client().api_key == KEY
-    assert emb._get_client().api_key == KEY
+    assert llm.client().api_key == KEY
+    assert emb.client().api_key == KEY
     # The key never appears where a record or a page could pick it up.
     assert KEY not in repr(llm) and KEY not in repr(emb)
 
 
 def test_doctor_never_prints_the_key(monkeypatch, gateway):
+    """doctor output gets pasted into chats and issues; the key must not be in it."""
     monkeypatch.setenv("LMSTUDIO_API_KEY", KEY)
     monkeypatch.setenv("LMSTUDIO_BASE_URL", gateway)
     r = doctor.Report()
-    doctor._check_lmstudio(r, {"judge": "qwen3-4b"})
+    doctor.check_lmstudio(r, {"judge": "qwen3-4b"})
     assert r.failed == 0
     assert KEY not in r.render() and KEY not in json.dumps(r.as_dict())
 
 
 def test_doctor_reports_a_refused_key_as_a_failure_not_a_crash(monkeypatch, gateway):
+    """A 401 is one FAIL line naming the refused key, not a traceback out of doctor."""
     monkeypatch.setenv("LMSTUDIO_API_KEY", "wrong")
     monkeypatch.setenv("LMSTUDIO_BASE_URL", gateway)
     r = doctor.Report()
-    doctor._check_lmstudio(r, {"judge": "qwen3-4b"})
+    doctor.check_lmstudio(r, {"judge": "qwen3-4b"})
     assert r.lines == [(doctor.FAIL, "lm studio server", r.lines[0][2])]
     assert "refused the API key" in r.lines[0][2]
 
@@ -400,8 +412,9 @@ def test_doctor_reports_a_refused_key_as_a_failure_not_a_crash(monkeypatch, gate
     ("http://203.0.113.5:1234/v1", "", None),     # no key: nothing to leak
 ])
 def test_doctor_warns_when_the_key_would_travel_in_clear_text(monkeypatch, url, key, expect):
+    """A key over plain http is a WARN, over https an OK; with no key there is no line."""
     monkeypatch.setenv("LMSTUDIO_API_KEY", key)
     r = doctor.Report()
-    doctor._check_key_transport(r, url)
+    doctor.check_key_transport(r, url)
     got = [s.strip() for s, c, _ in r.lines if c == "api key transport"]
     assert got == ([expect] if expect else [])

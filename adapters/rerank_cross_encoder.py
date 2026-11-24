@@ -54,10 +54,12 @@ download as a side effect. Fetch it once with
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 
 import torch
 from sentence_transformers import CrossEncoder
 
+import registry
 from adapters.platforms.base import RERANKER_MODEL
 from errors import ProviderError
 from registry import adapter
@@ -71,10 +73,9 @@ BATCH_SIZE = 16
 
 
 def _device() -> str:
-    """The platform's reranker device. `config` is imported here because it is
-    CIRCULAR at module level: config imports `adapters`, which imports this."""
-    import config
-    return config.get_platform().runtime(config.get_profile()).get("reranker_device", "cpu")
+    """The platform's reranker device, from `config.runtime` via the registry
+    (config imports `adapters`, which imports this, so not `import config`)."""
+    return registry.provider("runtime").get("reranker_device", "cpu")
 
 
 def passage_text(c: dict) -> str:
@@ -86,6 +87,25 @@ def passage_text(c: dict) -> str:
     """
     where = " :: ".join(p for p in (c.get("path"), c.get("name")) if p)
     return f"{where}\n{c.get('text', '')}" if where else c.get("text", "")
+
+
+def rank_by(scores: Callable[[str, list[str]], list[float]], query: str,
+            candidates: list[dict], top_n: int) -> list[dict]:
+    """The `Reranker` port's `rerank` for an adapter that can score passages.
+
+    Copies of the candidates, best first, each carrying its `rerank` score; at
+    most `top_n`, input dicts never mutated. Shared by this adapter and
+    `rerank_gateway` -- the same model in two places -- so the two can only
+    differ in how they score, never in what they read (`passage_text`) or how
+    they order and cut. No candidates means no scoring call at all.
+    """
+    if not candidates:
+        return []
+    scored = [{**c, "rerank": s} for c, s in
+              zip(candidates, scores(query, [passage_text(c) for c in candidates]),
+                  strict=True)]
+    scored.sort(key=lambda c: c["rerank"], reverse=True)
+    return scored[:top_n]
 
 
 @adapter("reranker", "cross_encoder")
@@ -104,6 +124,16 @@ class CrossEncoderReranker:
         self.max_length = max_length or int(os.getenv("RERANK_MAX_LENGTH",
                                                       str(DEFAULT_MAX_LENGTH)))
         self._encoder = None
+
+    @property
+    def loaded(self) -> bool:
+        """True once the model has been built (the first `scores()` call).
+
+        Public so a test can prove that the shared instance `config` hands out
+        has NOT loaded its ~2.3 GB model -- selecting the reranker must cost
+        nothing until it is used -- without reaching into `_encoder`.
+        """
+        return self._encoder is not None
 
     def _load(self) -> CrossEncoder:
         """The cross-encoder, loaded once from the local HF cache only.
@@ -142,8 +172,4 @@ class CrossEncoderReranker:
         mutated. It returns a score and an order, never a decision; turning
         `rerank` into the gate's `score` is the retriever's job.
         """
-        scored = [{**c, "rerank": s} for c, s in
-                  zip(candidates, self.scores(query, [passage_text(c) for c in candidates]),
-                      strict=True)]
-        scored.sort(key=lambda c: c["rerank"], reverse=True)
-        return scored[:top_n]
+        return rank_by(self.scores, query, candidates, top_n)

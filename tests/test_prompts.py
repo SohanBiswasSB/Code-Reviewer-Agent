@@ -12,11 +12,18 @@ The tests below are what make that impossible to regress into.
 """
 import json
 import pathlib
+from dataclasses import dataclass, field
 
 import pytest
 
 import config
 from adapters.tenant_fs import FsTenantStore
+from nodes.generate_diagnosis import generate_diagnosis
+from nodes.independent_review import independent_review
+from nodes.normalize_evidence import normalize_evidence
+from nodes.resolve_tenant import resolve_tenant
+from schemas.diagnosis import Citation, Diagnosis
+from surfaces.code_review import CodeReviewSurface
 
 # Clauses that carry the actual guardrails in the org contract. If a tenant's
 # resolved prompt loses any of these, the boundary is gone for that codebase.
@@ -30,8 +37,9 @@ ORG_GUARDRAIL_CLAUSES = {
 OVERRIDING_TENANTS = ["milesone", "project_a", "project_b"]
 
 
-@pytest.fixture
-def store():
+@pytest.fixture(name="store")
+def fixture_store():
+    """The configured (filesystem) tenant store over the shipped tenants/ tree."""
     return config.get_tenant_store()
 
 
@@ -82,11 +90,13 @@ def test_include_directive_controls_placement(tmp_path):
 
 
 def test_missing_prompt_everywhere_raises(store):
+    """No tenant prompt and no org contract for a node is an error, never an empty prompt."""
     with pytest.raises(FileNotFoundError):
         store.prompt("project_a", "code_review", "no_such_node")
 
 
 def test_provenance_reports_what_contributed(store):
+    """The audit record can say whether a tenant delta was composed onto the contract."""
     assert store.prompt_provenance("_default", "code_review", "diagnosis") == \
         {"org_contract": True, "tenant_delta": False}
     assert store.prompt_provenance("milesone", "code_review", "diagnosis") == \
@@ -94,23 +104,29 @@ def test_provenance_reports_what_contributed(store):
 
 
 # ── T6 / T18: the prompt reaches the model, and the judge sees the evidence ──
+@dataclass
 class _Recorder:
     """An LLM that records what it was sent instead of calling anything."""
 
-    def __init__(self, reply):
-        self.reply, self.model, self.calls = reply, "fake", []
+    reply: str
+    model: str = "fake"
+    calls: list = field(default_factory=list)
 
     def complete(self, system, user, *, json_schema=None):
-        self.calls.append({"system": system, "user": user})
+        """Record the turns (and any schema) and answer with the canned reply."""
+        self.calls.append({"system": system, "user": user, "json_schema": json_schema})
         return self.reply
 
 
+@dataclass
 class _FixedRetriever:
-    def __init__(self):
-        self.seen = {}
+    """One fixed hit for any query; remembers the last query it was asked."""
+
+    seen: dict = field(default_factory=dict)
 
     def retrieve(self, query, k=5, namespace=None):
-        self.seen = {"query": query, "namespace": namespace}
+        """Record the query, its k and its namespace (G1 is asserted on that)."""
+        self.seen = {"query": query, "k": k, "namespace": namespace}
         return [{"id": "iss-101", "text": "OAuth 500 state param auth middleware",
                  "score": 0.61, "fusion": 0.03, "rank": 1}]
 
@@ -132,12 +148,9 @@ DIAGNOSIS_JSON = json.dumps({
 })
 
 
-@pytest.fixture
-def resolved_state():
-    from nodes.normalize_evidence import normalize_evidence
-    from nodes.resolve_tenant import resolve_tenant
-    from surfaces.code_review import CodeReviewSurface
-
+@pytest.fixture(name="resolved_state")
+def fixture_resolved_state():
+    """milesone's run state after resolve_tenant and normalize_evidence, as the graph has it."""
     state = {"tenant": "milesone", "surface": "code_review", "target": "u",
              "_raw": RAW_PR, "_surface": CodeReviewSurface()}
     state.update(resolve_tenant(state))
@@ -153,8 +166,7 @@ def test_prompts_are_pinned_into_state(resolved_state):
 
 
 def test_the_pinned_prompt_is_what_gets_sent(resolved_state):
-    from nodes.generate_diagnosis import generate_diagnosis
-
+    """T6: the system turn is exactly the prompt pinned at run start, not a reload."""
     llm = _Recorder(DIAGNOSIS_JSON)
     generate_diagnosis(resolved_state, llm=llm, retriever=_FixedRetriever())
     assert llm.calls[0]["system"] == resolved_state["_prompts"]["diagnosis"]
@@ -169,8 +181,6 @@ def test_evidence_goes_in_the_user_turn_and_is_fenced(resolved_state):
     string alone would fail on a correct prompt. The property that matters is that
     the untrusted material itself never reaches the system turn.
     """
-    from nodes.generate_diagnosis import generate_diagnosis
-
     llm = _Recorder(DIAGNOSIS_JSON)
     generate_diagnosis(resolved_state, llm=llm, retriever=_FixedRetriever())
     call = llm.calls[0]
@@ -207,8 +217,6 @@ def test_the_org_contract_is_free_of_any_project_specifics():
 
 def test_the_namespace_reaches_the_retriever(resolved_state):
     """G1: milesone is bound to a codebase, so retrieval must be scoped to it."""
-    from nodes.generate_diagnosis import generate_diagnosis
-
     retriever = _FixedRetriever()
     generate_diagnosis(resolved_state, llm=_Recorder(DIAGNOSIS_JSON), retriever=retriever)
     assert retriever.seen["namespace"] == "MilesEducation-Tech/Miles-USP-Backend"
@@ -217,8 +225,6 @@ def test_the_namespace_reaches_the_retriever(resolved_state):
 def test_a_model_supplied_citation_score_is_ignored(resolved_state):
     """The gate compares against this number, so a model-supplied score would be
     trivially gameable. It comes from the retriever or not at all."""
-    from nodes.generate_diagnosis import generate_diagnosis
-
     out = generate_diagnosis(resolved_state, llm=_Recorder(DIAGNOSIS_JSON),
                              retriever=_FixedRetriever())
     assert out["diagnosis"].citations[0].score == 0.61      # retriever's
@@ -229,8 +235,6 @@ def test_missing_severity_defaults_to_high_not_low(resolved_state):
     """A malformed response must escalate, not auto-approve. `risk_ok` only
     passes allowlisted severities, so defaulting high fails in the safe
     direction."""
-    from nodes.generate_diagnosis import generate_diagnosis
-
     reply = json.dumps({"summary": "x", "proposed_comment": "c",
                         "citations": [{"snippet_id": "iss-101"}]})
     out = generate_diagnosis(resolved_state, llm=_Recorder(reply),
@@ -242,9 +246,6 @@ def test_the_judge_receives_the_retrieved_evidence(resolved_state):
     """T18: its prompt tells it to verify citation ids against RETRIEVED. With
     only the diagnosis it could not, so any reasoning about grounding was
     invented — and shown to a human approver as though it were real."""
-    from nodes.generate_diagnosis import generate_diagnosis
-    from nodes.independent_review import independent_review
-
     resolved_state.update(generate_diagnosis(
         resolved_state, llm=_Recorder(DIAGNOSIS_JSON), retriever=_FixedRetriever()))
 
@@ -262,9 +263,6 @@ def test_the_judge_receives_the_retrieved_evidence(resolved_state):
 
 def test_an_llm_node_refuses_to_run_without_a_pinned_prompt():
     """Rather than silently sending an empty or hardcoded system prompt."""
-    from nodes.independent_review import independent_review
-    from schemas.diagnosis import Citation, Diagnosis
-
     state = {
         "diagnosis": Diagnosis(
             summary="s", severity="medium", proposed_comment="c",
@@ -287,8 +285,7 @@ def test_prompt_files_on_disk_are_reachable_for_every_enabled_surface(store):
 def test_node_prompts_live_only_in_the_tenant_store():
     """T19: one source of truth. A flat copy under prompts/ drifted from the
     canonical tenant prompt twice before it was deleted."""
-    from pathlib import Path
-    root = Path(__file__).resolve().parent.parent
+    root = pathlib.Path(__file__).resolve().parent.parent
     flat = {p.name for p in (root / "prompts").glob("*.md")}
     for surface in ("code_review", "log_review"):
         for node in ("diagnosis", "judge", "analysis"):

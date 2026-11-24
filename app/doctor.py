@@ -9,12 +9,13 @@ inside a graph run, as a confusing provider error. Checking up front turns
 
 Two design rules:
 
-  · **Stdlib at import time.** The module imports only the stdlib plus the
-    stdlib-only `errors` and `schemas.policy`, so `python -m app.doctor` always
-    starts. The checks themselves import `config`, which imports every adapter --
-    and since the imports-at-top rule moved openai, sentence-transformers and
-    torch into `requirements.txt`, a machine without that file installed fails
-    with an ImportError from `_check_platform` rather than a report line.
+  · **Imports at the top, like everywhere else** (2026-11-24). This module used
+    to import only the stdlib at load time and `config` inside each check, so
+    `python -m app.doctor` would start on a bare machine. The imports-at-top rule
+    ("let it break") already meant such a machine failed with an ImportError from
+    the first check rather than a report line, so the lazy imports bought
+    nothing but a lint exception. A missing `requirements.txt` now fails at
+    import, which says the same thing sooner.
   · **FAIL vs WARN is meaningful.** FAIL means the agent cannot run at all and
     the exit code is non-zero (so CI can gate on it). WARN means degraded but
     usable -- a tenant whose index is not built is a WARN (its runs escalate,
@@ -27,14 +28,21 @@ real Mac run either confirms those numbers or shows exactly which one is wrong.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import platform as _platform
 import sys
 
+import config
+from adapters import llm_lmstudio
+from adapters.platforms import base as platform_base
+from adapters.vector_index_local import MANIFEST, _root, namespace_dirname
 from errors import CONFIG_ERRORS, ProviderAuthError
-from schemas.policy import policy_errors  # stdlib-only, like errors
+from eval.harness import run as run_gate_suite
+from schemas.policy import policy_errors
 
 OK, WARN, FAIL = "OK  ", "WARN", "FAIL"
 
@@ -79,16 +87,14 @@ class Report:
         }
 
 
-def _check_host(r: Report) -> None:
+def check_host(r: Report) -> None:
     """OS, CPU architecture and Python version: the context for every other line."""
     r.add(OK, "host", f"{_platform.system()} {_platform.machine()} / "
                       f"python {_platform.python_version()}")
 
 
-def _check_platform(r: Report) -> dict:
+def check_platform(r: Report) -> dict:
     """Platform + profile + the residency arithmetic."""
-    import config
-    from adapters.platforms import base
 
     detected = config.detect_platform()
     forced = os.getenv("CRA_PLATFORM", "auto")
@@ -112,7 +118,7 @@ def _check_platform(r: Report) -> dict:
     r.add(OK, "runtime", f"{rt['llm_backend']}/{rt['quant']} ctx={rt['context']} "
                          f"kv={rt['kv_cache_dtype']} threads={rt['threads']}")
 
-    ms = base.PROFILES[profile]
+    ms = platform_base.PROFILES[profile]
     if ms.families_are_independent():
         r.add(OK, "judge independence", f"{models['diagnosis']} vs {models['judge']}")
     else:
@@ -126,9 +132,8 @@ def _check_platform(r: Report) -> dict:
     return models
 
 
-def _check_lmstudio(r: Report, models: dict) -> None:
+def check_lmstudio(r: Report, models: dict) -> None:
     """Server reachable, and every role's model actually loaded."""
-    from adapters import llm_lmstudio
 
     try:
         loaded = llm_lmstudio.available_models()
@@ -137,7 +142,7 @@ def _check_lmstudio(r: Report, models: dict) -> None:
         r.add(FAIL, "lm studio server", str(e))
         return
     r.add(OK, "lm studio server", f"{llm_lmstudio.base_url()} ({len(loaded)} model(s) available)")
-    _check_key_transport(r, llm_lmstudio.base_url())
+    check_key_transport(r, llm_lmstudio.base_url())
 
     for role in ("diagnosis", "judge", "utility", "embedding"):
         wanted = models.get(role)
@@ -156,7 +161,7 @@ def _check_lmstudio(r: Report, models: dict) -> None:
             r.add(WARN, f"model: {role}", f"{wanted} {hint}")
 
 
-def _check_key_transport(r: Report, url: str) -> None:
+def check_key_transport(r: Report, url: str) -> None:
     """WARN when `LMSTUDIO_API_KEY` would travel as a Bearer token over plain http.
 
     A WARN, not a FAIL: plain http over a tailnet is still encrypted by
@@ -174,11 +179,11 @@ def _check_key_transport(r: Report, url: str) -> None:
               f"this host is localhost or on a tailnet.")
 
 
-def _check_local_stack(r: Report) -> None:
+def check_local_stack(r: Report) -> None:
     """The pip side: the client needed to CALL a model, and the reranker's library.
 
     Both now come with `requirements.txt` and are imported by `config`, which
-    `_check_platform` loads first -- so in practice these report OK. The reranker
+    `check_platform` loads first -- so in practice these report OK. The reranker
     is also OFF by default (T13, on measurement), so its absence no longer costs
     a default run anything.
     """
@@ -194,10 +199,8 @@ def _check_local_stack(r: Report) -> None:
               "missing -- reranking disabled, retrieval precision degraded (T13)")
 
 
-def _check_tenants(r: Report) -> None:
+def check_tenants(r: Report) -> None:
     """Every tenant's policy parses and its prompts resolve."""
-    import config
-    from adapters.platforms import base
 
     try:
         store = config.get_tenant_store()
@@ -222,8 +225,7 @@ def _check_tenants(r: Report) -> None:
                        if k not in pol]
             if missing:
                 r.add(WARN, f"policy: {t}/{surface}", f"no {missing} (inherits _default)")
-            _check_relevance_bar(r, f"{t}/{surface}", pol.get("min_relevance_score"),
-                                 base)
+            check_relevance_bar(r, f"{t}/{surface}", pol.get("min_relevance_score"))
             for node in ("diagnosis", "judge"):
                 try:
                     store.prompt(t, surface, node)
@@ -232,8 +234,7 @@ def _check_tenants(r: Report) -> None:
                           "missing, and no _default fallback")
 
 
-
-def _check_relevance_bar(r: Report, where: str, bar, base) -> None:
+def check_relevance_bar(r: Report, where: str, threshold) -> None:
     """Can this policy's relevance bar fail at all, for the pinned embedder?
 
     This used to be one blanket WARN that every bar predated the embedder. That
@@ -242,18 +243,19 @@ def _check_relevance_bar(r: Report, where: str, bar, base) -> None:
     against the floor `tools.calibrate` measured: below it, the relevance half of
     groundedness passes nearly every hit, which is T21's shape -- a gate that cannot fail.
     """
-    if not isinstance(bar, int | float):
+    if not isinstance(threshold, int | float):
         return                      # absent: inherits _default, checked there
-    floor = base.MEASURED_COSINE_FLOOR
-    if bar < floor:
+    floor, embedder = platform_base.MEASURED_COSINE_FLOOR, platform_base.EMBEDDING_MODEL
+    if threshold < floor:
         r.add(WARN, f"relevance bar: {where}",
-              f"{bar} is below {base.EMBEDDING_MODEL}'s measured cosine floor (~{floor}), "
+              f"{threshold} is below {embedder}'s measured cosine floor (~{floor}), "
               f"so it rejects almost nothing -- measure with `python -m tools.calibrate`")
     else:
-        r.add(OK, f"relevance bar: {where}", f"{bar} (at or above the measured floor {floor})")
+        r.add(OK, f"relevance bar: {where}",
+              f"{threshold} (at or above the measured floor {floor})")
 
 
-def _check_indexes(r: Report) -> None:
+def check_indexes(r: Report) -> None:
     """Is each tenant's retrieval index built, and by the embedder that will query it?
 
     The indexed retriever returns `[]` for an unbuilt namespace, which is honest
@@ -266,9 +268,6 @@ def _check_indexes(r: Report) -> None:
     different embedder is a FAIL, because the retriever refuses it and every
     run for that tenant would raise.
     """
-    import config
-    from adapters.platforms import base
-    from adapters.vector_index_local import MANIFEST, _root, namespace_dirname
 
     retriever = os.getenv("RETRIEVER", "indexed")
     if retriever != "indexed":
@@ -278,13 +277,13 @@ def _check_indexes(r: Report) -> None:
         store = config.get_tenant_store()
         tenants = store.tenants()
     except CONFIG_ERRORS:
-        return                      # _check_tenants already reported it
+        return                      # check_tenants already reported it
     root = _root()
     for t in tenants:
         try:
             repo = (store.policy(t, "code_review").get("codebase") or {}).get("repo")
         except CONFIG_ERRORS:
-            continue                    # reported by _check_tenants
+            continue                    # reported by check_tenants
         if not repo:
             continue
         path = root / namespace_dirname(repo) / MANIFEST
@@ -293,10 +292,10 @@ def _check_indexes(r: Report) -> None:
                   f"not built -- every run escalates. python -m tools.ingest --tenant {t}")
             continue
         m = json.loads(path.read_text(encoding="utf-8"))
-        if m.get("model") != base.EMBEDDING_MODEL:
+        if m.get("model") != platform_base.EMBEDDING_MODEL:
             r.add(FAIL, f"index: {t}",
                   f"built by {m.get('model')!r}, but EMBEDDING_MODEL is "
-                  f"{base.EMBEDDING_MODEL!r}: the retriever will refuse it. Re-ingest.")
+                  f"{platform_base.EMBEDDING_MODEL!r}: the retriever will refuse it. Re-ingest.")
             continue
         r.add(OK, f"index: {t}",
               f"{m.get('chunks')} chunks / {m.get('files')} files, built {m.get('built_at')}")
@@ -312,22 +311,14 @@ OFFLINE_GATE_ENV = {"LLM_PROVIDER": "stub", "RETRIEVER": "hybrid", "RERANKER": "
                     "CRA_ACTIVITY": "null"}
 
 
-def _check_gates(r: Report) -> None:
+def check_gates(r: Report) -> None:
     """The safety gates must pass on every machine, with no model server."""
-    import contextlib
-    import io
-
     saved = {k: os.environ.get(k) for k in OFFLINE_GATE_ENV}
     os.environ.update(OFFLINE_GATE_ENV)
     try:
-        try:
-            from eval.harness import run
-        except (ImportError, SyntaxError) as e:
-            r.add(FAIL, "safety gate suite", f"import failed: {type(e).__name__}: {e}")
-            return
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            code = run()
+            code = run_gate_suite()
     finally:
         for k, v in saved.items():
             if v is None:
@@ -349,15 +340,15 @@ def run_checks(*, gates: bool = True) -> Report:
     the gate suite prints and takes ~0.5 s, which is wrong inside a request.
     """
     r = Report()
-    _check_host(r)
-    models = _check_platform(r)
-    _check_local_stack(r)
+    check_host(r)
+    models = check_platform(r)
+    check_local_stack(r)
     if models:
-        _check_lmstudio(r, models)
-    _check_tenants(r)
-    _check_indexes(r)
+        check_lmstudio(r, models)
+    check_tenants(r)
+    check_indexes(r)
     if gates:
-        _check_gates(r)
+        check_gates(r)
     return r
 
 

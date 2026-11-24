@@ -109,7 +109,7 @@ def _traced(name, fn, tracer):
             if not returned:
                 _record_raise(state, name, alog, started, sys.exception())
         ms = (time.perf_counter() - started) * 1000
-        detail = live.summarize(name, out)
+        detail = live.summarize(out)
         _live(state, name, "ok", duration_ms=ms, detail=detail)
         for key in ("route", "decision", "severity", "findings", "files"):
             if key in detail:

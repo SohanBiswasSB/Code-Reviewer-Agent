@@ -29,39 +29,49 @@ from eval.tasks import (
     RETRIEVAL_GATE_TASKS,
     SURFACE_PIPELINE_TASKS,
 )
-from nodes._render import FENCE_MARKERS
 from nodes.classify import classify
 from nodes.execute import execute
 from nodes.generate_diagnosis import _parse_diagnosis
 from nodes.independent_review import independent_review
 from nodes.normalize_evidence import normalize_evidence
+from ports.interfaces import FENCE_MARKERS, ActionSink
 from schemas.diagnosis import SEVERITIES, Citation, Diagnosis
 from surfaces.code_review import CodeReviewSurface
 from tools import github_client
 
-# MODEL-FREE, DECLARED rather than inherited. The LLM nodes now resolve their
-# model from config like every other provider, so "no llm argument" no longer
-# silently means "use a stub" -- without this line the gate suite would try to
-# reach LM Studio and stop being runnable on a bare machine.
-#
-# `setdefault`, not assignment: an operator who deliberately exports
-# LLM_PROVIDER=lmstudio to see how a real model fares against the gates can still
-# do so. The DEFAULT is offline because that is what makes this suite a
-# regression suite -- byte-identical on the Mac and the CUDA box, 100% bar, no
-# GPU required.
-#
-# Safe below the imports because `config.get_llm` reads LLM_PROVIDER when it is
-# CALLED, not when config is imported.
-os.environ.setdefault("LLM_PROVIDER", "stub")
-# Same reasoning for retrieval (T10): the default retriever is now the real
-# namespaced index, which needs an embedder server. The gates run on the demo
-# corpus, whose scores are known, so every gate stays byte-identical.
-os.environ.setdefault("RETRIEVER", "hybrid")
-# The gate tasks inject faults on purpose (a refused label, a failed post). Their
-# activity records would read as REAL errors in the admin panel, so the suite
-# records none unless an operator deliberately points it somewhere.
-os.environ.setdefault("CRA_ACTIVITY", "null")
-os.environ.setdefault("RERANKER", "none")      # model-free: no cross-encoder load
+
+def offline_defaults() -> None:
+    """Make the suite model-free unless the operator deliberately chose otherwise.
+
+    Called by `run()`, NOT at import: setting these at import time leaked into
+    every importer's environment -- a test module that imported the harness
+    switched the activity log off for every test collected after it, and
+    `app.doctor` (which the API imports) would have defaulted the server's
+    LLM provider to the stub.
+    """
+    # MODEL-FREE, DECLARED rather than inherited. The LLM nodes now resolve their
+    # model from config like every other provider, so "no llm argument" no longer
+    # silently means "use a stub" -- without this line the gate suite would try to
+    # reach LM Studio and stop being runnable on a bare machine.
+    #
+    # `setdefault`, not assignment: an operator who deliberately exports
+    # LLM_PROVIDER=lmstudio to see how a real model fares against the gates can still
+    # do so. The DEFAULT is offline because that is what makes this suite a
+    # regression suite -- byte-identical on the Mac and the CUDA box, 100% bar, no
+    # GPU required.
+    #
+    # Safe to set late because `config.get_llm` reads LLM_PROVIDER when it is
+    # CALLED, not when config is imported.
+    # Same reasoning for retrieval (T10): the default retriever is now the real
+    # namespaced index, which needs an embedder server. The gates run on the demo
+    # corpus, whose scores are known, so every gate stays byte-identical.
+    # The gate tasks inject faults on purpose (a refused label, a failed post). Their
+    # activity records would read as REAL errors in the admin panel, so the suite
+    # records none unless an operator deliberately points it somewhere.
+    os.environ.setdefault("LLM_PROVIDER", "stub")
+    os.environ.setdefault("RETRIEVER", "hybrid")
+    os.environ.setdefault("CRA_ACTIVITY", "null")
+    os.environ.setdefault("RERANKER", "none")      # model-free: no cross-encoder load
 
 
 # The gate tasks build synthetic states to exercise the FOUR BOOLEANS in
@@ -211,15 +221,19 @@ def gate_parse(rec: Recorder) -> None:
 
 
 # ── execute(): the permission guard and verbatim posting ─────────────────────
-class FakeSink:
-    """No test may ever reach a real provider. The suite must never post."""
+class FakeSink(ActionSink):
+    """No test may ever reach a real provider. The suite must never post.
+
+    Declared as an `ActionSink` so its `emit` is checked as the port's override:
+    `context` is run metadata (tenant, run_id) that `execute` passes to
+    per-tenant sinks, accepted and ignored here -- this fake asserts on the
+    ACTION, which is the thing that must survive approval verbatim.
+    """
 
     def __init__(self):
+        """Start with no recorded calls."""
         self.calls = []
 
-    # `context` is run metadata (tenant, run_id) that `execute` passes to
-    # per-tenant sinks. Accepted and ignored -- this fake asserts on the ACTION,
-    # which is the thing that must survive approval verbatim.
     def emit(self, action, *, target, identity=None, context=None):
         """Record the call and echo the action back in a sink's result shape."""
         self.calls.append((action, target, identity))
@@ -287,6 +301,7 @@ def run() -> int:
     rather than exiting. A duplicate check name fails the suite outright: two
     checks reporting as one would let a failure hide behind a pass.
     """
+    offline_defaults()
     rec = Recorder()
     for section in SECTIONS:
         section(rec)

@@ -22,7 +22,7 @@ conda activate CodeReviewerAgent      # env name on both machines
 python check.py                       # RUN THIS. The local equivalent of CI, which is
                                       # commented out -- this is the only gate now.
                                       # --all to continue past a failure, --list to see steps
-python -m app.doctor                  # can this machine run the agent? (stdlib only)
+python -m app.doctor                  # can this machine run the agent?
 python -m app.doctor --json
 python -m eval.harness                # safety-gate suite — no model, no server
 python -m eval.demo_multitenant       # same diagnosis, two codebases, different policies
@@ -33,6 +33,7 @@ pytest                                # unit tests (testpaths=tests, -q --strict
 pytest -m needs_server                # deselected by default; needs a live LM Studio
 LANGGRAPH_STRICT_MSGPACK=true pytest  # CI also runs this — see "Checkpoint serialisation"
 ruff check .                          # line-length 100, target py311
+pylint --jobs=0 .                     # defaults + .pylintrc; check.py blocks on it
 
 uvicorn app.main:app --reload         # the API
 python -m jobs.daily_log_review --date YYYY-MM-DD
@@ -58,14 +59,22 @@ python -m tools.calibrate --tenant merger_app entailment                      # 
 
 Requirements files are layered: `requirements.txt` (graph + API) ⊂
 `requirements-local.txt` (adds LM Studio client + in-process reranker, pulls torch)
-⊂ `requirements-dev.txt` (adds pytest + ruff). `eval/harness.py` needs only
+⊂ `requirements-dev.txt` (adds pytest, ruff and pinned pylint). `eval/harness.py` needs only
 `requirements.txt` — no model and no server.
 
-**Imports go at the top of the module** (user's rule, 2026-11-16). A function-level
-import is allowed only where module level would be genuinely circular — e.g. an
-adapter importing `config`, since `config` imports `adapters`; say so in a comment.
-Libraries an adapter imports are therefore required by everything that imports
-`config`, so they belong in `requirements.txt`, not `-local`.
+**Imports go at the top of the module** (user's rule, 2026-11-16). There are no
+function-level imports left (2026-11-24): pylint's import-outside-toplevel and
+cyclic-import are part of the gate. The cycles were broken at their cause, not
+hidden in a function:
+- an adapter that needs another configured provider (the retriever needs the
+  embedder, the LLM client the tracer) calls `registry.provider(kind)`; `config`
+  registers its getters with `@registry.provides(kind)`, looked up by name at
+  call time so a monkeypatched `config.get_x` still reaches the adapter;
+- the fence markers live in `ports/interfaces.py` (config no longer imports a node);
+- the regex guard lives in `redaction.py` (app.activity no longer imports `adapters`).
+Libraries an adapter imports are required by everything that imports `config`, so
+they belong in `requirements.txt`, not `-local` -- `psycopg-binary` included, since
+`app/deps.py` imports the Postgres saver at module level.
 
 ## Architecture
 
@@ -97,7 +106,7 @@ Layered so the core never imports a provider:
 | `eval/` | Safety-gate regression suite, 100% bar, `pass^k`. Model-free. |
 | `tests/` | Unit tests. Deliberately separate from the gate suite. |
 | `adapters/platforms/` | The **only** code that knows about hardware. |
-| `app/doctor.py` | Environment check. Stdlib at module level; the checks that import `config` need `requirements.txt` installed. |
+| `app/doctor.py` | Environment check (`check_*` per concern; `run_checks` is the one list). Imports at the top like everything else: without `requirements.txt` it fails at import. |
 
 ## Invariants — do not weaken these
 
@@ -326,7 +335,12 @@ within pylint's default limits (5 args, 15 locals, 12 branches, 50 statements, 6
 returns -- split into helpers, never raise a limit); the HTTP API is typed, strict
 (undeclared field = 400), enveloped `{success, message, data}` and under /v1.
 `python -m tools.standards_audit` runs the reviewer's own rules
-(tools/prepush/standards/) over the whole tree; check.py blocks on it.
+(tools/prepush/standards/) over the whole tree; check.py blocks on it. **pylint
+4.0.9 is a blocking check.py step too** (2026-11-24): every default on, tests
+included (fixtures as `@pytest.fixture(name="x") def fixture_x`, `usefixtures`
+for side-effect fixtures, a docstring per test). `.pylintrc` sets ONE value,
+min-public-methods=1, for the one-method ports (the user's choice; stateful
+classes became @dataclass and one-function classes became functions).
 
 **Activity log** (`app/activity.py`, port of the Masterclass `Logger` design):
 `ActivityLogger(...)` spans and `log_event(...)`; secrets/PII masked on the way in;

@@ -43,6 +43,13 @@ def _fallback_query(ev) -> str:
 PER_QUERY_K = 3
 MAX_HITS = 8
 
+# The keys a model's finding may set: anything else it emits is dropped before
+# `Finding(...)` sees it. Computed once, from the schema's own field list, into
+# a plain frozenset: pylint infers `Finding.model_fields` as pydantic's
+# metaclass PROPERTY object and so reported `k in Finding.model_fields` as an
+# unsupported membership test. Iterating it gives the same field names.
+_FINDING_FIELDS = frozenset(Finding.model_fields)
+
 
 def merge_hits(results: list[list[dict]], limit: int = MAX_HITS) -> list[dict]:
     """Several queries' hits -> one list: round-robin by rank, deduplicated.
@@ -202,7 +209,7 @@ def _parse_diagnosis(raw: str, hits: list[dict]) -> Diagnosis:
             citations.append(Citation(snippet_id=cid, score=by_id.get(cid, 0.0)))
 
     findings = [
-        Finding(**{k: v for k, v in f.items() if k in Finding.model_fields})
+        Finding(**{k: v for k, v in f.items() if k in _FINDING_FIELDS})
         for f in data.get("findings", []) if isinstance(f, dict)
     ]
 

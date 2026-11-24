@@ -48,6 +48,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+import registry
 from registry import adapter
 from tools.bm25 import BM25
 from tools.bm25 import FILE as BM25_FILE
@@ -149,30 +150,27 @@ class IndexedRetriever:
 
     @property
     def embedder(self):
-        """The injected embedder, else `config.get_embedder()` on first use.
+        """The injected embedder, else the configured one (`config.get_embedder`) on first use.
 
-        `import config` stays inside the function because it is CIRCULAR at module
-        level: config imports `adapters`, which imports this module.
+        Reached through `registry.provider`, not `import config`: config imports
+        `adapters`, which imports this module, so importing config here was a cycle.
         """
         if self._embedder is None:
-            import config
-            self._embedder = config.get_embedder()
+            self._embedder = registry.provider("embedder")
         return self._embedder
 
     @property
     def index(self):
-        """The injected index, else `config.get_index()` (local imports: circular)."""
+        """The injected index, else the configured one (`config.get_index`)."""
         if self._index is None:
-            import config
-            self._index = config.get_index()
+            self._index = registry.provider("index")
         return self._index
 
     @property
     def reranker(self):
         """The injected reranker (None = off), else `config.get_reranker()`."""
         if self._reranker is _UNSET:
-            import config
-            self._reranker = config.get_reranker()
+            self._reranker = registry.provider("reranker")
         return self._reranker
 
     def _check_space(self, namespace: str, stats: dict) -> None:
@@ -203,8 +201,10 @@ class IndexedRetriever:
         if cached and cached[0] == fingerprint:
             return cached[1], cached[2]
         metas = self.index.documents(namespace)
-        sidecar = getattr(self.index, "sidecar", None)
-        path = sidecar(namespace, BM25_FILE) if callable(sidecar) else None
+        # An index without a `sidecar` location (it is not in the VectorIndex port)
+        # has no saved copy: BM25 is built in memory and nothing is saved.
+        path = (self.index.sidecar(namespace, BM25_FILE) if hasattr(self.index, "sidecar")
+                else None)
         bm25 = BM25.load(path, fingerprint) if path else None
         if bm25 is None or bm25.n != len(metas):
             bm25 = BM25.for_chunks(metas)

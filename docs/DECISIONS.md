@@ -235,7 +235,7 @@ a broken requirements file cannot mask a weakened gate.
 `sentence-transformers` pulls ~2.5 GB of torch that neither the graph nor the API
 needs, so it stays out of core.
 
-**`doctor` uses stdlib only** and distinguishes FAIL (cannot run; non-zero exit
+**`doctor` used stdlib only** (until 2026-11-24, when imports-at-top reached it) and distinguishes FAIL (cannot run; non-zero exit
 so CI can gate) from WARN (degraded but usable). A diagnostic that needs the
 dependency it is diagnosing is not much of a diagnostic.
 

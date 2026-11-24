@@ -99,4 +99,3 @@ class StudioPlatform(base.PlatformBase):
             "flash_attention": True,
             "memory": accounting,
         }
-

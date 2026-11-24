@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass, field
 
 import pytest
 
+import config
 from adapters.platforms import base
 from adapters.retriever_indexed import IndexedRetriever
 from adapters.vector_index_local import (
@@ -21,20 +23,24 @@ from adapters.vector_index_local import (
     fingerprint,
     namespace_dirname,
 )
+from app import doctor
+from tools import ingest
 from tools.bm25 import BM25, tokenize
 from tools.chunking import MAX_CHARS, chunk_python, chunk_text
 
 DIMS = 64
 
 
+@dataclass
 class FakeEmbedder:
     """Hashed bag-of-words. Deterministic, shared-words -> higher cosine."""
 
-    def __init__(self, model: str = base.EMBEDDING_MODEL, dims: int = DIMS):
-        self.model, self.dims = model, dims
-        self.calls: list[tuple[str, int]] = []
+    model: str = base.EMBEDDING_MODEL
+    dims: int = DIMS
+    calls: list[tuple[str, int]] = field(default_factory=list)
 
     def embed(self, texts, *, kind="passage"):
+        """One vector per text, recording (kind, batch size) so tests see how it was called."""
         self.calls.append((kind, len(texts)))
         out = []
         for t in texts:
@@ -70,13 +76,15 @@ CORPUS = [
 ]
 
 
-@pytest.fixture
-def index(tmp_path):
+@pytest.fixture(name="index")
+def fixture_index(tmp_path):
+    """An empty on-disk index under this test's tmp dir."""
     return LocalVectorIndex(root=tmp_path / "index")
 
 
-@pytest.fixture
-def built(index):
+@pytest.fixture(name="built")
+def fixture_built(index):
+    """The index with CORPUS built into `org/backend`."""
     _build(index, "org/backend", [dict(c) for c in CORPUS])
     return index
 
@@ -102,6 +110,7 @@ class Thing:
 
 
 def test_python_is_chunked_by_definition_not_by_window():
+    """A chunk is one definition (decorator included), so a citation names a real unit."""
     chunks = chunk_python(SRC, "app/views.py")
     by_name = {c["name"]: c for c in chunks}
     assert {"view", "Thing", "<module>"} <= set(by_name)
@@ -114,6 +123,7 @@ def test_python_is_chunked_by_definition_not_by_window():
 
 
 def test_chunk_ids_are_stable_and_change_with_content():
+    """Ids are content hashes: a rebuild keeps them, an edit to the body replaces them."""
     a = chunk_python(SRC, "app/views.py")
     b = chunk_python(SRC, "app/views.py")
     assert [c["id"] for c in a] == [c["id"] for c in b]
@@ -133,16 +143,20 @@ def test_an_oversized_function_with_no_blank_lines_is_still_split():
 
 
 def test_unparseable_python_falls_back_to_text_chunks():
+    """A file the parser rejects is still indexed, as text, rather than dropped."""
     chunks = chunk_python("def broken(:\n" + "this is not python at all " * 5, "app/bad.py")
     assert chunks and all(c["kind"] == "text" for c in chunks)
 
 
 def test_text_chunks_skip_fragments():
-    assert chunk_text("tiny", "README.md") == []
+    """A fragment too short to be evidence is not indexed at all."""
+    chunks = chunk_text("tiny", "README.md")
+    assert isinstance(chunks, list) and not chunks
 
 
 # ── BM25 ─────────────────────────────────────────────────────────────────────
 def test_tokenize_splits_identifiers_so_prose_reaches_code():
+    """camelCase and snake_case split into words, so "user token" matches getUserToken."""
     assert tokenize("getUserToken") == ["get", "user", "token"]
     assert tokenize("get_user_token") == ["get", "user", "token"]
 
@@ -157,12 +171,14 @@ def test_bm25_weights_rare_terms_above_common_ones():
 
 
 def test_bm25_returns_nothing_for_unrelated_queries():
+    """No shared term means no hit -- never a zero-score filler result."""
     bm = BM25([tokenize(c["text"]) for c in CORPUS])
     assert bm.top("zzzz qqqq", 3) == []
 
 
 # ── the index ────────────────────────────────────────────────────────────────
 def test_search_returns_real_cosines(built):
+    """Scores are bounded cosines that rank the on-topic chunk first, not rank artefacts."""
     q = FakeEmbedder().embed(["oauth callback state missing"])[0]
     hits = built.search("org/backend", q, 4)
     assert hits[0]["id"] == "oauth"
@@ -180,6 +196,7 @@ def test_namespaces_are_isolated(index):
 
 
 def test_namespace_mapping_refuses_global_and_traversal():
+    """G1: no un-namespaced index, no path escape, and no two repos sharing a directory."""
     with pytest.raises(ValueError, match="G1"):
         namespace_dirname("")
     with pytest.raises(ValueError, match="unsafe"):
@@ -190,6 +207,7 @@ def test_namespace_mapping_refuses_global_and_traversal():
 
 
 def test_unbuilt_namespace_searches_empty(index):
+    """An unbuilt namespace is empty and says so, rather than raising or borrowing another."""
     assert index.search("org/never-built", [1.0] * DIMS, 5) == []
     assert index.stats("org/never-built")["built"] is False
 
@@ -201,11 +219,13 @@ def test_upsert_replaces_the_whole_namespace(built):
 
 
 def test_duplicate_chunk_ids_are_refused(index):
+    """Two chunks with one id would make a citation ambiguous, so the build refuses."""
     with pytest.raises(ValueError, match="duplicate"):
         _build(index, "org/x", [_chunk("same", "one text"), _chunk("same", "two text")])
 
 
 def test_manifest_records_the_embedder_and_a_stable_fingerprint(built):
+    """The manifest is what lets the retriever and doctor refuse an index from another embedder."""
     s = built.stats("org/backend")
     assert s["built"] and s["model"] == base.EMBEDDING_MODEL and s["dims"] == DIMS
     assert s["chunks"] == len(CORPUS) and s["files"] == len(CORPUS)
@@ -213,12 +233,14 @@ def test_manifest_records_the_embedder_and_a_stable_fingerprint(built):
 
 
 def test_similarities_omit_unknown_ids(built):
+    """An id the index does not hold gets no score, never a default one the gate could pass."""
     q = FakeEmbedder().embed(["oauth"])[0]
     sims = built.similarities("org/backend", q, ["oauth", "no-such-id"])
     assert set(sims) == {"oauth"}
 
 
-def test_a_misaligned_index_is_refused_not_misread(built, tmp_path):
+def test_a_misaligned_index_is_refused_not_misread(built):
+    """Rows and vectors out of step would pair text with another chunk's cosine: refuse."""
     d = built.root / namespace_dirname("org/backend")
     lines = (d / "chunks.jsonl").read_text().splitlines()
     (d / "chunks.jsonl").write_text("\n".join(lines[:-1]) + "\n")
@@ -227,22 +249,25 @@ def test_a_misaligned_index_is_refused_not_misread(built, tmp_path):
 
 
 def test_wrong_width_query_is_refused(built):
+    """A query vector of another width is a different embedder, not something to pad."""
     with pytest.raises(ValueError, match="dims"):
         built.search("org/backend", [1.0] * (DIMS + 1), 3)
 
 
 # ── the indexed retriever ────────────────────────────────────────────────────
 def test_retriever_refuses_without_a_namespace(built):
+    """G1: the indexed retriever has no global corpus to fall back to."""
     r = IndexedRetriever(embedder=FakeEmbedder(), index=built)
     with pytest.raises(ValueError, match="G1"):
         r.retrieve("oauth", k=3, namespace=None)
 
 
 def test_retriever_returns_nothing_for_an_unbuilt_namespace(index):
+    """Nothing to search returns [] (escalates via groundedness) without embedding the query."""
     emb = FakeEmbedder()
     r = IndexedRetriever(embedder=emb, index=index)
     assert r.retrieve("oauth", k=3, namespace="org/unbuilt") == []
-    assert emb.calls == [], "no point embedding a query with nothing to search"
+    assert not emb.calls, "no point embedding a query with nothing to search"
 
 
 def test_retriever_refuses_an_index_from_a_different_embedder(index):
@@ -254,6 +279,7 @@ def test_retriever_refuses_an_index_from_a_different_embedder(index):
 
 
 def test_retriever_embeds_the_query_as_a_query(built):
+    """Asymmetric embedders prefix queries and passages differently; the kind must be right."""
     emb = FakeEmbedder()
     IndexedRetriever(embedder=emb, index=built).retrieve("oauth", k=2, namespace="org/backend")
     assert emb.calls == [("query", 1)]
@@ -294,6 +320,8 @@ def test_a_keyword_only_hit_still_carries_a_real_cosine(index):
     _build(index, "org/x", filler + [target])
 
     class DenseBlind(LocalVectorIndex):
+        """An index whose dense search can never return the target chunk."""
+
         def search(self, namespace, vector, k=8):
             return [h for h in super().search(namespace, vector, 1000) if h["id"] != "rare"][:k]
 
@@ -314,12 +342,14 @@ def test_bm25_reaches_a_chunk_through_its_path(built):
 
 
 def test_hits_carry_location_for_the_approver(built):
+    """A hit names its file and definition, so the human can check the citation."""
     r = IndexedRetriever(embedder=FakeEmbedder(), index=built)
     hit = r.retrieve("oauth callback", k=1, namespace="org/backend")[0]
     assert hit["path"] == "app/auth/oauth.py" and hit["name"] == "oauth_callback"
 
 
 def test_the_bm25_cache_follows_a_rebuild(built):
+    """A retriever that cached BM25 before a rebuild must not keep searching the old corpus."""
     r = IndexedRetriever(embedder=FakeEmbedder(), index=built)
     r.retrieve("oauth", k=1, namespace="org/backend")
     _build(built, "org/backend", [_chunk("new", "brand new quokka module")])
@@ -329,15 +359,15 @@ def test_the_bm25_cache_follows_a_rebuild(built):
 # ── wiring ───────────────────────────────────────────────────────────────────
 def test_the_default_retriever_is_the_real_index(monkeypatch):
     """The demo used to be the default, which refused every codebase tenant."""
-    import config
     monkeypatch.delenv("RETRIEVER", raising=False)
     assert isinstance(config.get_retriever(), IndexedRetriever)
     assert config.registered()["selected"]["retriever"] == "indexed"
 
 
 # ── ingest ───────────────────────────────────────────────────────────────────
-@pytest.fixture
-def repo(tmp_path):
+@pytest.fixture(name="repo")
+def fixture_repo(tmp_path):
+    """A tiny checkout: app code with a secret, plus tests/ and test/ trees ingest must skip."""
     root = tmp_path / "repo"
     (root / "app").mkdir(parents=True)
     (root / "app" / "auth.py").write_text(
@@ -358,13 +388,12 @@ def repo(tmp_path):
 
 
 def _ingest(monkeypatch, repo, embedder):
-    import config
-    from tools import ingest
     monkeypatch.setattr(config, "get_embedder", lambda: embedder)
     return ingest.build("milesone", None, dry_run=False, limit=None, root_override=str(repo))
 
 
-def test_ingest_builds_the_tenants_namespace(monkeypatch, repo, capsys):
+def test_ingest_builds_the_tenants_namespace(monkeypatch, repo):
+    """Ingest fills the tenant's own namespace, embeds passages, and leaves tests out."""
     emb = FakeEmbedder()
     assert _ingest(monkeypatch, repo, emb) == 0
     idx = LocalVectorIndex()
@@ -377,6 +406,7 @@ def test_ingest_builds_the_tenants_namespace(monkeypatch, repo, capsys):
 
 
 def test_ingest_reports_live_progress(monkeypatch, repo, tmp_path):
+    """The monitor's live snapshot ends `finished` with every chunk counted."""
     _ingest(monkeypatch, repo, FakeEmbedder())
     snap = json.loads((tmp_path / "var" / "live" / "ingest-milesone.json").read_text())
     assert snap["status"] == "finished" and snap["done"] == snap["total"] > 0
@@ -384,7 +414,11 @@ def test_ingest_reports_live_progress(monkeypatch, repo, tmp_path):
 
 
 def test_a_failed_ingest_is_marked_failed(monkeypatch, repo, tmp_path):
+    """A crash mid-ingest leaves `error` in the live snapshot, not a stale `running`."""
+    @dataclass
     class Broken(FakeEmbedder):
+        """An embedder whose server went away."""
+
         def embed(self, texts, *, kind="passage"):
             raise ConnectionError("embedder went away")
     with pytest.raises(ConnectionError):
@@ -403,6 +437,7 @@ def test_ingest_redacts_before_anything_is_stored(monkeypatch, repo):
 
 
 def test_ingest_is_idempotent(monkeypatch, repo):
+    """Re-ingesting unchanged code yields the same fingerprint, so nothing looks stale."""
     _ingest(monkeypatch, repo, FakeEmbedder())
     first = LocalVectorIndex().stats("MilesEducation-Tech/Miles-USP-Backend")["fingerprint"]
     _ingest(monkeypatch, repo, FakeEmbedder())
@@ -411,59 +446,61 @@ def test_ingest_is_idempotent(monkeypatch, repo):
 
 
 def test_ingest_embeds_location_but_stores_the_source(monkeypatch, repo):
-    from tools.ingest import embed_text
+    """The path prefix helps the embedding; the stored text stays the source a citation quotes."""
     chunk = {"path": "app/auth.py", "name": "oauth_callback", "text": "def oauth_callback(): ..."}
-    assert embed_text(chunk).startswith("app/auth.py :: oauth_callback\n")
+    assert ingest.embed_text(chunk).startswith("app/auth.py :: oauth_callback\n")
     _ingest(monkeypatch, repo, FakeEmbedder())
     docs = LocalVectorIndex().documents("MilesEducation-Tech/Miles-USP-Backend")
     assert docs and all(not d["text"].startswith("app/") for d in docs)
 
 
 def test_tenant_excludes_match_a_file_or_any_parent_directory():
-    from tools.ingest import excluded
+    """An exclude naming a directory keeps everything under it out of the index."""
     pats = ["Misc/User Migration Dump*", "*.secret.md"]
-    assert excluded("Misc/User Migration Dump V3/_full_user_report.txt", pats)
-    assert excluded("docs/keys.secret.md", pats)
-    assert not excluded("Misc/Documentation/runbook.md", pats)
-    assert not excluded("app/views.py", [])
+    assert ingest.excluded("Misc/User Migration Dump V3/_full_user_report.txt", pats)
+    assert ingest.excluded("docs/keys.secret.md", pats)
+    assert not ingest.excluded("Misc/Documentation/runbook.md", pats)
+    assert not ingest.excluded("app/views.py", [])
 
 
-def test_ingest_honours_the_tenants_index_exclude(monkeypatch, repo, tmp_path):
-    from tools.ingest import iter_files
+def test_ingest_honours_the_tenants_index_exclude(repo):
+    """The tenant's `index_exclude` reaches the file walk, not only the matcher."""
     (repo / "dumps").mkdir()
     (repo / "dumps" / "users.txt").write_text("user records " * 20)
-    rels = {p.relative_to(repo).as_posix() for p in iter_files(repo, None, ["dumps"])}
+    rels = {p.relative_to(repo).as_posix() for p in ingest.iter_files(repo, None, ["dumps"])}
     assert rels == {"app/auth.py"}
 
 
-def test_ingest_refuses_a_tenant_without_a_codebase(monkeypatch, repo):
-    from tools import ingest
+def test_ingest_refuses_a_tenant_without_a_codebase(repo):
+    """G1: a tenant with no codebase has no namespace to build, so ingest refuses."""
     with pytest.raises(SystemExit, match="G1"):
         ingest.build("_default", None, dry_run=True, limit=None, root_override=str(repo))
 
 
 # ── doctor ───────────────────────────────────────────────────────────────────
 def _doctor_index_lines(monkeypatch):
-    from app import doctor
     monkeypatch.setenv("RETRIEVER", "indexed")
     r = doctor.Report()
-    doctor._check_indexes(r)
+    doctor.check_indexes(r)
     return {check: (status, detail) for status, check, detail in r.lines}
 
 
 def test_doctor_warns_about_an_unbuilt_index(monkeypatch):
+    """An unbuilt index means every run escalates; doctor says so and names the fix."""
     lines = _doctor_index_lines(monkeypatch)
     assert lines["index: milesone"][0] == "WARN"
     assert "tools.ingest --tenant milesone" in lines["index: milesone"][1]
 
 
 def test_doctor_fails_an_index_built_by_another_embedder(monkeypatch):
+    """The retriever would refuse it on every run, so doctor reports FAIL, not WARN."""
     _build(LocalVectorIndex(), "MilesEducation-Tech/Miles-USP-Backend",
            [dict(c) for c in CORPUS], model="retired-embedder")
     assert _doctor_index_lines(monkeypatch)["index: milesone"][0] == "FAIL"
 
 
 def test_doctor_reports_a_good_index(monkeypatch):
+    """A matching index is OK and reports its size."""
     _build(LocalVectorIndex(), "MilesEducation-Tech/Miles-USP-Backend", [dict(c) for c in CORPUS])
     status, detail = _doctor_index_lines(monkeypatch)["index: milesone"]
     assert status == "OK  " and f"{len(CORPUS)} chunks" in detail
@@ -471,6 +508,7 @@ def test_doctor_reports_a_good_index(monkeypatch):
 
 # ── saved BM25 statistics ─────────────────────────────────────────────────────
 def test_saved_bm25_round_trips_and_refuses_another_index(tmp_path):
+    """Saved statistics load only for the fingerprint they were computed from."""
     docs = [tokenize(t) for t in ["self oauth callback", "self return none", "getUserToken"]]
     bm = BM25(docs)
     path = tmp_path / "bm25.npz"

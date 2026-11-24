@@ -671,7 +671,7 @@ function glance(r){
  return box;
 }
 /* Why it ended this way and who does what next. Built server-side from the audit
-   record (app/monitor.py::guidance), so the reason quoted is the gate's own. */
+   record (app/monitor_guidance.py::guidance), so the reason quoted is the gate's own. */
 function guidePanel(r,openTab){
  const g=r.guidance||{},why=g.why||[],steps=g.steps||[];if(!why.length&&!steps.length)return null;
  const box=el("div","guide");

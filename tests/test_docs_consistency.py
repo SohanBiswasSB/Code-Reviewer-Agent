@@ -19,12 +19,15 @@ sentence has to be updated too. (T24)
 """
 from __future__ import annotations
 
-import io
 import re
-from contextlib import redirect_stdout
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+from adapters.platforms import base
+from schemas.diagnosis import ReviewResult
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -49,15 +52,18 @@ def test_gate_count_in_the_docs_matches_what_the_harness_actually_runs():
     The harness is the source of truth here rather than a constant, because the
     number it prints is the number of checks it really performed -- which is the
     claim the doc is making on its behalf.
+
+    Run as its own process, exactly as check.py runs it, and never imported into
+    this one: importing `eval.harness` `setdefault`s CRA_ACTIVITY=null (and the
+    offline providers) into os.environ for the rest of the session. Imported at
+    module level, that happens at collection, before test_activity.py runs, and
+    its activity records silently vanish (measured 2026-11-24).
     """
-    from eval import harness
+    proc = subprocess.run([sys.executable, "-m", "eval.harness"], cwd=ROOT,
+                          capture_output=True, text=True, check=False)
+    rc, out = proc.returncode, proc.stdout
 
-    buf = io.StringIO()
-    with redirect_stdout(buf):
-        rc = harness.run()
-    out = buf.getvalue()
-
-    assert rc == 0, f"the gate suite must pass; harness returned {rc}\n{out}"
+    assert rc == 0, f"the gate suite must pass; harness returned {rc}\n{out}\n{proc.stderr}"
     m = re.search(r"ALL (\d+) GATES PASS", out)
     assert m, f"could not find the gate total in harness output:\n{out[-500:]}"
     actual = int(m.group(1))
@@ -73,8 +79,6 @@ def test_gate_count_in_the_docs_matches_what_the_harness_actually_runs():
 
 def test_the_gate_has_four_booleans_and_the_docs_say_so():
     """`ReviewResult`'s `*_ok` fields ARE the gate. The docs must agree."""
-    from schemas.diagnosis import ReviewResult
-
     booleans = sorted(
         name for name, field in ReviewResult.model_fields.items()
         if name.endswith("_ok") and field.annotation is bool
@@ -120,8 +124,6 @@ def test_no_current_state_doc_claims_a_stale_embedding_dimensionality(rel):
     """
     if not (ROOT / rel).exists():
         pytest.skip(f"{rel} not present")
-
-    from adapters.platforms import base
 
     pinned = base.EMBEDDING_DIMS
     text = _read(rel)

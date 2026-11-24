@@ -55,11 +55,12 @@ import threading
 import time
 import traceback
 import uuid
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields, replace
 from datetime import UTC, datetime, timedelta
 
 from datadir import data_dir
 from errors import WRITE_ERRORS
+from redaction import RegexInputGuard
 
 SERVICE_NAME = "code-reviewer-agent"
 DEBUG, INFO, WARNING, ERROR = "DEBUG", "INFO", "WARNING", "ERROR"
@@ -128,16 +129,16 @@ def sanitize(value, key: str | None = None):
 def _redact_text(text: str | None) -> str | None:
     """Error messages and tracebacks through the InputGuard's secret/PII patterns.
 
-    Function-level import: `adapters` imports the LLM adapter, which imports this
-    module, so importing the guard at module level here would be circular.
+    The guard comes from `redaction`, not `adapters.input_guard`: importing under
+    `adapters` runs its __init__, which imports the LLM adapter, which imports
+    this module -- the cycle that used to keep this import inside the function.
     """
     if not text:
         return text
     try:
-        from adapters.input_guard import RegexInputGuard
         cleaned, _ = RegexInputGuard().sanitize(text)
         return cleaned
-    except (ImportError, *WRITE_ERRORS):
+    except WRITE_ERRORS:
         return text
 
 
@@ -216,8 +217,39 @@ class SpanContext:
     run_id: str | None = None
 
 
+@dataclass
+class SpanOutcome:
+    """How an operation ended, filled in as it runs: its status, whether it
+    failed and with what, and the status code it answered with.
+
+    Grouped because these change together and are read together -- `record_error`
+    sets `is_error`, `status` and `error` in one step, and `complete` writes all
+    four onto the record. `status` is `started` until the span completes.
+    """
+
+    status: str = "started"
+    is_error: bool = False
+    error: dict = field(default_factory=dict)
+    response_status_code: int | None = None
+
+
+@dataclass
+class _SpanTiming:
+    """When the span started (wall clock for the record, perf counter for the
+    duration) and whether it has already been written -- `complete` is idempotent."""
+
+    start_wall: datetime | None = None
+    start: float = 0.0
+    done: bool = False
+
+
 class ActivityLogger:
-    """One operation, timed, with its outcome. Sync context manager or explicit API."""
+    """One operation, timed, with its outcome. Sync context manager or explicit API.
+
+    State is grouped: `context` (where the operation sits, correlation id
+    resolved), `outcome` (how it ended) and the private timing, beside the
+    operation's id, type, name and masked metadata.
+    """
 
     def __init__(self, operation_type: str = "other", operation_name: str = "", *,
                  metadata: dict | None = None, **context):
@@ -232,20 +264,29 @@ class ActivityLogger:
         ctx = SpanContext(**context)
         self.log_id = str(uuid.uuid4())
         self.operation_type, self.operation_name = operation_type, operation_name
-        self.target_service, self.parent_log_id = ctx.target_service, ctx.parent_log_id
-        self.correlation_id = ctx.correlation_id or current_correlation() or str(uuid.uuid4())
-        self.tenant, self.run_id = ctx.tenant, ctx.run_id
+        self.context = replace(ctx, correlation_id=ctx.correlation_id or current_correlation()
+                               or str(uuid.uuid4()))
         self.metadata: dict = sanitize(dict(metadata or {}))
-        self.status, self.is_error = "started", False
-        self.error: dict = {}
-        self.response_status_code: int | None = None
-        self._start_wall: datetime | None = None
-        self._start = 0.0
-        self._done = False
+        self.outcome = SpanOutcome()
+        self._timing = _SpanTiming()
+
+    @property
+    def status(self) -> str:
+        """`started`, then `success` / `failure` / whatever `complete` was given."""
+        return self.outcome.status
+
+    @status.setter
+    def status(self, value: str) -> None:
+        self.outcome.status = value
+
+    @property
+    def is_error(self) -> bool:
+        """True once `record_error` has marked the operation failed."""
+        return self.outcome.is_error
 
     def start(self) -> ActivityLogger:
         """Begin timing. Called by `__enter__`."""
-        self._start_wall, self._start = datetime.now(UTC), time.perf_counter()
+        self._timing.start_wall, self._timing.start = datetime.now(UTC), time.perf_counter()
         return self
 
     def add_metadata(self, key: str, value) -> None:
@@ -256,17 +297,17 @@ class ActivityLogger:
 
     def set_response(self, status_code: int | None = None) -> None:
         """Record a status code (HTTP, or an exit code for a job)."""
-        self.response_status_code = status_code
+        self.outcome.response_status_code = status_code
 
     def record_error(self, exception: BaseException | None = None, message: str | None = None,
                      failure_source: str = "internal") -> None:
         """Mark this operation failed, with the exception's type, message and traceback."""
-        self.is_error, self.status = True, "failure"
+        self.outcome.is_error, self.outcome.status = True, "failure"
         tb = None
         if exception is not None:
             tb = "".join(traceback.format_exception(type(exception), exception,
                                                     exception.__traceback__))
-        self.error = {
+        self.outcome.error = {
             "error_message": _redact_text(message or (str(exception) if exception else None)),
             "exception_type": type(exception).__name__ if exception else None,
             "traceback": _redact_text(tb),
@@ -287,16 +328,16 @@ class ActivityLogger:
 
     def complete(self, status: str | None = None) -> None:
         """Finish and write the record. Idempotent."""
-        if self._done:
+        if self._timing.done:
             return
-        self._done = True
-        if self._start_wall is None:
+        self._timing.done = True
+        if self._timing.start_wall is None:
             self.start()
         if status:
-            self.status = status
-        elif self.status == "started":
-            self.status = "success"
-        duration = round((time.perf_counter() - self._start) * 1000, 2)
+            self.outcome.status = status
+        elif self.outcome.status == "started":
+            self.outcome.status = "success"
+        duration = round((time.perf_counter() - self._timing.start) * 1000, 2)
         sev = self.severity(duration)
         emit({
             "severity": sev,
@@ -304,22 +345,22 @@ class ActivityLogger:
             "message": f"{self.operation_type}: {self.operation_name} - {self.status}",
             "log_type": LOG_TYPE,
             "log_id": self.log_id,
-            "correlation_id": self.correlation_id,
-            "parent_log_id": self.parent_log_id,
+            "correlation_id": self.context.correlation_id,
+            "parent_log_id": self.context.parent_log_id,
             "service_name": SERVICE_NAME,
             "service_env": os.getenv("CRA_ENV"),
-            "start_time": self._start_wall.isoformat(),
+            "start_time": self._timing.start_wall.isoformat(),
             "end_time": datetime.now(UTC).isoformat(),
             "duration_ms": duration,
             "operation_type": self.operation_type,
             "operation_name": self.operation_name,
             "status": self.status,
-            "target_service": self.target_service,
-            "tenant": self.tenant,
-            "run_id": self.run_id,
-            "response_status_code": self.response_status_code,
-            "is_error": self.is_error,
-            **self.error,
+            "target_service": self.context.target_service,
+            "tenant": self.context.tenant,
+            "run_id": self.context.run_id,
+            "response_status_code": self.outcome.response_status_code,
+            "is_error": self.outcome.is_error,
+            **self.outcome.error,
             "metadata": self.metadata or None,
         })
 
@@ -454,8 +495,9 @@ def _facets(rows: list[dict]) -> dict:
     """Counts by severity and by operation type, over the unfiltered window."""
     facets = {"severity": {}, "operation_type": {}}
     for r in rows:
-        for f in facets:
-            facets[f][r.get(f, "?")] = facets[f].get(r.get(f, "?"), 0) + 1
+        for facet, counts in facets.items():
+            value = r.get(facet, "?")
+            counts[value] = counts.get(value, 0) + 1
     return facets
 
 

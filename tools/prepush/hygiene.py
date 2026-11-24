@@ -51,7 +51,7 @@ def check_suppressions(change: Change, config: dict) -> list[dict]:
             continue
         new = pragma_counts(change.content_for(path) or "")
         old = pragma_counts(change.base_for(path))
-        grown = {k: new[k] - old.get(k, 0) for k in new if new[k] > old.get(k, 0)}
+        grown = {k: n - old.get(k, 0) for k, n in new.items() if n > old.get(k, 0)}
         for key, n in grown.items():
             # Locate it: the first added line whose own comment adds to this key.
             line = next((ln for ln, text in change.added(path)
@@ -142,11 +142,13 @@ def _module_candidates(path: str, line: str) -> list[str]:
     return out
 
 
-def check_untracked_imports(change: Change, config: dict) -> list[dict]:
+def check_untracked_imports(change: Change, _config: dict) -> list[dict]:
     """Global: an added import that resolves to a file present but NOT in git.
 
     The commit would import a module the repository does not contain, so it works
-    on the author's machine and fails everywhere else.
+    on the author's machine and fails everywhere else. `_config` is unread: the
+    check is the same for every codebase, but `run_all` calls every check as
+    `check(change, config)`, positionally.
     """
     if not change.readable:
         return [result("untracked_import", -1, SKIP, "no readable revision")]
@@ -164,4 +166,3 @@ def check_untracked_imports(change: Change, config: dict) -> list[dict]:
                     break
     return report("untracked_import", -1, flags, "untracked imports",
                   "every added import resolves to a tracked file")
-

@@ -195,24 +195,24 @@ def _groundedness(cited_ids: list[str], retrieved: dict[str, float],
     """Every cited id was really retrieved AND its RETRIEVER score clears the bar.
     The score is the retriever's own, never the model's (T17). `min_score` is one
     bar, or a bar per id when hits carry different kinds of score (T13)."""
-    def bar(cid: str) -> float:
+    def threshold(cid: str) -> float:
         """This id's bar; an id with no per-hit bar gets 1.0, the strictest."""
         return min_score.get(cid, 1.0) if isinstance(min_score, dict) else min_score
 
     ok = bool(cited_ids) and all(
-        cid in retrieved and retrieved[cid] >= bar(cid) for cid in cited_ids)
+        cid in retrieved and retrieved[cid] >= threshold(cid) for cid in cited_ids)
     if ok:
         return True, []
     if not cited_ids:
         return False, ["no citations"]
     failures = []
     phantom = [c for c in cited_ids if c not in retrieved]
-    weak = [c for c in cited_ids if c in retrieved and retrieved[c] < bar(c)]
+    weak = [c for c in cited_ids if c in retrieved and retrieved[c] < threshold(c)]
     if phantom:
         failures.append(f"citations not retrieved: {phantom}")
     if weak:
         failures.append("citations below relevance: "
-                        + ", ".join(f"{c} ({retrieved[c]} < {bar(c)})" for c in weak))
+                        + ", ".join(f"{c} ({retrieved[c]} < {threshold(c)})" for c in weak))
     return False, failures
 
 
@@ -234,7 +234,7 @@ def _allowlisted(kind: str, value: str, allowlist: list[str]) -> tuple[bool, lis
 
     One shape for `risk_ok` (the severity) and `permission_ok` (the action type),
     which differ only in what is looked up. The failure reads
-    "<kind> '<value>' not in [...]" -- the form app/monitor.py parses, so the
+    "<kind> '<value>' not in [...]" -- the form app/monitor_guidance.py parses, so the
     wording is fixed here rather than repeated per boolean.
     """
     if value in allowlist:

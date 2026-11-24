@@ -4,13 +4,20 @@ The gate suite lives in eval/harness.py and stays runnable on its own (no pytest
 no dependencies). This wrapper exists so `pytest` alone is enough to catch a
 weakened gate — the two entry points must never disagree.
 """
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 import config
 import registry
 
+ROOT = Path(__file__).resolve().parent.parent
+
 
 def test_expected_plugs_are_registered():
+    """Every shipped adapter and surface registers itself on import (the plug works)."""
     reg = registry.list_registered()
     assert "lmstudio" in reg["adapters"]["llm"]
     assert "hybrid" in reg["adapters"]["retriever"]
@@ -27,6 +34,7 @@ def test_unknown_adapter_error_lists_what_is_available():
 
 
 def test_unknown_surface_error_lists_what_is_available():
+    """A typo'd surface names itself as missing, rather than a bare KeyError."""
     with pytest.raises(KeyError, match="no surface"):
         registry.get_surface("pr_risk_score")
 
@@ -68,7 +76,17 @@ def test_retriever_returns_scores():
 
 
 def test_safety_gates_all_pass():
-    """The 100%-forever bar. A single failure here is a critical regression."""
-    from eval.harness import run
+    """The 100%-forever bar. A single failure here is a critical regression.
 
-    assert run() == 0, "a safety gate weakened -- see the output above"
+    Run as `python -m eval.harness` in its own process -- the exact command
+    check.py runs -- rather than imported. Importing the harness `setdefault`s
+    LLM_PROVIDER, RETRIEVER, RERANKER and CRA_ACTIVITY in os.environ for the rest
+    of the process, so a top-of-file import would switch the activity log to
+    `null` for every test collected after this module, and tests of the default
+    would quietly be testing the stub. The child inherits this session's offline
+    env (conftest's LLM_PROVIDER=stub, RETRIEVER=hybrid, the tmp CRA_DATA_DIR).
+    """
+    proc = subprocess.run([sys.executable, "-m", "eval.harness"], cwd=ROOT,
+                          capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, (
+        f"a safety gate weakened:\n{proc.stdout}\n{proc.stderr}")

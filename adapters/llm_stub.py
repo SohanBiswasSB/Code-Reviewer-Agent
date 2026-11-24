@@ -31,6 +31,7 @@ import json
 import re
 
 from adapters.llm_lmstudio import _temperature_for
+from ports.interfaces import LLM
 from registry import adapter
 
 # `nodes/_render.py::render_snippets` emits "- id=<id> relevance=<score> :: <text>".
@@ -42,8 +43,13 @@ _SNIPPET = re.compile(r"^- id=(?P<id>\S+) relevance=(?P<score>\S+) :: (?P<text>.
 
 
 @adapter("llm", "stub")
-class StubLLM:
-    """Offline stand-in. `LLM_PROVIDER=stub`, or injected directly in a test."""
+class StubLLM(LLM):
+    """Offline stand-in. `LLM_PROVIDER=stub`, or injected directly in a test.
+
+    Declared as an `LLM`: `complete` keeps the port's signature, and the
+    `system` prompt it never reads is the port's parameter -- the stub keys
+    everything off the user prompt, which is where the evidence is rendered.
+    """
 
     def __init__(self, model: str = "stub", role: str | None = None):
         """Same constructor shape as the real adapters, so `config.get_llm` builds it."""

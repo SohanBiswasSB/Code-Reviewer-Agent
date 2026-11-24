@@ -66,7 +66,12 @@ class LMStudioEmbedder:
         self._api_key = api_key()
         self._client = None
 
-    def _get_client(self):
+    def client(self):
+        """The OpenAI-compatible client, built on first use with its retries OFF.
+
+        Public so a test can check what it was built with (key, retries) on the
+        real client rather than on the arguments a fake recorded.
+        """
         if self._client is None:
             # Same policy as the LLM adapter: one visible retry loop, not two.
             self._client = OpenAI(base_url=self.base_url, api_key=self._api_key,
@@ -98,7 +103,7 @@ class LMStudioEmbedder:
                               metadata={"model": self.model, "texts": len(texts)}) \
             if kind == "query" else None
         with span or _NoSpan():
-            resp = with_retry(lambda: self._get_client().embeddings.create(
+            resp = with_retry(lambda: self.client().embeddings.create(
                 model=self.model, input=[prefix + t for t in texts]),
                 what="embedding", role="embedding", model=self.model)
         vectors = [d.embedding for d in resp.data]

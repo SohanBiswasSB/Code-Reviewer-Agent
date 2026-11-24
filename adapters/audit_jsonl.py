@@ -20,6 +20,7 @@ import threading
 from datetime import UTC, datetime
 
 from datadir import data_dir as _data_dir
+from ports.interfaces import AuditSink
 from registry import adapter
 
 SCHEMA_VERSION = 1
@@ -89,12 +90,13 @@ class JsonlAuditSink:
 
 
 @adapter("audit", "null")
-class NullAuditSink:
+class NullAuditSink(AuditSink):
     """Records nothing. For tests that are not about auditing.
 
     Registered rather than improvised so that turning auditing off is an explicit
     CRA_AUDIT=null, visible in `config.registered()`, instead of a silent no-op
-    somebody has to discover by reading code.
+    somebody has to discover by reading code. Declared as an `AuditSink`, so the
+    `run` it discards is the port's parameter, not an oversight.
     """
 
     def record(self, run: dict) -> None:

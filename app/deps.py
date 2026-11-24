@@ -22,9 +22,14 @@ from __future__ import annotations
 
 import os
 import warnings
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
+
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from app.activity import WARNING, log_event
+from app.graph import build_graph
+from app.state import checkpoint_serde
 
 _MEMORY_WARNING = (
     "No DATABASE_URL: using MemorySaver. Paused approvals will NOT survive a "
@@ -39,9 +44,6 @@ def _memory_saver():
     warning cannot be skipped by one of its two callers (`open_checkpointer`
     without DATABASE_URL, and `get_graph`).
     """
-    from langgraph.checkpoint.memory import MemorySaver
-
-    from app.state import checkpoint_serde
     # Kept as a Python warning (a developer running this sees it) AND recorded:
     # "approvals are not durable" is exactly what an operator must find later.
     warnings.warn(_MEMORY_WARNING, RuntimeWarning, stacklevel=3)
@@ -64,32 +66,33 @@ async def open_checkpointer():
         yield _memory_saver()
         return
 
-    try:
-        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-    except ModuleNotFoundError:
-        raise ModuleNotFoundError(
-            "DATABASE_URL is set but langgraph-checkpoint-postgres is not "
-            "installed (pip install -r requirements.txt). Refusing to fall "
-            "back to in-memory: that would silently make paused approvals "
-            "non-durable."
-        ) from None
-
-    from app.state import checkpoint_serde
-
-    async with AsyncPostgresSaver.from_conn_string(
-        url, serde=checkpoint_serde()
-    ) as saver:
+    # The Postgres saver is imported at module level (imports-at-top, 2026-11-24):
+    # a missing driver now fails at import, loudly, instead of on the first run
+    # with DATABASE_URL set -- and there is no in-memory fallback to drift into.
+    # psycopg-binary is in requirements.txt so libpq is never a system install.
+    #
+    # The exit stack owns the saver's close: entering the library's context
+    # manager through it means the connection is released when THIS generator is
+    # closed, whichever way it ends.
+    async with AsyncExitStack() as stack:
+        saver = await stack.enter_async_context(
+            AsyncPostgresSaver.from_conn_string(url, serde=checkpoint_serde()))
         await saver.setup()          # idempotent; creates the checkpoint tables
         yield saver
 
 
-_GRAPH = None
+# The process-wide graph, in a one-slot dict rather than a rebound module
+# global: `set_graph` and `get_graph` mutate the slot, so neither needs a
+# `global` statement, and the one place the graph lives stays this module.
+_GRAPH: dict[str, object] = {}
 
 
 def set_graph(graph) -> None:
-    """Install the process-wide graph. Called once from the app lifespan."""
-    global _GRAPH
-    _GRAPH = graph
+    """Install the process-wide graph (None uninstalls it). Called from the app lifespan."""
+    if graph is None:
+        _GRAPH.pop("graph", None)
+    else:
+        _GRAPH["graph"] = graph
 
 
 def get_graph():
@@ -100,9 +103,9 @@ def get_graph():
     resuming. (The multi-worker version of this needs Postgres, not memory —
     which is the same reason `DATABASE_URL` exists.)
     """
-    global _GRAPH
-    if _GRAPH is not None:
-        return _GRAPH
+    graph = _GRAPH.get("graph")
+    if graph is not None:
+        return graph
     if os.getenv("DATABASE_URL"):
         raise RuntimeError(
             "DATABASE_URL is set, so the graph must be built inside "
@@ -111,6 +114,5 @@ def get_graph():
             "lifespan in app/main.py does this; call set_graph() if you are "
             "embedding the graph elsewhere."
         )
-    from app.graph import build_graph
-    _GRAPH = build_graph(checkpointer=_memory_saver())
-    return _GRAPH
+    graph = _GRAPH["graph"] = build_graph(checkpointer=_memory_saver())
+    return graph

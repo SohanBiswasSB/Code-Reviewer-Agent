@@ -49,7 +49,7 @@ from nodes._render import render_checklist
 RULE = "-" * 72
 
 
-def _defaults(root: str | None) -> None:
+def apply_defaults(root: str | None) -> None:
     """Point code_review at the local checkout and a local sink, unless overridden."""
     os.environ.setdefault("CRA_SOURCE_CODE_REVIEW", "git_local")
     os.environ.setdefault("CRA_SINK_CODE_REVIEW", "review_file")
@@ -180,7 +180,7 @@ def main() -> None:
                     help="staged (default) | <rev> | <a>..<b> | <a>...<b>")
     ap.add_argument("--root", help="where the tenant's repo lives on THIS machine")
     args = ap.parse_args()
-    _defaults(args.root)
+    apply_defaults(args.root)
     activity.capture_library_logs()
     raise SystemExit(run(args.tenant, args.target))
 

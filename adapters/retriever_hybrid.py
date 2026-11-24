@@ -37,4 +37,3 @@ class HybridRetriever:
         return [{"id": s.id, "text": s.text, "score": s.relevance,
                  "fusion": s.fusion, "rank": s.rank}
                 for s in retrieval.retrieve(query, k)]
-

@@ -6,13 +6,18 @@ issue normaliser, which reads `raw["html_url"]` — so this surface raised KeyEr
 on any real run. It was unreachable in three separate ways (see `action_type`
 below and docs/DATA_STORAGE.md); this closes one of them.
 """
+from ports.interfaces import Surface
 from registry import surface
 from schemas.evidence import LogWindow
 
 
 @surface("log_review")
-class LogReviewSurface:
-    """Advisory only. This surface never comments, labels, or mutates anything."""
+class LogReviewSurface(Surface):
+    """Advisory only. This surface never comments, labels, or mutates anything.
+
+    Declared as a `Surface`, so `normalize`'s `policy` and `action_type`'s
+    `diagnosis` -- both unused here, by design -- are the port's parameters.
+    """
 
     name = "log_review"
     source_name, sink_name = "s3logs", "report"

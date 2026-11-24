@@ -17,6 +17,8 @@ def _diff(path: str, line: str) -> str:
 
 
 def test_one_query_per_file_code_first_and_data_never():
+    """Each changed file gets its own query (code, then config, then docs; data never),
+    carrying its own diff while the budget lasts, with the whole-change query last."""
     files = ["docs/notes.md", "exports/users.csv", "app/views.py", "config/app.yaml",
              "app/models.py"]
     ev = {"title": "t", "files": files,
@@ -31,12 +33,15 @@ def test_one_query_per_file_code_first_and_data_never():
 
 
 def test_the_number_of_file_queries_is_capped():
+    """A huge change cannot fan out into unbounded retrieval: MAX_QUERY_FILES, plus one."""
     files = [f"app/m{i}.py" for i in range(MAX_QUERY_FILES + 4)]
     queries = CodeReviewSurface().build_queries({"files": files, "diff": ""})
     assert len(queries) == MAX_QUERY_FILES + 1
 
 
 def test_merge_is_round_robin_dedups_and_keeps_the_best_score():
+    """Every file's best hit lands before any file's second, a shared chunk keeps its best
+    retriever score (the gate reads it), and the merged list is capped for the judge."""
     a = [{"id": "a1", "score": 0.8}, {"id": "shared", "score": 0.4}, {"id": "a3", "score": 0.3}]
     b = [{"id": "shared", "score": 0.7}, {"id": "b2", "score": 0.6}]
     merged = merge_hits([a, b])
@@ -47,6 +52,7 @@ def test_merge_is_round_robin_dedups_and_keeps_the_best_score():
 
 
 def test_the_prompt_clips_a_long_passage_but_the_hit_keeps_its_text():
+    """Clipping is for the judge's context only; entailment must still read the whole passage."""
     hit = {"id": "big", "score": 0.9, "text": "x" * (PROMPT_SNIPPET_CHARS * 3)}
     rendered = render_snippets([hit])
     assert len(rendered) < PROMPT_SNIPPET_CHARS + 200 and "cut for the prompt" in rendered

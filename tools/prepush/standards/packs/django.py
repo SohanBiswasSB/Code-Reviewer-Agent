@@ -28,6 +28,7 @@ from tools.prepush.standards.engine import (
     Concern,
     Finding,
     Pack,
+    defs,
     dotted,
     keyword,
     own_nodes,
@@ -135,10 +136,7 @@ def _atomic_withs(fn: ast.AST):
 def atomic_in_async(tree: ast.Module, _path: str, _cfg: dict) -> list[Finding]:
     """transaction.atomic used inside an async def, as a block or a decorator."""
     out = []
-    for node, scope in scoped(tree):
-        if not isinstance(node, ast.AsyncFunctionDef):
-            continue
-        name = f"{scope}.{node.name}".lstrip(".")
+    for node, name in defs(tree, (ast.AsyncFunctionDef,)):
         hits = [d.lineno for d in node.decorator_list if dotted(d).endswith("atomic")]
         hits += [w.lineno for w in _atomic_withs(node)]
         out += [Finding(f"{name}:atomic", ln, f"{name} is async but uses transaction.atomic, "
@@ -164,10 +162,7 @@ def _side_effects(block: ast.AST):
 def transaction_rules(tree: ast.Module, path: str, cfg: dict) -> list[Finding]:
     """Side effects inside atomic, and read-modify-write counters that get saved."""
     out = atomic_in_async(tree, path, cfg)
-    for node, scope in scoped(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        name = f"{scope}.{node.name}".lstrip(".")
+    for node, name in defs(tree):
         for block in _atomic_withs(node):
             out += [Finding(f"{name}:effect:{call}", c.lineno,
                             f"{name} calls {call} inside transaction.atomic: fire it from "
@@ -193,11 +188,9 @@ def _counter_writes(fn: ast.AST, name: str) -> list[Finding]:
 def signal_params(tree: ast.Module, _path: str, _cfg: dict) -> list[Finding]:
     """@receiver handlers that name parameters they never read."""
     out = []
-    for node, scope in scoped(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or not any(
-                dotted(d).endswith("receiver") for d in node.decorator_list):
+    for node, name in defs(tree):
+        if not any(dotted(d).endswith("receiver") for d in node.decorator_list):
             continue
-        name = f"{scope}.{node.name}".lstrip(".")
         read = {n.id for n in own_nodes(node) if isinstance(n, ast.Name)}
         named = [a.arg for a in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs)]
         out += [Finding(f"{name}:{p}", node.lineno,
