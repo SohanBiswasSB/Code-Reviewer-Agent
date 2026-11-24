@@ -5,7 +5,9 @@
     `JSONResponse(content={...})`, or a dict a FastAPI route returns. Vendor
     webhooks are excused: by path (`standards.envelope_exempt`) or, since they
     usually share views.py with ordinary views, by name
-    (`standards.envelope_exempt_scopes`, default *Webhook*).
+    (`standards.envelope_exempt_scopes`, default *Webhook*). A project whose
+    renderer adds the envelope to every response declares it
+    (`standards.envelope_renderer`) and is not checked.
   * response_keys  -- response keys are snake_case. A legacy key is renamed, not
     aliased.
   * api_versioning -- the route, its name and its view class carry v1/V1 (Django
@@ -92,7 +94,16 @@ def _const_keys(d: ast.Dict) -> list[str]:
 
 
 def envelope(tree: ast.Module, path: str, cfg: dict) -> list[Finding]:
-    """Response bodies that are not exactly the {success, message, data} envelope."""
+    """Response bodies that are not exactly the {success, message, data} envelope.
+
+    Not checked at all when the project wraps every response itself
+    (`standards.envelope_renderer` names the class that does). The Merger repo
+    sets `utils.renderers.EnvelopeJSONRenderer` as DRF's default renderer, so its
+    views return the bare payload BY DESIGN; flagging `Response({"state_boards":
+    ...})` there (fa929b1, 2026-11-24) asked for the envelope twice.
+    """
+    if cfg.get("envelope_renderer"):
+        return []
     if any(fnmatch.fnmatch(path, p) for p in cfg.get("envelope_exempt") or []):
         return []
     out = []

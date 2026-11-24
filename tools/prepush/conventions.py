@@ -134,8 +134,7 @@ def check_postman(change: Change, config: dict) -> list[dict]:
                           f"API code changed ({api_change[0]}"
                           + (f" +{len(api_change) - 1}" if len(api_change) > 1 else "")
                           + ") but the Postman collection was not regenerated", collection))
-    inputs = pm.get("generator_inputs", [])
-    if collection in change.files and inputs and not any(f in change.files for f in inputs):
+    if collection in change.files and _looks_hand_edited(change, collection, pm, api_change):
         out.append(result("postman_hand_edit", 2, FLAG,
                           "collection changed with no generator change -- never hand-edit it",
                           collection))
@@ -153,6 +152,38 @@ def check_postman(change: Change, config: dict) -> list[dict]:
             out.append(result("postman_env_secret", 2, FLAG,
                               f"secret value(s) not blank: {leaked}", env))
     return out or [result("postman", 2, PASS, "no API change, or collection regenerated cleanly")]
+
+
+def _looks_hand_edited(change: Change, collection: str, pm: dict, api_change: list[str]) -> bool:
+    """True only when nothing that FEEDS the generator changed.
+
+    The collection is generated from the URLconf, the views' docstrings and the
+    sample files, so a regenerated collection legitimately changes whenever any of
+    those do. The first version knew only the generator script itself, and flagged
+    every honest regeneration on the Merger repo (2026-11-24): 079f52f, whose only
+    collection change was the "GENERATED ... on <date>" stamp, and d454df7, whose
+    example bodies changed because their `API Samples/*.json` changed in the same
+    commit. A change that touches only the stamp is a no-op regeneration.
+    `generator_inputs` entries are `_match` patterns (a trailing `/` is a folder).
+    """
+    inputs = pm.get("generator_inputs", [])
+    if not inputs or api_change or any(_match(f, inputs) for f in change.files):
+        return False
+    stamp = pm.get("generated_stamp")
+    added = [text for _, text in change.added(collection)]
+    return not (stamp and added and all(re.search(stamp, t) for t in added))
+
+
+def _request_exempt(name: str, exempt: set[str]) -> bool:
+    """A request is exempt when its name IS a listed entry or ends with one.
+
+    The collection names a request "<SURFACE> <METHOD> <route-name>" ("UNIVERSAL
+    GET faqs-v1"), while the policy lists route names ("faqs-v1"), as the repo's
+    own ritual does. Exact match only meant the list never matched anything, and
+    six requests the repo deliberately exempts were flagged on every review that
+    touched the collection (2026-11-24).
+    """
+    return name in exempt or any(name.endswith(f" {e}") for e in exempt)
 
 
 def _postman_structure(change: Change, collection: str, pm: dict) -> list[dict]:
@@ -179,7 +210,7 @@ def _postman_structure(change: Change, collection: str, pm: dict) -> list[dict]:
             if not str(req.get("description") or "").strip():
                 bad.append(f"{name}: no description")
             fails = any(int(r.get("code") or 0) >= 300 for r in responses)
-            if name not in no_fail_ok and not fails:
+            if not fails and not _request_exempt(name, no_fail_ok):
                 bad.append(f"{name}: no failure example")
     walk(data.get("item"))
     return _cap("postman_structure", 2,
@@ -328,7 +359,7 @@ def check_commit_message(change: Change, config: dict) -> list[dict]:
     return out or [result("commit_message", 5, PASS, f"{where} follows the house format")]
 
 
-def check_not_checkable(change: Change, config: dict) -> list[dict]:
+def check_not_checkable(_change: Change, config: dict) -> list[dict]:
     """What the ritual runs that a reviewer cannot: said out loud, never implied."""
     return [result(name, step, SKIP, why) for name, step, why in config.get("not_checkable", [])]
 

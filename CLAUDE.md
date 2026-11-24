@@ -44,6 +44,13 @@ python -m app.review --tenant merger_app --root ~/Dev/<repo>              # stag
 python -m app.review --tenant merger_app --root ~/Dev/<repo> --target main...HEAD
 python -m app.monitor                 # live view: http://127.0.0.1:8765 (localhost only)
 
+# The user's MANUAL pre-push check (no git hook; git is only read, never fetched).
+# Reviews <precheck_base>...HEAD, remembers findings in var/ledger/<tenant>.json, and
+# says what is new / still open / fixed; only computed checks decide "clear to push",
+# model findings are advice (T32). --root is remembered after the first run.
+python -m app.precheck --tenant merger_app --root ~/Dev/<repo>
+python -m app.precheck --tenant merger_app --dismiss <id> --reason "..."   # / --undismiss / --list
+
 # Measure the gate thresholds (prints a suggestion; never edits a policy):
 python -m tools.calibrate --tenant merger_app --root ~/Dev/<repo> relevance   # needs LM Studio
 python -m tools.calibrate --tenant merger_app entailment                      # from audit records

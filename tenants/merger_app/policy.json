@@ -102,7 +102,8 @@
           "serializers.py"
         ],
         "generator_inputs": [
-          "Miscellaneous/Scripts/generate_postman_collection.py"
+          "Miscellaneous/Scripts/generate_postman_collection.py",
+          "Miscellaneous/Documentation/API Samples/"
         ],
         "no_failure_example_ok": [
           "faqs-v1",
@@ -111,7 +112,9 @@
           "app-maintainance-v1",
           "web-maintainance-v1",
           "referral-course-options-v1"
-        ]
+        ],
+        "generated_stamp": "GENERATED from the live URLconf by",
+        "_generator_inputs": "Everything the generator reads besides the URLconf and views (which `when` already covers): the script and the API Samples folder (2026-11-24)."
       },
       "tracker": {
         "dir": "Miscellaneous/SB_JIRA_Tickets",
@@ -127,6 +130,26 @@
           "Nikhil Krishnan": {
             "base": "NK_JIRA_TASKS_SINCE_August_07_2026",
             "prefix": "MMO-"
+          },
+          "me-Usaid": {
+            "base": "UK_JIRA_SEP",
+            "prefix": "MMC-"
+          },
+          "Nikhil krishnan": {
+            "base": "NK_JIRA_TASKS_SINCE_August_07_2026",
+            "prefix": "MMO-"
+          },
+          "cg-nikhilkrishnan": {
+            "base": "NK_JIRA_TASKS_SINCE_August_07_2026",
+            "prefix": "MMO-"
+          },
+          "me-jishnukm": {
+            "base": "JK_JIRA_TASKS_SINCE_November_20_2026",
+            "prefix": "JK-"
+          },
+          "Prajisha P": {
+            "base": "PP_JIRA_TASKS_SINCE_November_19_2026",
+            "prefix": "PP-"
           }
         },
         "header": [
@@ -148,7 +171,8 @@
           "**Time Taken**",
           "**Variance**",
           "**VERIFIED.**"
-        ]
+        ],
+        "_owners": "Keyed by git author name, so one person with two git identities has two entries (me-Usaid, cg-nikhilkrishnan). Danish and Shivam Sharma keep no tracker in Miscellaneous/SB_JIRA_Tickets as of 2026-11-24, so their commits are flagged."
       },
       "commit_message": {
         "file": "commit_message.txt",
@@ -195,8 +219,12 @@
         "frameworks": [
           "django"
         ],
-        "require_uuid_pk": true
+        "require_uuid_pk": true,
+        "envelope_renderer": "utils.renderers.EnvelopeJSONRenderer",
+        "_envelope_renderer": "MilesPlatform/settings.py sets it as DRF's DEFAULT_RENDERER_CLASSES: every response is wrapped in {success, message, data} by the renderer, so views return the bare payload. api_envelope is therefore not checked here."
       }
-    }
+    },
+    "precheck_base": "origin/ID_AWS_Ongoing_Development_Branch",
+    "_precheck_base": "app/precheck.py compares <this>...HEAD: everything the branch would push. As of the user's last `git fetch`; precheck never fetches."
   }
 }
